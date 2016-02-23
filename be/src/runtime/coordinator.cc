@@ -394,7 +394,11 @@ Status Coordinator::Exec(QuerySchedule& schedule,
   // execution has been initiated, otherwise we might try to cancel fragment
   // execution at Impala daemons where it hasn't even started
   lock_guard<mutex> l(lock_);
-
+  
+  //first init num_scan_ranges  
+  const string& str = Substitute("Query $0", PrintId(query_id_));
+  progress_ = ProgressUpdater(str, schedule.num_scan_ranges());
+  
   // we run the root fragment ourselves if it is unpartitioned
   bool has_coordinator_fragment =
       request.fragments[0].partition.type == TPartitionType::UNPARTITIONED;
@@ -456,10 +460,7 @@ Status Coordinator::Exec(QuerySchedule& schedule,
   }
 
   PrintFragmentInstanceInfo();
-
-  const string& str = Substitute("Query $0", PrintId(query_id_));
-  progress_ = ProgressUpdater(str, schedule.num_scan_ranges());
-
+  
   return Status::OK();
 }
 
