@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_RUNTIME_LIB_CACHE_H
@@ -50,10 +53,10 @@ class RuntimeState;
 /// TODO:
 /// - refresh libraries
 /// - better cached module management.
+struct LibCacheEntry;
+
 class LibCache {
  public:
-  struct LibCacheEntry;
-
   enum LibType {
     TYPE_SO,      // Shared object
     TYPE_IR,      // IR intermediate
@@ -117,7 +120,7 @@ class LibCache {
 
   /// The number of libs that have been copied from HDFS to the local FS.
   /// This is appended to the local fs path to remove collisions.
-  AtomicInt<int64_t> num_libs_copied_;
+  AtomicInt64 num_libs_copied_;
 
   /// Protects lib_cache_. For lock ordering, this lock must always be taken before
   /// the per entry lock.

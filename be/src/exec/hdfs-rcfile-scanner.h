@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_HDFS_RCFILE_SCANNER_H
@@ -230,10 +233,10 @@ class Tuple;
 /// A scanner for reading RCFiles into tuples.
 class HdfsRCFileScanner : public BaseSequenceScanner {
  public:
-  HdfsRCFileScanner(HdfsScanNode* scan_node, RuntimeState* state);
+  HdfsRCFileScanner(HdfsScanNodeBase* scan_node, RuntimeState* state);
   virtual ~HdfsRCFileScanner();
 
-  virtual Status Prepare(ScannerContext* context);
+  virtual Status Open(ScannerContext* context);
 
   void DebugString(int indentation_level, std::stringstream* out) const;
 
@@ -317,8 +320,8 @@ class HdfsRCFileScanner : public BaseSequenceScanner {
   ///   ReadColumnBuffers
   Status ReadRowGroup();
 
-  /// Reset state for a new row group
-  void ResetRowGroup();
+  /// Reset state for a new row group. Can fail if allocating the next row batch fails.
+  Status ResetRowGroup();
 
   /// Move to next row. Calls NextField on each column that we are reading.
   /// Modifies:

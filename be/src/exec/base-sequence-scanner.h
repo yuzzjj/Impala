@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_BASE_SEQUENCE_SCANNER_H
@@ -35,11 +38,11 @@ class ScannerContext;
 class BaseSequenceScanner : public HdfsScanner {
  public:
   /// Issue the initial ranges for all sequence container files.
-  static Status IssueInitialRanges(HdfsScanNode* scan_node,
+  static Status IssueInitialRanges(HdfsScanNodeBase* scan_node,
                                    const std::vector<HdfsFileDesc*>& files);
 
-  virtual Status Prepare(ScannerContext* context);
-  virtual void Close();
+  virtual Status Open(ScannerContext* context);
+  virtual void Close(RowBatch* row_batch);
   virtual Status ProcessSplit();
 
   virtual ~BaseSequenceScanner();
@@ -99,7 +102,7 @@ class BaseSequenceScanner : public HdfsScanner {
   /// Returns type of scanner: e.g. rcfile, seqfile
   virtual THdfsFileFormat::type file_format() const = 0;
 
-  BaseSequenceScanner(HdfsScanNode*, RuntimeState*);
+  BaseSequenceScanner(HdfsScanNodeBase*, RuntimeState*);
 
   /// Read and validate sync marker against header_->sync.  Returns non-ok if the sync
   /// marker did not match. Scanners should always use this function to read sync markers,
@@ -128,6 +131,9 @@ class BaseSequenceScanner : public HdfsScanner {
 
   /// If true, this scanner object is only for processing the header.
   bool only_parsing_header_;
+
+  /// Unit test constructor
+  BaseSequenceScanner();
 
  private:
   /// Set to true when this scanner has processed all the bytes it is responsible

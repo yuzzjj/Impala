@@ -1,26 +1,28 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <iostream>
 
 #include <boost/utility.hpp>
-#include <gtest/gtest.h>
 #include <math.h>
 
-#include "common/init.h"
+#include "testutil/gtest-util.h"
 #include "util/rle-encoding.h"
 #include "util/bit-stream-utils.inline.h"
 
@@ -28,7 +30,7 @@
 
 namespace impala {
 
-const int MAX_WIDTH = 32;
+const int MAX_WIDTH = BitReader::MAX_BITWIDTH;
 
 TEST(BitArray, TestBool) {
   const int len = 8;
@@ -100,9 +102,9 @@ TEST(BitArray, TestBool) {
 // Writes 'num_vals' values with width 'bit_width' and reads them back.
 void TestBitArrayValues(int bit_width, int num_vals) {
   const int len = BitUtil::Ceil(bit_width * num_vals, 8);
-  const uint64_t mod = bit_width == 64? 1 : 1LL << bit_width;
+  const uint64_t mod = bit_width == 64 ? 1 : 1LL << bit_width;
 
-  uint8_t buffer[len];
+  uint8_t buffer[(len > 0) ? len : 1];
   BitWriter writer(buffer, len);
   for (int i = 0; i < num_vals; ++i) {
     bool result = writer.PutValue(i % mod, bit_width);
@@ -419,11 +421,29 @@ TEST(BitRle, Overflow) {
   }
 }
 
+// Tests handling of a specific data corruption scenario where
+// the literal or repeat count is decoded as 0 (which is invalid).
+TEST(Rle, ZeroLiteralOrRepeatCount) {
+  const int len = 1024;
+  uint8_t buffer[len];
+  RleDecoder decoder(buffer, len, 0);
+  uint64_t val;
+
+  // Test the RLE repeated values path.
+  memset(buffer, 0, len);
+  for (int i = 0; i < 10; ++i) {
+    bool result = decoder.Get(&val);
+    EXPECT_FALSE(result);
+  }
+
+  // Test the RLE literal values path
+  memset(buffer, 1, len);
+  for (int i = 0; i < 10; ++i) {
+    bool result = decoder.Get(&val);
+    EXPECT_FALSE(result);
+  }
 }
 
-int main(int argc, char **argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  impala::InitCommonRuntime(argc, argv, true, impala::TestInfo::BE_TEST);
-  return RUN_ALL_TESTS();
 }
 
+IMPALA_TEST_MAIN();

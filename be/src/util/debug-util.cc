@@ -1,27 +1,30 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/debug-util.h"
 
 #include <iomanip>
 #include <sstream>
-#include <boost/foreach.hpp>
+#include <boost/tokenizer.hpp>
 
 #include "common/version.h"
 #include "runtime/collection-value.h"
 #include "runtime/descriptors.h"
-#include "runtime/raw-value.h"
+#include "runtime/raw-value.inline.h"
 #include "runtime/tuple-row.h"
 #include "runtime/row-batch.h"
 #include "util/cpu-info.h"
@@ -42,6 +45,9 @@ using boost::tokenizer;
 using namespace beeswax;
 using namespace parquet;
 
+DECLARE_int32(be_port);
+DECLARE_string(hostname);
+
 namespace impala {
 
 #define THRIFT_ENUM_OUTPUT_FN_IMPL(E, MAP) \
@@ -57,7 +63,8 @@ namespace impala {
 // Macro to stamp out operator<< for thrift enums.  Why doesn't thrift do this?
 #define THRIFT_ENUM_OUTPUT_FN(E) THRIFT_ENUM_OUTPUT_FN_IMPL(E , _##E##_VALUES_TO_NAMES)
 
-// Macro to implement Print function that returns string for thrift enums
+// Macro to implement Print function that returns string for thrift enums. Make sure you
+// define a corresponding THRIFT_ENUM_OUTPUT_FN.
 #define THRIFT_ENUM_PRINT_FN(E) \
   string Print##E(const E::type& e) {\
     stringstream ss;\
@@ -79,6 +86,7 @@ THRIFT_ENUM_OUTPUT_FN(CompressionCodec);
 THRIFT_ENUM_OUTPUT_FN(Type);
 THRIFT_ENUM_OUTPUT_FN(TMetricKind);
 THRIFT_ENUM_OUTPUT_FN(TUnit);
+THRIFT_ENUM_OUTPUT_FN(TImpalaQueryOptions);
 
 THRIFT_ENUM_PRINT_FN(TCatalogObjectType);
 THRIFT_ENUM_PRINT_FN(TDdlType);
@@ -89,6 +97,7 @@ THRIFT_ENUM_PRINT_FN(QueryState);
 THRIFT_ENUM_PRINT_FN(Encoding);
 THRIFT_ENUM_PRINT_FN(TMetricKind);
 THRIFT_ENUM_PRINT_FN(TUnit);
+THRIFT_ENUM_PRINT_FN(TImpalaQueryOptions);
 
 
 ostream& operator<<(ostream& os, const TUniqueId& id) {
@@ -122,9 +131,9 @@ bool ParseId(const string& s, TUniqueId* id) {
   if (separator == NULL) {
     // Legacy compatibility branch
     char_separator<char> sep(" ");
-    tokenizer< char_separator<char> > tokens(s, sep);
+    tokenizer< char_separator<char>> tokens(s, sep);
     int i = 0;
-    BOOST_FOREACH(const string& token, tokens) {
+    for (const string& token: tokens) {
       StringParser::ParseResult parse_result = StringParser::PARSE_SUCCESS;
       int64_t component = StringParser::StringToInt<int64_t>(
           token.c_str(), token.length(), &parse_result);
@@ -267,6 +276,14 @@ string PrintPath(const TableDescriptor& tbl_desc, const SchemaPath& path) {
   return ss.str();
 }
 
+string PrintSubPath(const TableDescriptor& tbl_desc, const SchemaPath& path,
+    int end_path_idx) {
+  DCHECK_GE(end_path_idx, 0);
+  SchemaPath::const_iterator subpath_end = path.begin() + end_path_idx + 1;
+  SchemaPath subpath(path.begin(), subpath_end);
+  return PrintPath(tbl_desc, subpath);
+}
+
 string PrintNumericPath(const SchemaPath& path) {
   stringstream ss;
   ss << "[";
@@ -281,16 +298,16 @@ string PrintNumericPath(const SchemaPath& path) {
 
 string GetBuildVersion(bool compact) {
   stringstream ss;
-  ss << IMPALA_BUILD_VERSION
+  ss << GetDaemonBuildVersion()
 #ifdef NDEBUG
      << " RELEASE"
 #else
      << " DEBUG"
 #endif
-     << " (build " << IMPALA_BUILD_HASH
+     << " (build " << GetDaemonBuildHash()
      << ")";
   if (!compact) {
-    ss << endl << "Built on " << IMPALA_BUILD_TIME;
+    ss << endl << "Built on " << GetDaemonBuildTime();
   }
   return ss.str();
 }
@@ -306,6 +323,10 @@ string GetStackTrace() {
   string s;
   google::glog_internal_namespace_::DumpStackTraceToString(&s);
   return s;
+}
+
+string GetBackendString() {
+  return Substitute("$0:$1", FLAGS_hostname, FLAGS_be_port);
 }
 
 }

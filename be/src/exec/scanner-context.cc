@@ -1,34 +1,39 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/scanner-context.h"
 
 #include <gutil/strings/substitute.h>
 
+#include "exec/hdfs-scan-node-base.h"
 #include "exec/hdfs-scan-node.h"
 #include "runtime/row-batch.h"
 #include "runtime/mem-pool.h"
 #include "runtime/runtime-state.h"
 #include "runtime/string-buffer.h"
 #include "util/debug-util.h"
+#include "util/runtime-profile-counters.h"
 
 #include "common/names.h"
 
 using namespace impala;
 using namespace strings;
 
-static const int64_t DEFAULT_READ_PAST_SIZE = 1024; // in bytes
+static const int64_t INIT_READ_PAST_SIZE_BYTES = 64 * 1024;
 
 // We always want output_buffer_bytes_left_ to be non-NULL, so we can avoid a NULL check
 // in GetBytes(). We use this variable, which is set to 0, to initialize
@@ -36,7 +41,7 @@ static const int64_t DEFAULT_READ_PAST_SIZE = 1024; // in bytes
 // output_buffer_bytes_left_ will be set to something else.
 static const int64_t OUTPUT_BUFFER_BYTES_LEFT_INIT = 0;
 
-ScannerContext::ScannerContext(RuntimeState* state, HdfsScanNode* scan_node,
+ScannerContext::ScannerContext(RuntimeState* state, HdfsScanNodeBase* scan_node,
     HdfsPartitionDescriptor* partition_desc, DiskIoMgr::ScanRange* scan_range,
     const vector<FilterContext>& filter_ctxs)
   : state_(state),
@@ -47,21 +52,29 @@ ScannerContext::ScannerContext(RuntimeState* state, HdfsScanNode* scan_node,
   AddStream(scan_range);
 }
 
+ScannerContext::~ScannerContext() {
+  DCHECK(streams_.empty());
+}
+
 void ScannerContext::ReleaseCompletedResources(RowBatch* batch, bool done) {
   for (int i = 0; i < streams_.size(); ++i) {
     streams_[i]->ReleaseCompletedResources(batch, done);
   }
-  if (done) streams_.clear();
+}
+
+void ScannerContext::ClearStreams() {
+  streams_.clear();
 }
 
 ScannerContext::Stream::Stream(ScannerContext* parent)
   : parent_(parent),
+    next_read_past_size_bytes_(INIT_READ_PAST_SIZE_BYTES),
     boundary_pool_(new MemPool(parent->scan_node_->mem_tracker())),
     boundary_buffer_(new StringBuffer(boundary_pool_.get())) {
 }
 
 ScannerContext::Stream* ScannerContext::AddStream(DiskIoMgr::ScanRange* range) {
-  Stream* stream = state_->obj_pool()->Add(new Stream(this));
+  std::unique_ptr<Stream> stream(new Stream(this));
   stream->scan_range_ = range;
   stream->file_desc_ = scan_node_->GetFileDesc(stream->filename());
   stream->file_len_ = stream->file_desc_->file_length;
@@ -74,42 +87,41 @@ ScannerContext::Stream* ScannerContext::AddStream(DiskIoMgr::ScanRange* range) {
   stream->output_buffer_bytes_left_ =
       const_cast<int64_t*>(&OUTPUT_BUFFER_BYTES_LEFT_INIT);
   stream->contains_tuple_data_ = scan_node_->tuple_desc()->ContainsStringData();
-  streams_.push_back(stream);
-  return stream;
+  streams_.push_back(std::move(stream));
+  return streams_.back().get();
 }
 
 void ScannerContext::Stream::ReleaseCompletedResources(RowBatch* batch, bool done) {
-  DCHECK((batch != NULL) || (batch == NULL && !contains_tuple_data_));
+  DCHECK(batch != nullptr || done || !contains_tuple_data_);
   if (done) {
     // Mark any pending resources as completed
-    if (io_buffer_ != NULL) {
+    if (io_buffer_ != nullptr) {
       ++parent_->num_completed_io_buffers_;
       completed_io_buffers_.push_back(io_buffer_);
     }
-    // Set variables to NULL to make sure streams are not used again
-    io_buffer_ = NULL;
-    io_buffer_pos_ = NULL;
+    // Set variables to nullptr to make sure streams are not used again
+    io_buffer_ = nullptr;
+    io_buffer_pos_ = nullptr;
     io_buffer_bytes_left_ = 0;
     // Cancel the underlying scan range to clean up any queued buffers there
     scan_range_->Cancel(Status::CANCELLED);
   }
 
-  for (list<DiskIoMgr::BufferDescriptor*>::iterator it = completed_io_buffers_.begin();
-       it != completed_io_buffers_.end(); ++it) {
-    if (contains_tuple_data_) {
-      batch->AddIoBuffer(*it);
+  for (DiskIoMgr::BufferDescriptor* buffer: completed_io_buffers_) {
+    if (contains_tuple_data_ && batch != nullptr) {
+      batch->AddIoBuffer(buffer);
       // TODO: We can do row batch compaction here.  This is the only place io buffers are
       // queued.  A good heuristic is to check the number of io buffers queued and if
       // there are too many, we should compact.
     } else {
-      (*it)->Return();
-      --parent_->scan_node_->num_owned_io_buffers_;
+      buffer->Return();
+      parent_->scan_node_->num_owned_io_buffers_.Add(-1);
     }
   }
   parent_->num_completed_io_buffers_ -= completed_io_buffers_.size();
   completed_io_buffers_.clear();
 
-  if (contains_tuple_data_) {
+  if (contains_tuple_data_ && batch != nullptr) {
     // If we're not done, keep using the last chunk allocated in boundary_pool_ so we
     // don't have to reallocate. If we are done, transfer it to the row batch.
     batch->tuple_data_pool()->AcquireData(boundary_pool_.get(), /* keep_current */ !done);
@@ -118,9 +130,14 @@ void ScannerContext::Stream::ReleaseCompletedResources(RowBatch* batch, bool don
 }
 
 Status ScannerContext::Stream::GetNextBuffer(int64_t read_past_size) {
-  if (parent_->cancelled()) return Status::CANCELLED;
+  if (UNLIKELY(parent_->cancelled())) return Status::CANCELLED;
 
-  // io_buffer_ should only be null the first time this is called
+  // Nothing to do if we've already processed all data in the file
+  int64_t offset = file_offset() + boundary_buffer_bytes_left_;
+  int64_t file_bytes_remaining = file_desc()->file_length - offset;
+  if (io_buffer_ == NULL && file_bytes_remaining == 0) return Status::OK();
+
+  // Otherwise, io_buffer_ should only be null the first time this is called
   DCHECK(io_buffer_ != NULL ||
          (total_bytes_returned_ == 0 && completed_io_buffers_.empty()));
 
@@ -139,13 +156,20 @@ Status ScannerContext::Stream::GetNextBuffer(int64_t read_past_size) {
     RETURN_IF_ERROR(scan_range_->GetNext(&io_buffer_));
   } else {
     SCOPED_TIMER(parent_->state_->total_storage_wait_timer());
-    int64_t offset = file_offset() + boundary_buffer_bytes_left_;
 
-    int64_t read_past_buffer_size = read_past_size_cb_.empty() ?
-        DEFAULT_READ_PAST_SIZE : read_past_size_cb_(offset);
-    int64_t file_bytes_remaining = file_desc()->file_length - offset;
+    int64_t read_past_buffer_size = 0;
+    int64_t max_buffer_size = parent_->state_->io_mgr()->max_read_buffer_size();
+    if (!read_past_size_cb_.empty()) read_past_buffer_size = read_past_size_cb_(offset);
+    if (read_past_buffer_size <= 0) {
+      // Either no callback was set or the callback did not return an estimate. Use
+      // the default doubling strategy.
+      read_past_buffer_size = next_read_past_size_bytes_;
+      next_read_past_size_bytes_ =
+          min<int64_t>(next_read_past_size_bytes_ * 2, max_buffer_size);
+    }
     read_past_buffer_size = ::max(read_past_buffer_size, read_past_size);
     read_past_buffer_size = ::min(read_past_buffer_size, file_bytes_remaining);
+    read_past_buffer_size = ::min(read_past_buffer_size, max_buffer_size);
     // We're reading past the scan range. Be careful not to read past the end of file.
     DCHECK_GE(read_past_buffer_size, 0);
     if (read_past_buffer_size == 0) {
@@ -155,13 +179,13 @@ Status ScannerContext::Stream::GetNextBuffer(int64_t read_past_size) {
     }
     DiskIoMgr::ScanRange* range = parent_->scan_node_->AllocateScanRange(
         scan_range_->fs(), filename(), read_past_buffer_size, offset, -1,
-        scan_range_->disk_id(), false, false, scan_range_->mtime());
+        scan_range_->disk_id(), false, DiskIoMgr::BufferOpts::Uncached());
     RETURN_IF_ERROR(parent_->state_->io_mgr()->Read(
         parent_->scan_node_->reader_context(), range, &io_buffer_));
   }
 
   DCHECK(io_buffer_ != NULL);
-  ++parent_->scan_node_->num_owned_io_buffers_;
+  parent_->scan_node_->num_owned_io_buffers_.Add(1);
   io_buffer_pos_ = reinterpret_cast<uint8_t*>(io_buffer_->buffer());
   io_buffer_bytes_left_ = io_buffer_->len();
   if (io_buffer_->len() == 0) {
@@ -178,7 +202,7 @@ Status ScannerContext::Stream::GetBuffer(bool peek, uint8_t** out_buffer, int64_
   *len = 0;
   if (eosr()) return Status::OK();
 
-  if (parent_->cancelled()) {
+  if (UNLIKELY(parent_->cancelled())) {
     DCHECK(*out_buffer == NULL);
     return Status::CANCELLED;
   }
@@ -230,34 +254,27 @@ Status ScannerContext::Stream::GetBytesInternal(int64_t requested_len,
       boundary_buffer_->Clear();
     }
   }
-  // Workaround IMPALA-1619. Fail the request if requested_len is more than 1GB.
-  // StringBuffer can only handle 32-bit allocations and StringBuffer::Append()
-  // will allocate twice the current buffer size, cause int overflow.
-  // TODO: Revert once IMPALA-1619 is fixed.
-  if (UNLIKELY(requested_len > StringValue::MAX_LENGTH)) {
-    LOG(WARNING) << "Requested buffer size " << requested_len << "B > 1GB."
-        << GetStackTrace();
-    return Status(Substitute("Requested buffer size $0B > 1GB", requested_len));
-  }
 
   while (requested_len > boundary_buffer_bytes_left_ + io_buffer_bytes_left_) {
-    // We need to fetch more bytes. Copy the end of the current buffer and fetch the next
-    // one.
-    boundary_buffer_->Append(io_buffer_pos_, io_buffer_bytes_left_);
-    boundary_buffer_bytes_left_ += io_buffer_bytes_left_;
-
-    RETURN_IF_ERROR(GetNextBuffer());
-    if (parent_->cancelled()) return Status::CANCELLED;
-
-    if (io_buffer_bytes_left_ == 0) {
-      // No more bytes (i.e. EOF)
-      break;
+    // We must copy the remainder of 'io_buffer_' to 'boundary_buffer_' before advancing
+    // to handle the case when the read straddles a block boundary. Preallocate
+    // 'boundary_buffer_' to avoid unnecessary resizes for large reads.
+    if (io_buffer_bytes_left_ > 0) {
+      RETURN_IF_ERROR(boundary_buffer_->GrowBuffer(requested_len));
+      RETURN_IF_ERROR(boundary_buffer_->Append(io_buffer_pos_, io_buffer_bytes_left_));
+      boundary_buffer_bytes_left_ += io_buffer_bytes_left_;
     }
+
+    int64_t remaining_requested_len = requested_len - boundary_buffer_->len();
+    RETURN_IF_ERROR(GetNextBuffer(remaining_requested_len));
+    if (UNLIKELY(parent_->cancelled())) return Status::CANCELLED;
+    // No more bytes (i.e. EOF).
+    if (io_buffer_bytes_left_ == 0) break;
   }
 
-  // We have enough bytes in io_buffer_ or couldn't read more bytes
+  // We have read the full 'requested_len' bytes or couldn't read more bytes.
   int64_t requested_bytes_left = requested_len - boundary_buffer_bytes_left_;
-  DCHECK_GE(requested_len, 0);
+  DCHECK_GE(requested_bytes_left, 0);
   int64_t num_bytes = min(io_buffer_bytes_left_, requested_bytes_left);
   *out_len = boundary_buffer_bytes_left_ + num_bytes;
   DCHECK_LE(*out_len, requested_len);
@@ -267,10 +284,10 @@ Status ScannerContext::Stream::GetBytesInternal(int64_t requested_len,
     output_buffer_pos_ = &io_buffer_pos_;
     output_buffer_bytes_left_ = &io_buffer_bytes_left_;
   } else {
-    boundary_buffer_->Append(io_buffer_pos_, num_bytes);
+    RETURN_IF_ERROR(boundary_buffer_->Append(io_buffer_pos_, num_bytes));
     boundary_buffer_bytes_left_ += num_bytes;
-    boundary_buffer_pos_ = reinterpret_cast<uint8_t*>(boundary_buffer_->str().ptr) +
-                           boundary_buffer_->Size() - boundary_buffer_bytes_left_;
+    boundary_buffer_pos_ = reinterpret_cast<uint8_t*>(boundary_buffer_->buffer()) +
+        boundary_buffer_->len() - boundary_buffer_bytes_left_;
     io_buffer_bytes_left_ -= num_bytes;
     io_buffer_pos_ += num_bytes;
 
@@ -294,7 +311,8 @@ Status ScannerContext::Stream::GetBytesInternal(int64_t requested_len,
 }
 
 bool ScannerContext::cancelled() const {
-  return scan_node_->done_;
+  if (!scan_node_->HasRowBatchQueue()) return false;
+  return static_cast<HdfsScanNode*>(scan_node_)->done();
 }
 
 Status ScannerContext::Stream::ReportIncompleteRead(int64_t length, int64_t bytes_read) {
@@ -304,4 +322,8 @@ Status ScannerContext::Stream::ReportIncompleteRead(int64_t length, int64_t byte
 
 Status ScannerContext::Stream::ReportInvalidRead(int64_t length) {
   return Status(TErrorCode::SCANNER_INVALID_READ, length, filename(), file_offset());
+}
+
+Status ScannerContext::Stream::ReportInvalidInt() {
+  return Status(TErrorCode::SCANNER_INVALID_INT, filename(), file_offset());
 }

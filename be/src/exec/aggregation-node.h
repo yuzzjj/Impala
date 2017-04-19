@@ -1,22 +1,24 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_AGGREGATION_NODE_H
 #define IMPALA_EXEC_AGGREGATION_NODE_H
 
-#include <functional>
 #include <boost/scoped_ptr.hpp>
 
 #include "exec/exec-node.h"
@@ -53,6 +55,7 @@ class AggregationNode : public ExecNode {
 
   virtual Status Init(const TPlanNode& tnode, RuntimeState* state);
   virtual Status Prepare(RuntimeState* state);
+  virtual void Codegen(RuntimeState* state);
   virtual Status Open(RuntimeState* state);
   virtual Status GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos);
   virtual Status Reset(RuntimeState* state);
@@ -67,11 +70,19 @@ class AggregationNode : public ExecNode {
   boost::scoped_ptr<OldHashTable> hash_tbl_;
   OldHashTable::Iterator output_iterator_;
 
+  /// The list of all aggregate operations for this exec node.
   std::vector<AggFnEvaluator*> aggregate_evaluators_;
 
-  /// FunctionContext for each agg fn and backing pool.
+  /// FunctionContexts and backing MemPools of 'aggregate_evaluators_'.
+  /// FunctionContexts objects are stored in ObjectPool of RuntimeState.
   std::vector<impala_udf::FunctionContext*> agg_fn_ctxs_;
   boost::scoped_ptr<MemPool> agg_fn_pool_;
+
+  /// Cache of the ExprContexts of 'aggregate_evaluators_'. Used in the codegen'ed
+  /// version of UpdateTuple() to avoid loading aggregate_evaluators_[i] at runtime.
+  /// An entry is NULL if the aggregate evaluator is not codegen'ed or there is no
+  /// Expr in the aggregate evaluator (e.g. count(*)).
+  std::vector<ExprContext*> agg_expr_ctxs_;
 
   /// Exprs used to evaluate input rows
   std::vector<ExprContext*> probe_expr_ctxs_;
@@ -122,7 +133,7 @@ class AggregationNode : public ExecNode {
   Tuple* ConstructIntermediateTuple();
 
   /// Updates the aggregation intermediate tuple 'tuple' with aggregation values
-  /// computed over 'row'.
+  /// computed over 'row'. This function is replaced by codegen.
   void UpdateTuple(Tuple* tuple, TupleRow* row);
 
   /// Called on the intermediate tuple of each group after all input rows have been
@@ -133,6 +144,14 @@ class AggregationNode : public ExecNode {
   /// Returns the tuple holding the final aggregate values.
   Tuple* FinalizeTuple(Tuple* tuple, MemPool* pool);
 
+  /// Accessor for the function context of an AggFnEvaluator. Used only in codegen'ed
+  /// version of the UpdateSlot().
+  FunctionContext* IR_ALWAYS_INLINE GetAggFnCtx(int i) const;
+
+  /// Accessor for the expression context of an AggFnEvaluator. Used only in codegen'ed
+  /// version of the UpdateSlot().
+  ExprContext* IR_ALWAYS_INLINE GetAggExprCtx(int i) const;
+
   /// Do the aggregation for all tuple rows in the batch
   void ProcessRowBatchNoGrouping(RowBatch* batch);
   void ProcessRowBatchWithGrouping(RowBatch* batch);
@@ -141,16 +160,16 @@ class AggregationNode : public ExecNode {
   /// IR and loaded into the codegen object.  UpdateAggTuple has also been
   /// codegen'd to IR.  This function will modify the loop subsituting the
   /// UpdateAggTuple function call with the (inlined) codegen'd 'update_tuple_fn'.
-  llvm::Function* CodegenProcessRowBatch(
-      RuntimeState* state, llvm::Function* update_tuple_fn);
+  llvm::Function* CodegenProcessRowBatch(LlvmCodeGen* codegen,
+      llvm::Function* update_tuple_fn);
 
   /// Codegen for updating aggregate_exprs at slot_idx. Returns NULL if unsuccessful.
   /// slot_idx is the idx into aggregate_exprs_ (does not include grouping exprs).
-  llvm::Function* CodegenUpdateSlot(
-      RuntimeState* state, AggFnEvaluator* evaluator, SlotDescriptor* slot_desc);
+  llvm::Function* CodegenUpdateSlot(LlvmCodeGen* codegen,
+      AggFnEvaluator* evaluator, SlotDescriptor* slot_desc);
 
   /// Codegen UpdateTuple(). Returns NULL if codegen is unsuccessful.
-  llvm::Function* CodegenUpdateTuple(RuntimeState* state);
+  llvm::Function* CodegenUpdateTuple(LlvmCodeGen* codegen);
 };
 
 }

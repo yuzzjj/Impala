@@ -19,9 +19,10 @@ using std::pair;
 #include <vector>
 using std::vector;
 
+#include <common/logging.h>
+
 #include "gutil/int128.h"
 #include "gutil/integral_types.h"
-#include <glog/logging.h>
 #include "gutil/logging-inl.h"
 #include "gutil/type_traits.h"
 #include "gutil/strings/stringpiece.h"

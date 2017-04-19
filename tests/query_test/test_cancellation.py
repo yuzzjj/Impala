@@ -1,26 +1,42 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # Tests query cancellation using the ImpalaService.Cancel API
 #
 
-import os
 import pytest
 import threading
-from random import choice
 from time import sleep
 from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
-from tests.common.test_vector import TestDimension
+from tests.common.test_vector import ImpalaTestDimension
 from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.common.skip import SkipIfS3
-from tests.util.test_file_parser import QueryTestSectionReader
 from tests.verifiers.metric_verifier import MetricVerifier
 
-# Queries to execute. Use the TPC-H dataset because tables are large so queries take some
-# time to execute.
-QUERIES = ['select l_returnflag from lineitem',
-           'select count(l_returnflag) from lineitem',
-           'select * from lineitem limit 50',
-           'compute stats lineitem',
-           'select * from lineitem order by l_orderkey']
+# PRIMARY KEY for lineitem
+LINEITEM_PK = 'l_orderkey, l_partkey, l_suppkey, l_linenumber'
+
+# Queries to execute, mapped to a unique PRIMARY KEY for use in CTAS with Kudu. If None
+# is specified for the PRIMARY KEY, it will not be used in a CTAS statement on Kudu.
+# Use the TPC-H dataset because tables are large so queries take some time to execute.
+QUERIES = {'select l_returnflag from lineitem' : None,
+           'select count(l_returnflag) pk from lineitem' : 'pk',
+           'select * from lineitem limit 50' : LINEITEM_PK,
+           'compute stats lineitem' : None,
+           'select * from lineitem order by l_orderkey' : LINEITEM_PK}
 
 QUERY_TYPE = ["SELECT", "CTAS"]
 
@@ -36,6 +52,7 @@ DEBUG_ACTIONS = [None, 'WAIT']
 # Extra dimensions to test order by without limit
 SORT_QUERY = 'select * from lineitem order by l_orderkey'
 SORT_CANCEL_DELAY = range(6, 10)
+SORT_BLOCK_MGR_LIMIT = ['0', '300m'] # Test spilling and non-spilling sorts.
 
 class TestCancellation(ImpalaTestSuite):
   @classmethod
@@ -45,26 +62,37 @@ class TestCancellation(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestCancellation, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(TestDimension('query', *QUERIES))
-    cls.TestMatrix.add_dimension(TestDimension('query_type', *QUERY_TYPE))
-    cls.TestMatrix.add_dimension(TestDimension('cancel_delay', *CANCEL_DELAY_IN_SECONDS))
-    cls.TestMatrix.add_dimension(TestDimension('action', *DEBUG_ACTIONS))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('query', *QUERIES.keys()))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('query_type', *QUERY_TYPE))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('cancel_delay', *CANCEL_DELAY_IN_SECONDS))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('action', *DEBUG_ACTIONS))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('max_block_mgr_memory', 0))
 
-    cls.TestMatrix.add_constraint(lambda v: v.get_value('query_type') != 'CTAS' or (\
-        v.get_value('table_format').file_format in ['text', 'parquet'] and\
-        v.get_value('table_format').compression_codec == 'none'))
-    cls.TestMatrix.add_constraint(lambda v: v.get_value('exec_option')['batch_size'] == 0)
+    cls.ImpalaTestMatrix.add_constraint(
+        lambda v: v.get_value('query_type') != 'CTAS' or (\
+            v.get_value('table_format').file_format in ['text', 'parquet', 'kudu'] and\
+            v.get_value('table_format').compression_codec == 'none'))
+    cls.ImpalaTestMatrix.add_constraint(
+        lambda v: v.get_value('exec_option')['batch_size'] == 0)
     # Ignore 'compute stats' queries for the CTAS query type.
-    cls.TestMatrix.add_constraint(lambda v: not (v.get_value('query_type') == 'CTAS' and
-         v.get_value('query').startswith('compute stats')))
-    # Ignore debug actions for 'compute stats' because cancellation of 'compute stats'
-    # relies on child queries eventually making forward progress, but debug actions
-    # will cause child queries to hang indefinitely.
-    cls.TestMatrix.add_constraint(lambda v: not (v.get_value('action') == 'WAIT' and
-         v.get_value('query').startswith('compute stats')))
+    cls.ImpalaTestMatrix.add_constraint(
+        lambda v: not (v.get_value('query_type') == 'CTAS' and
+            v.get_value('query').startswith('compute stats')))
+
+    # Ignore CTAS on Kudu if there is no PRIMARY KEY specified.
+    cls.ImpalaTestMatrix.add_constraint(
+        lambda v: not (v.get_value('query_type') == 'CTAS' and
+            v.get_value('table_format').file_format == 'kudu' and
+            QUERIES[v.get_value('query')] is None))
+
     # tpch tables are not generated for hbase as the data loading takes a very long time.
     # TODO: Add cancellation tests for hbase.
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('table_format').file_format != 'hbase')
     if cls.exploration_strategy() != 'core':
       NUM_CANCELATION_ITERATIONS = 3
@@ -77,13 +105,24 @@ class TestCancellation(ImpalaTestSuite):
     query_type = vector.get_value('query_type')
     if query_type == "CTAS":
       self.cleanup_test_table(vector.get_value('table_format'))
-      query = "create table ctas_cancel stored as %sfile as %s" %\
-          (vector.get_value('table_format').file_format, query)
+      file_format = vector.get_value('table_format').file_format
+      if file_format == 'kudu':
+        assert QUERIES.has_key(query) and QUERIES[query] is not None,\
+            "PRIMARY KEY for query %s not specified" % query
+        query = "create table ctas_cancel primary key (%s) "\
+            "partition by hash partitions 3 stored as kudu as %s" %\
+            (QUERIES[query], query)
+      else:
+        query = "create table ctas_cancel stored as %sfile as %s" %\
+            (file_format, query)
 
     action = vector.get_value('action')
     # node ID 0 is the scan node
     debug_action = '0:GETNEXT:' + action if action != None else ''
     vector.get_value('exec_option')['debug_action'] = debug_action
+
+    vector.get_value('exec_option')['max_block_mgr_memory'] =\
+        vector.get_value('max_block_mgr_memory')
 
     # Execute the query multiple times, cancelling it each time.
     for i in xrange(NUM_CANCELATION_ITERATIONS):
@@ -139,7 +178,7 @@ class TestCancellationParallel(TestCancellation):
   @classmethod
   def add_test_dimensions(cls):
     super(TestCancellationParallel, cls).add_test_dimensions()
-    cls.TestMatrix.add_constraint(lambda v: v.get_value('query_type') != 'CTAS')
+    cls.ImpalaTestMatrix.add_constraint(lambda v: v.get_value('query_type') != 'CTAS')
 
   def test_cancel_select(self, vector):
     self.execute_cancel_test(vector)
@@ -148,16 +187,14 @@ class TestCancellationSerial(TestCancellation):
   @classmethod
   def add_test_dimensions(cls):
     super(TestCancellationSerial, cls).add_test_dimensions()
-    cls.TestMatrix.add_constraint(lambda v: v.get_value('query_type') == 'CTAS' or
+    cls.ImpalaTestMatrix.add_constraint(lambda v: v.get_value('query_type') == 'CTAS' or
         v.get_value('query').startswith('compute stats'))
-    cls.TestMatrix.add_constraint(lambda v: v.get_value('cancel_delay') != 0)
-    cls.TestMatrix.add_constraint(lambda v: v.get_value('action') is None)
+    cls.ImpalaTestMatrix.add_constraint(lambda v: v.get_value('cancel_delay') != 0)
+    cls.ImpalaTestMatrix.add_constraint(lambda v: v.get_value('action') is None)
     # Don't run across all cancel delay options unless running in exhaustive mode
     if cls.exploration_strategy() != 'exhaustive':
-      cls.TestMatrix.add_constraint(lambda v: v.get_value('cancel_delay') in [3])
-      cls.TestMatrix.add_constraint(lambda v: v.get_value('query') == choice(QUERIES))
+      cls.ImpalaTestMatrix.add_constraint(lambda v: v.get_value('cancel_delay') in [3])
 
-  @SkipIfS3.insert
   @pytest.mark.execute_serially
   def test_cancel_insert(self, vector):
     self.execute_cancel_test(vector)
@@ -167,18 +204,23 @@ class TestCancellationSerial(TestCancellation):
     except AssertionError:
       pytest.xfail("IMPALA-551: File handle leak for INSERT")
 
-  class TestCancellationFullSort(TestCancellation):
-    @classmethod
-    def add_test_dimensions(cls):
-      super(TestCancellation, cls).add_test_dimensions()
-      # Override dimensions to only execute the order-by without limit query.
-      cls.TestMatrix.add_dimension(TestDimension('query', SORT_QUERY))
-      cls.TestMatrix.add_dimension(TestDimension('query_type', 'SELECT'))
-      cls.TestMatrix.add_dimension(TestDimension('cancel_delay', *SORT_CANCEL_DELAY))
-      cls.TestMatrix.add_dimension(TestDimension('action', None))
-      cls.TestMatrix.add_constraint(lambda v:\
-         v.get_value('table_format').file_format =='parquet' and\
-         v.get_value('table_format').compression_codec == 'none')
+class TestCancellationFullSort(TestCancellation):
+  @classmethod
+  def add_test_dimensions(cls):
+    super(TestCancellation, cls).add_test_dimensions()
+    # Override dimensions to only execute the order-by without limit query.
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('query', SORT_QUERY))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('query_type', 'SELECT'))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('cancel_delay', *SORT_CANCEL_DELAY))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('max_block_mgr_memory', *SORT_BLOCK_MGR_LIMIT))
+    cls.ImpalaTestMatrix.add_dimension(ImpalaTestDimension('action', None))
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
+       v.get_value('table_format').file_format =='parquet' and\
+       v.get_value('table_format').compression_codec == 'none')
 
-    def test_cancel_sort(self, vector):
-      self.execute_cancel_test(vector)
+  def test_cancel_sort(self, vector):
+    self.execute_cancel_test(vector)

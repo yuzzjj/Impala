@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/summary-util.h"
 
@@ -33,7 +36,7 @@ using namespace impala;
 // for the current node and on return, will contain the id of the next node.
 void PrintExecSummary(const TExecSummary& exec_summary, int indent_level,
     int new_indent_level, int* node_idx,
-    vector<vector<string> >* result) {
+    vector<vector<string>>* result) {
   DCHECK_LT(*node_idx, exec_summary.nodes.size());
   const TPlanNodeExecSummary& node = exec_summary.nodes[*node_idx];
   const TExecStats& est_stats = node.estimated_stats;
@@ -94,7 +97,7 @@ void PrintExecSummary(const TExecSummary& exec_summary, int indent_level,
   if (node.num_children == 0) return;
 
   // Print the non-left children to the stream first.
-  vector<vector<string> > child0_result;
+  vector<vector<string>> child0_result;
   PrintExecSummary(exec_summary, indent_level, false, node_idx, &child0_result);
 
   for (int i = 1; i < node.num_children; ++i) {
@@ -121,7 +124,7 @@ string impala::PrintExecSummary(const TExecSummary& exec_summary) {
   printer.AddColumn("Est. Peak Mem", false);
   printer.AddColumn("Detail", true);
 
-  vector<vector<string> > rows;
+  vector<vector<string>> rows;
   int node_idx = 0;
   ::PrintExecSummary(exec_summary, 0, false, &node_idx, &rows);
   for (int i = 0; i < rows.size(); ++i) {

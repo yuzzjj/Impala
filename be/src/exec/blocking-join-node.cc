@@ -1,26 +1,32 @@
-// Copyright 2013 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/blocking-join-node.h"
 
 #include <sstream>
 
+#include "exec/data-sink.h"
 #include "exprs/expr.h"
+#include "runtime/mem-tracker.h"
 #include "runtime/row-batch.h"
 #include "runtime/runtime-state.h"
+#include "runtime/tuple-row.h"
 #include "util/debug-util.h"
-#include "util/runtime-profile.h"
+#include "util/runtime-profile-counters.h"
 #include "util/time.h"
 
 #include "gen-cpp/PlanNodes_types.h"
@@ -41,8 +47,7 @@ BlockingJoinNode::BlockingJoinNode(const string& node_name, const TJoinOp::type 
     probe_side_eos_(false),
     probe_batch_pos_(-1),
     current_probe_row_(NULL),
-    semi_join_staging_row_(NULL),
-    can_add_runtime_filters_(false) {
+    semi_join_staging_row_(NULL) {
 }
 
 Status BlockingJoinNode::Init(const TPlanNode& tnode, RuntimeState* state) {
@@ -68,7 +73,6 @@ Status BlockingJoinNode::Prepare(RuntimeState* state) {
   SCOPED_TIMER(runtime_profile_->total_time_counter());
   RETURN_IF_ERROR(ExecNode::Prepare(state));
 
-  build_pool_.reset(new MemPool(mem_tracker()));
   build_timer_ = ADD_TIMER(runtime_profile(), "BuildTime");
   probe_timer_ = ADD_TIMER(runtime_profile(), "ProbeTime");
   build_row_counter_ = ADD_COUNTER(runtime_profile(), "BuildRows", TUnit::UNIT);
@@ -124,6 +128,8 @@ Status BlockingJoinNode::Prepare(RuntimeState* state) {
         new char[probe_tuple_row_size_ + build_tuple_row_size_]);
   }
 
+  build_batch_.reset(
+      new RowBatch(child(1)->row_desc(), state->batch_size(), mem_tracker()));
   probe_batch_.reset(
       new RowBatch(child(0)->row_desc(), state->batch_size(), mem_tracker()));
   return Status::OK();
@@ -131,45 +137,56 @@ Status BlockingJoinNode::Prepare(RuntimeState* state) {
 
 void BlockingJoinNode::Close(RuntimeState* state) {
   if (is_closed()) return;
-  if (build_pool_.get() != NULL) build_pool_->FreeAll();
+  build_batch_.reset();
   probe_batch_.reset();
   if (semi_join_staging_row_ != NULL) delete[] semi_join_staging_row_;
   ExecNode::Close(state);
 }
 
-void BlockingJoinNode::BuildSideThread(RuntimeState* state, Promise<Status>* status) {
+void BlockingJoinNode::ProcessBuildInputAsync(RuntimeState* state, DataSink* build_sink,
+    Promise<Status>* status) {
   Status s;
   {
-    SCOPED_TIMER(state->total_cpu_timer());
-    s = ConstructBuildSide(state);
+    SCOPED_THREAD_COUNTER_MEASUREMENT(state->total_thread_statistics());
+    if  (build_sink == NULL){
+      s = ProcessBuildInput(state);
+    } else {
+      s = SendBuildInputToSink<true>(state, build_sink);
+    }
+    // IMPALA-1863: If the build-side thread failed, then we need to close the right
+    // (build-side) child to avoid a potential deadlock between fragment instances.  This
+    // is safe to do because while the build may have partially completed, it will not be
+    // probed.  BlockJoinNode::Open() will return failure as soon as child(0)->Open()
+    // completes.
+    if (!s.ok()) child(1)->Close(state);
+    // Release the thread token as soon as possible (before the main thread joins
+    // on it).  This way, if we had a chain of 10 joins using 1 additional thread,
+    // we'd keep the additional thread busy the whole time.
+    state->resource_pool()->ReleaseThreadToken(false);
   }
-  // IMPALA-1863: If the build-side thread failed, then we need to close the right
-  // (build-side) child to avoid a potential deadlock between fragment instances.  This
-  // is safe to do because while the build may have partially completed, it will not be
-  // probed.  BlockJoinNode::Open() will return failure as soon as child(0)->Open()
-  // completes.
-  if (!s.ok()) child(1)->Close(state);
-  // Release the thread token as soon as possible (before the main thread joins
-  // on it).  This way, if we had a chain of 10 joins using 1 additional thread,
-  // we'd keep the additional thread busy the whole time.
-  state->resource_pool()->ReleaseThreadToken(false);
+  // Please keep this as the last line in this function to avoid use-after-free problem.
+  // Once 'status' is set, ProcessBuildInputAndProbe() will start running and 'states'
+  // may have been freed after this line once the query completes. IMPALA-4532.
+  // TODO: Make this less fragile.
   status->Set(s);
 }
 
 Status BlockingJoinNode::Open(RuntimeState* state) {
-  SCOPED_TIMER(runtime_profile_->total_time_counter());
   RETURN_IF_ERROR(ExecNode::Open(state));
-  RETURN_IF_CANCELLED(state);
-  RETURN_IF_ERROR(QueryMaintenance(state));
   eos_ = false;
   probe_side_eos_ = false;
+  return Status::OK();
+}
 
+Status BlockingJoinNode::ProcessBuildInputAndOpenProbe(
+    RuntimeState* state, DataSink* build_sink) {
   // If this node is not inside a subplan and can get a thread token, initiate the
   // construction of the build-side table in a separate thread, so that the left child
   // can do any initialisation in parallel. Otherwise, do this in the main thread.
   // Inside a subplan we expect Open() to be called a number of times proportional to the
-  // input data of the SubplanNode, so we prefer doing the join build in the main thread,
-  // assuming that thread creation is expensive relative to a single subplan iteration.
+  // input data of the SubplanNode, so we prefer doing processing the build input in the
+  // main thread, assuming that thread creation is expensive relative to a single subplan
+  // iteration.
   //
   // In this block, we also compute the 'overlap' time for the left and right child.  This
   // is the time (i.e. clock reads) when the right child stops overlapping with the left
@@ -178,25 +195,19 @@ Status BlockingJoinNode::Open(RuntimeState* state) {
   // returns.
   if (!IsInSubplan() && state->resource_pool()->TryAcquireThreadToken()) {
     Promise<Status> build_side_status;
-    AddRuntimeExecOption("Join Build-Side Prepared Asynchronously");
-    Thread build_thread(node_name_, "build thread",
-        bind(&BlockingJoinNode::BuildSideThread, this, state, &build_side_status));
-    if (!state->cgroup().empty()) {
-      Status status = state->exec_env()->cgroups_mgr()->AssignThreadToCgroup(
-          build_thread, state->cgroup());
-      // If AssignThreadToCgroup() failed, we still need to wait for the build-side
-      // thread to complete before returning, so just log that error.
-      if (!status.ok()) state->LogError(status.msg());
-    }
+    runtime_profile()->AppendExecOption("Join Build-Side Prepared Asynchronously");
+    Thread build_thread(
+        node_name_, "build thread", bind(&BlockingJoinNode::ProcessBuildInputAsync, this,
+                                        state, build_sink, &build_side_status));
     // Open the left child so that it may perform any initialisation in parallel.
     // Don't exit even if we see an error, we still need to wait for the build thread
     // to finish.
     Status open_status = child(0)->Open(state);
 
     // The left/right child overlap stops here.
-    built_probe_overlap_stop_watch_.SetTimeCeiling(MonotonicNanos());
+    built_probe_overlap_stop_watch_.SetTimeCeiling();
 
-    // Blocks until ConstructBuildSide has returned, after which the build side structures
+    // Blocks until ProcessBuildInput has returned, after which the build side structures
     // are fully constructed.
     RETURN_IF_ERROR(build_side_status.Get());
     RETURN_IF_ERROR(open_status);
@@ -208,34 +219,79 @@ Status BlockingJoinNode::Open(RuntimeState* state) {
     // TODO: Remove this special-case behavior for subplans once we have proper
     // projection. See UnnestNode for details on the current projection implementation.
     RETURN_IF_ERROR(child(0)->Open(state));
-    RETURN_IF_ERROR(ConstructBuildSide(state));
+    if (build_sink == NULL) {
+      RETURN_IF_ERROR(ProcessBuildInput(state));
+    } else {
+      RETURN_IF_ERROR(SendBuildInputToSink<false>(state, build_sink));
+    }
   } else {
     // The left/right child never overlap. The overlap stops here.
-    built_probe_overlap_stop_watch_.SetTimeCeiling(MonotonicNanos());
-    RETURN_IF_ERROR(ConstructBuildSide(state));
+    built_probe_overlap_stop_watch_.SetTimeCeiling();
+    if (build_sink == NULL) {
+      RETURN_IF_ERROR(ProcessBuildInput(state));
+    } else {
+      RETURN_IF_ERROR(SendBuildInputToSink<false>(state, build_sink));
+    }
     RETURN_IF_ERROR(child(0)->Open(state));
   }
+  return Status::OK();
+}
 
-  // Seed left child in preparation for GetNext().
+Status BlockingJoinNode::GetFirstProbeRow(RuntimeState* state) {
+  DCHECK(!probe_side_eos_);
+  DCHECK_EQ(probe_batch_->num_rows(), 0);
   while (true) {
     RETURN_IF_ERROR(child(0)->GetNext(state, probe_batch_.get(), &probe_side_eos_));
     COUNTER_ADD(probe_row_counter_, probe_batch_->num_rows());
     probe_batch_pos_ = 0;
-    if (probe_batch_->num_rows() == 0) {
-      if (probe_side_eos_) {
-        RETURN_IF_ERROR(InitGetNext(NULL /* eos */));
-        // If the probe side is exhausted, set the eos_ to true for only those
-        // join modes that don't need to process unmatched build rows.
-        eos_ = !NeedToProcessUnmatchedBuildRows();
-        break;
-      }
-      probe_batch_->Reset();
-      continue;
-    } else {
+    if (probe_batch_->num_rows() > 0) {
       current_probe_row_ = probe_batch_->GetRow(probe_batch_pos_++);
-      RETURN_IF_ERROR(InitGetNext(current_probe_row_));
-      break;
+      return Status::OK();
+    } else if (probe_side_eos_) {
+      // If the probe side is exhausted, set the eos_ to true for only those
+      // join modes that don't need to process unmatched build rows.
+      eos_ = !NeedToProcessUnmatchedBuildRows();
+      return Status::OK();
     }
+    probe_batch_->Reset();
+  }
+}
+
+template <bool ASYNC_BUILD>
+Status BlockingJoinNode::SendBuildInputToSink(RuntimeState* state,
+    DataSink* build_sink) {
+  {
+    CONDITIONAL_SCOPED_STOP_WATCH(&built_probe_overlap_stop_watch_, ASYNC_BUILD);
+    RETURN_IF_ERROR(child(1)->Open(state));
+  }
+
+  {
+    SCOPED_TIMER(build_timer_);
+    RETURN_IF_ERROR(build_sink->Open(state));
+  }
+
+  DCHECK_EQ(build_batch_->num_rows(), 0);
+  bool eos = false;
+  do {
+    RETURN_IF_CANCELLED(state);
+    RETURN_IF_ERROR(QueryMaintenance(state));
+
+    {
+      CONDITIONAL_SCOPED_STOP_WATCH(&built_probe_overlap_stop_watch_, ASYNC_BUILD);
+      RETURN_IF_ERROR(child(1)->GetNext(state, build_batch_.get(), &eos));
+    }
+    COUNTER_ADD(build_row_counter_, build_batch_->num_rows());
+
+    {
+      SCOPED_TIMER(build_timer_);
+      RETURN_IF_ERROR(build_sink->Send(state, build_batch_.get()));
+    }
+    build_batch_->Reset();
+  } while (!eos);
+
+  {
+    SCOPED_TIMER(build_timer_);
+    RETURN_IF_ERROR(build_sink->FlushFinal(state));
   }
   return Status::OK();
 }

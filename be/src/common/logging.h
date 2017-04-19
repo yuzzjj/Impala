@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_COMMON_LOGGING_H
@@ -39,11 +42,6 @@
   #define VLOG(level) while(false) std::cout
   #define VLOG_IS_ON(level) (false)
 #else
-  /// GLOG defines this based on the system but doesn't check if it's already
-  /// been defined.  undef it first to avoid warnings.
-  /// glog MUST be included before gflags.  Instead of including them,
-  /// our files should include this file instead.
-  #undef _XOPEN_SOURCE
   #include <glog/logging.h>
   #include <gflags/gflags.h>
 #endif
@@ -84,9 +82,14 @@ void ShutdownLogging();
 /// Writes all command-line flags to the log at level INFO.
 void LogCommandLineFlags();
 
-/// Helper function that checks for the number of logfiles in the log directory and removes
-/// the oldest ones given an upper bound of number of logfiles to keep.
+/// Helper function that checks for the number of logfiles in the log directory and
+/// removes the oldest ones given an upper bound of number of logfiles to keep.
 void CheckAndRotateLogFiles(int max_log_files);
+
+/// Helper function that checks for the number of audit event logfiles in the log
+/// directory and removes the oldest ones given an upper bound of number of audit event
+/// logfiles to keep.
+void CheckAndRotateAuditEventLogFiles(int max_log_files);
 }
 
 #endif // IR_COMPILE

@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXPRS_LITERAL_H_
@@ -37,22 +40,26 @@ class Literal: public Expr {
   Literal(ColumnType type, double v);
   Literal(ColumnType type, const std::string& v);
   Literal(ColumnType type, const StringValue& v);
+  Literal(ColumnType type, const TimestampValue& v);
 
   /// Test function that parses 'str' according to 'type'. The caller owns the returned
   /// Literal.
   static Literal* CreateLiteral(const ColumnType& type, const std::string& str);
 
-  virtual Status GetCodegendComputeFn(RuntimeState* state, llvm::Function** fn);
+  virtual bool IsLiteral() const;
 
-  virtual impala_udf::BooleanVal GetBooleanVal(ExprContext*, TupleRow*);
-  virtual impala_udf::TinyIntVal GetTinyIntVal(ExprContext*, TupleRow*);
-  virtual impala_udf::SmallIntVal GetSmallIntVal(ExprContext*, TupleRow*);
-  virtual impala_udf::IntVal GetIntVal(ExprContext*, TupleRow*);
-  virtual impala_udf::BigIntVal GetBigIntVal(ExprContext*, TupleRow*);
-  virtual impala_udf::FloatVal GetFloatVal(ExprContext*, TupleRow*);
-  virtual impala_udf::DoubleVal GetDoubleVal(ExprContext*, TupleRow*);
-  virtual impala_udf::StringVal GetStringVal(ExprContext*, TupleRow*);
-  virtual impala_udf::DecimalVal GetDecimalVal(ExprContext*, TupleRow*);
+  virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn);
+
+  virtual impala_udf::BooleanVal GetBooleanVal(ExprContext*, const TupleRow*);
+  virtual impala_udf::TinyIntVal GetTinyIntVal(ExprContext*, const TupleRow*);
+  virtual impala_udf::SmallIntVal GetSmallIntVal(ExprContext*, const TupleRow*);
+  virtual impala_udf::IntVal GetIntVal(ExprContext*, const TupleRow*);
+  virtual impala_udf::BigIntVal GetBigIntVal(ExprContext*, const TupleRow*);
+  virtual impala_udf::FloatVal GetFloatVal(ExprContext*, const TupleRow*);
+  virtual impala_udf::DoubleVal GetDoubleVal(ExprContext*, const TupleRow*);
+  virtual impala_udf::StringVal GetStringVal(ExprContext*, const TupleRow*);
+  virtual impala_udf::DecimalVal GetDecimalVal(ExprContext*, const TupleRow*);
+  virtual impala_udf::TimestampVal GetTimestampVal(ExprContext*, const TupleRow*);
 
  protected:
   friend class Expr;

@@ -1,31 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <!--
- Copyright 2012 Cloudera Inc.
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
 
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
 -->
 
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
-  <groupId>com.cloudera.impala</groupId>
+  <groupId>org.apache.impala</groupId>
   <artifactId>impala-frontend</artifactId>
   <version>0.1-SNAPSHOT</version>
   <packaging>jar</packaging>
 
-  <name>Cloudera Impala Query Engine Frontend</name>
+  <name>Apache Impala (Incubating) Query Engine Frontend</name>
 
   <properties>
+    <surefire.reports.dir>${env.IMPALA_LOGS_DIR}/fe_tests</surefire.reports.dir>
+    <jacoco.skip>true</jacoco.skip>
+    <jacoco.data.file>${env.IMPALA_FE_TEST_COVERAGE_DIR}/jacoco.exec</jacoco.data.file>
+    <jacoco.report.dir>${env.IMPALA_FE_TEST_COVERAGE_DIR}</jacoco.report.dir>
     <test.hive.testdata>${project.basedir}/../testdata/target/AllTypes.txt</test.hive.testdata>
     <backend.library.path>${env.IMPALA_HOME}/be/build/debug/service:${env.IMPALA_HOME}/be/build/release/service</backend.library.path>
     <beeswax_port>21000</beeswax_port>
@@ -37,14 +44,18 @@
     <hbase.version>${env.IMPALA_HBASE_VERSION}</hbase.version>
     <parquet.version>${env.IMPALA_PARQUET_VERSION}</parquet.version>
     <impala.extdatasrc.api.version>1.0-SNAPSHOT</impala.extdatasrc.api.version>
-    <!-- Impala does not currently support the Hive .13 JDBC driver -->
-    <hive-jdbc.version>0.13.1-cdh5.2.0-SNAPSHOT</hive-jdbc.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <kudu.version>${env.KUDU_JAVA_VERSION}</kudu.version>
   </properties>
 
   <dependencies>
     <dependency>
-      <groupId>com.cloudera.impala</groupId>
+      <groupId>org.htrace</groupId>
+      <artifactId>htrace-core</artifactId>
+      <version>3.0.4</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.impala</groupId>
       <artifactId>impala-data-source-api</artifactId>
       <version>${impala.extdatasrc.api.version}</version>
     </dependency>
@@ -176,27 +187,15 @@
     </dependency>
 
     <dependency>
-      <groupId>org.cloudera.htrace</groupId>
-      <artifactId>htrace-core</artifactId>
-      <version>2.00</version>
-    </dependency>
-
-    <dependency>
-      <groupId>org.apache.shiro</groupId>
-      <artifactId>shiro-core</artifactId>
-      <version>1.2.1</version>
-    </dependency>
-
-    <dependency>
       <groupId>commons-lang</groupId>
       <artifactId>commons-lang</artifactId>
       <version>2.6</version>
     </dependency>
 
     <dependency>
-      <groupId>net.sf.squirrel-sql.thirdparty-non-maven</groupId>
+      <groupId>net.sourceforge.czt.dev</groupId>
       <artifactId>java-cup</artifactId>
-      <version>0.11a</version>
+      <version>0.11-a-czt02-cdh</version>
     </dependency>
 
     <!-- Moved above Hive, because Hive bundles its own Thrift version
@@ -208,7 +207,7 @@
       <version>${env.IMPALA_THRIFT_JAVA_VERSION}</version>
       <!-- libthrift depends httpcore 4.1.3 which does not work with KMS. To workaround
            this problem the dependency is excluded here and we explicitly add a newer
-           httpcore dependency version. See CDH-22024. TODO: Find a better fix. -->
+           httpcore dependency version. See IMPALA-4210. TODO: Find a better fix. -->
       <exclusions>
         <exclusion>
           <groupId>org.apache.httpcomponents</groupId>
@@ -230,12 +229,6 @@
     </dependency>
 
     <dependency>
-      <groupId>org.apache.derby</groupId>
-      <artifactId>derby</artifactId>
-      <version>10.4.2.0</version>
-    </dependency>
-
-    <dependency>
       <groupId>org.apache.hive</groupId>
       <artifactId>hive-hbase-handler</artifactId>
       <version>${hive.version}</version>
@@ -248,7 +241,7 @@
     <dependency>
       <groupId>org.apache.hive</groupId>
       <artifactId>hive-jdbc</artifactId>
-      <version>${hive-jdbc.version}</version>
+      <version>${hive.version}</version>
       <scope>test</scope>
     </dependency>
 
@@ -276,6 +269,17 @@
       <groupId>org.apache.hive</groupId>
       <artifactId>hive-exec</artifactId>
       <version>${hive.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.kudu</groupId>
+      <artifactId>kudu-client</artifactId>
+      <version>${kudu.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.stumbleupon</groupId>
+      <artifactId>async</artifactId>
+      <version>1.3.1</version>
     </dependency>
 
     <!-- This driver supports PostgreSQL 7.2 and newer -->
@@ -346,6 +350,7 @@
       <artifactId>javax.json</artifactId>
       <version>1.0.2</version>
     </dependency>
+
   </dependencies>
 
   <reporting>
@@ -385,9 +390,9 @@
       </plugin>
 
       <plugin>
-        <groupId>net.sourceforge.czt</groupId>
-        <artifactId>maven-cup-plugin</artifactId>
-        <version>1.6.4</version>
+        <groupId>net.sourceforge.czt.dev</groupId>
+        <artifactId>cup-maven-plugin</artifactId>
+        <version>1.6-cdh</version>
         <executions>
           <execution>
             <id>cup</id>
@@ -395,14 +400,14 @@
             <goals>
               <goal>generate</goal>
             </goals>
-            <configuration>
-              <extension>y</extension>
-              <parserOutput>SqlParser</parserOutput>
-              <symbolOutput>SqlParserSymbols</symbolOutput>
-              <outputDirectory>${project.build.directory}/generated-sources/cup</outputDirectory>
-            </configuration>
           </execution>
         </executions>
+        <configuration>
+          <cupDefinition>sql-parser.cup</cupDefinition>
+          <className>SqlParser</className>
+          <symbolsName>SqlParserSymbols</symbolsName>
+          <outputDirectory>${project.build.directory}/generated-sources/cup</outputDirectory>
+        </configuration>
       </plugin>
 
       <plugin>
@@ -448,8 +453,9 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>2.18</version>
         <configuration>
+          <reportsDirectory>${surefire.reports.dir}</reportsDirectory>
           <redirectTestOutputToFile>true</redirectTestOutputToFile>
-          <argLine>-Djava.library.path=${java.library.path}:${backend.library.path}</argLine>
+          <argLine>-Djava.library.path=${java.library.path}:${backend.library.path} ${surefireJacocoArg}</argLine>
           <systemProperties>
             <property>
               <name>testExecutionMode</name>
@@ -464,19 +470,6 @@
               <value>${use_external_impalad}</value>
             </property>
           </systemProperties>
-        </configuration>
-      </plugin>
-
-      <plugin>
-        <groupId>com.atlassian.maven.plugins</groupId>
-        <artifactId>maven-clover2-plugin</artifactId>
-        <version>3.0.2</version>
-        <configuration>
-          <generateHtml>true</generateHtml>
-          <generateXml>true</generateXml>
-          <excludes>
-            <exclude>**/jdbc/*.java</exclude>
-          </excludes>
         </configuration>
       </plugin>
 
@@ -530,6 +523,41 @@
             </systemProperties>
           </configuration>
       </plugin>
+
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>0.7.6.201602180812</version>
+        <executions>
+          <execution>
+            <id>prepare-jacoco-agent</id>
+            <goals>
+              <goal>prepare-agent</goal>
+            </goals>
+            <configuration>
+              <destFile>${jacoco.data.file}</destFile>
+              <propertyName>surefireJacocoArg</propertyName>
+            </configuration>
+          </execution>
+          <execution>
+            <id>jacoco-report</id>
+            <phase>test</phase>
+            <goals>
+             <goal>report</goal>
+            </goals>
+            <configuration>
+              <dataFile>${jacoco.data.file}</dataFile>
+              <outputDirectory>${jacoco.report.dir}</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+        <configuration>
+          <!-- Code coverage reporting is disabled by default and must be enabled
+               when running tests like this: mvn test -DcodeCoverage -->
+          <skip>${jacoco.skip}</skip>
+        </configuration>
+      </plugin>
+
   </plugins>
     <pluginManagement>
       <plugins>
@@ -633,6 +661,19 @@
         <enabled>false</enabled>
       </snapshots>
     </repository>
+
+    <!-- This is needed for java-cup. TODO add the plugin to our maven repo -->
+    <repository>
+      <id>sonatype-nexus-snapshots</id>
+      <name>Sonatype Nexus Snapshots</name>
+      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+      <releases>
+        <enabled>false</enabled>
+      </releases>
+      <snapshots>
+        <enabled>true</enabled>
+      </snapshots>
+    </repository>
   </repositories>
 
   <pluginRepositories>
@@ -663,6 +704,19 @@
         <enabled>false</enabled>
       </snapshots>
     </pluginRepository>
+
+    <!-- This is needed for the cup maven plugin. TODO add the plugin to our maven repo -->
+    <pluginRepository>
+      <id>sonatype-nexus-snapshots</id>
+      <name>Sonatype Nexus Snapshots</name>
+      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+      <releases>
+        <enabled>false</enabled>
+      </releases>
+      <snapshots>
+        <enabled>true</enabled>
+      </snapshots>
+    </pluginRepository>
   </pluginRepositories>
 
   <profiles>
@@ -675,6 +729,23 @@
       </activation>
       <properties>
         <thrift.executable>${env.THRIFT_HOME}/bin/thrift</thrift.executable>
+      </properties>
+    </profile>
+    <profile>
+      <id>jacoco-code-coverage</id>
+      <activation>
+        <property>
+          <!-- Enable code coverage if the 'codeCoverage' property is set.
+               Usage: mvn test -DcodeCoverage -->
+          <name>codeCoverage</name>
+        </property>
+      </activation>
+      <properties>
+        <jacoco.skip>false</jacoco.skip>
+        <!-- Due to Jacoco's runtime instrumentation some tests could fail.
+             In order to still produce a coverage report it is recommended
+             to ignore test failures. -->
+        <maven.test.failure.ignore>true</maven.test.failure.ignore>
       </properties>
     </profile>
   </profiles>

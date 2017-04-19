@@ -23,6 +23,8 @@ order by
   o_orderdate
 limit 10
 ---- PLAN
+PLAN-ROOT SINK
+|
 06:TOP-N [LIMIT=10]
 |  order by: round(sum(l_extendedprice * (1 - l_discount)), 5) DESC, o_orderdate ASC
 |
@@ -52,6 +54,8 @@ limit 10
    predicates: l_shipdate > '1995-03-15'
    runtime filters: RF001 -> l.l_orderkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 11:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: round(sum(l_extendedprice * (1 - l_discount)), 5) DESC, o_orderdate ASC
 |  limit: 10
@@ -120,6 +124,8 @@ order by
   o_orderdate
 limit 10
 ---- PLAN
+PLAN-ROOT SINK
+|
 06:TOP-N [LIMIT=10]
 |  order by: round(sum(l_extendedprice * (1 - l_discount)), 5) DESC, o_orderdate ASC
 |
@@ -149,6 +155,8 @@ limit 10
    predicates: c.c_mktsegment = 'BUILDING'
    runtime filters: RF001 -> c.c_custkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 11:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: round(sum(l_extendedprice * (1 - l_discount)), 5) DESC, o_orderdate ASC
 |  limit: 10
@@ -219,6 +227,8 @@ order by
   revenue desc
 limit 100
 ---- PLAN
+PLAN-ROOT SINK
+|
 12:TOP-N [LIMIT=100]
 |  order by: round(sum(l_extendedprice * (1 - l_discount)), 5) DESC
 |
@@ -243,11 +253,12 @@ limit 100
 |     runtime filters: RF000 -> n_regionkey
 |
 08:HASH JOIN [INNER JOIN]
-|  hash predicates: l_suppkey = s_suppkey, c_nationkey = s_nationkey
-|  runtime filters: RF002 <- s_suppkey, RF003 <- s_nationkey
+|  hash predicates: c_nationkey = s_nationkey, l_suppkey = s_suppkey
+|  runtime filters: RF002 <- s_nationkey, RF003 <- s_suppkey
 |
 |--03:SCAN HDFS [tpch.supplier s]
 |     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF001 -> s_nationkey
 |
 07:HASH JOIN [INNER JOIN]
 |  hash predicates: o_custkey = c_custkey
@@ -255,7 +266,7 @@ limit 100
 |
 |--00:SCAN HDFS [tpch.customer]
 |     partitions=1/1 files=1 size=23.08MB
-|     runtime filters: RF001 -> tpch.customer.c_nationkey, RF003 -> c_nationkey
+|     runtime filters: RF001 -> tpch.customer.c_nationkey, RF002 -> c_nationkey
 |
 06:HASH JOIN [INNER JOIN]
 |  hash predicates: l_orderkey = o_orderkey
@@ -263,13 +274,15 @@ limit 100
 |
 |--01:SCAN HDFS [tpch.orders o]
 |     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1994-01-01', o_orderdate < '1995-01-01'
+|     predicates: o_orderdate < '1995-01-01', o_orderdate >= '1994-01-01'
 |     runtime filters: RF004 -> o_custkey
 |
 02:SCAN HDFS [tpch.lineitem l]
    partitions=1/1 files=1 size=718.94MB
-   runtime filters: RF002 -> l_suppkey, RF005 -> l_orderkey
+   runtime filters: RF003 -> l_suppkey, RF005 -> l_orderkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 20:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: round(sum(l_extendedprice * (1 - l_discount)), 5) DESC
 |  limit: 100
@@ -308,13 +321,14 @@ limit 100
 |     runtime filters: RF000 -> n_regionkey
 |
 08:HASH JOIN [INNER JOIN, BROADCAST]
-|  hash predicates: l_suppkey = s_suppkey, c_nationkey = s_nationkey
-|  runtime filters: RF002 <- s_suppkey, RF003 <- s_nationkey
+|  hash predicates: c_nationkey = s_nationkey, l_suppkey = s_suppkey
+|  runtime filters: RF002 <- s_nationkey, RF003 <- s_suppkey
 |
 |--15:EXCHANGE [BROADCAST]
 |  |
 |  03:SCAN HDFS [tpch.supplier s]
 |     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF001 -> s_nationkey
 |
 07:HASH JOIN [INNER JOIN, BROADCAST]
 |  hash predicates: o_custkey = c_custkey
@@ -324,7 +338,7 @@ limit 100
 |  |
 |  00:SCAN HDFS [tpch.customer]
 |     partitions=1/1 files=1 size=23.08MB
-|     runtime filters: RF001 -> tpch.customer.c_nationkey, RF003 -> c_nationkey
+|     runtime filters: RF001 -> tpch.customer.c_nationkey, RF002 -> c_nationkey
 |
 06:HASH JOIN [INNER JOIN, BROADCAST]
 |  hash predicates: l_orderkey = o_orderkey
@@ -334,12 +348,12 @@ limit 100
 |  |
 |  01:SCAN HDFS [tpch.orders o]
 |     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1994-01-01', o_orderdate < '1995-01-01'
+|     predicates: o_orderdate < '1995-01-01', o_orderdate >= '1994-01-01'
 |     runtime filters: RF004 -> o_custkey
 |
 02:SCAN HDFS [tpch.lineitem l]
    partitions=1/1 files=1 size=718.94MB
-   runtime filters: RF002 -> l_suppkey, RF005 -> l_orderkey
+   runtime filters: RF003 -> l_suppkey, RF005 -> l_orderkey
 ====
 # Q2 - Minimum Cost Supplier Query
 select
@@ -367,6 +381,8 @@ where
   and s.s_nationkey = n.n_nationkey
   and n.n_regionkey = r.r_regionkey
 ---- PLAN
+PLAN-ROOT SINK
+|
 08:HASH JOIN [INNER JOIN]
 |  hash predicates: n.n_regionkey = r.r_regionkey
 |  runtime filters: RF000 <- r.r_regionkey
@@ -384,25 +400,27 @@ where
 |     runtime filters: RF000 -> n.n_regionkey
 |
 06:HASH JOIN [INNER JOIN]
-|  hash predicates: ps.ps_suppkey = s.s_suppkey
-|  runtime filters: RF002 <- s.s_suppkey
+|  hash predicates: s.s_suppkey = ps.ps_suppkey
+|  runtime filters: RF002 <- ps.ps_suppkey
 |
-|--01:SCAN HDFS [tpch.supplier s]
-|     partitions=1/1 files=1 size=1.33MB
-|     runtime filters: RF001 -> s.s_nationkey
+|--05:HASH JOIN [INNER JOIN]
+|  |  hash predicates: ps.ps_partkey = p.p_partkey
+|  |  runtime filters: RF003 <- p.p_partkey
+|  |
+|  |--00:SCAN HDFS [tpch.part p]
+|  |     partitions=1/1 files=1 size=22.83MB
+|  |     predicates: p.p_size = 15, p.p_type LIKE '%BRASS'
+|  |
+|  02:SCAN HDFS [tpch.partsupp ps]
+|     partitions=1/1 files=1 size=112.71MB
+|     runtime filters: RF003 -> ps.ps_partkey
 |
-05:HASH JOIN [INNER JOIN]
-|  hash predicates: ps.ps_partkey = p.p_partkey
-|  runtime filters: RF003 <- p.p_partkey
-|
-|--00:SCAN HDFS [tpch.part p]
-|     partitions=1/1 files=1 size=22.83MB
-|     predicates: p.p_size = 15, p.p_type LIKE '%BRASS'
-|
-02:SCAN HDFS [tpch.partsupp ps]
-   partitions=1/1 files=1 size=112.71MB
-   runtime filters: RF002 -> ps.ps_suppkey, RF003 -> ps.ps_partkey
+01:SCAN HDFS [tpch.supplier s]
+   partitions=1/1 files=1 size=1.33MB
+   runtime filters: RF001 -> s.s_nationkey, RF002 -> s.s_suppkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 13:EXCHANGE [UNPARTITIONED]
 |
 08:HASH JOIN [INNER JOIN, BROADCAST]
@@ -426,28 +444,28 @@ where
 |     runtime filters: RF000 -> n.n_regionkey
 |
 06:HASH JOIN [INNER JOIN, BROADCAST]
-|  hash predicates: ps.ps_suppkey = s.s_suppkey
-|  runtime filters: RF002 <- s.s_suppkey
+|  hash predicates: s.s_suppkey = ps.ps_suppkey
+|  runtime filters: RF002 <- ps.ps_suppkey
 |
 |--10:EXCHANGE [BROADCAST]
 |  |
-|  01:SCAN HDFS [tpch.supplier s]
-|     partitions=1/1 files=1 size=1.33MB
-|     runtime filters: RF001 -> s.s_nationkey
-|
-05:HASH JOIN [INNER JOIN, BROADCAST]
-|  hash predicates: ps.ps_partkey = p.p_partkey
-|  runtime filters: RF003 <- p.p_partkey
-|
-|--09:EXCHANGE [BROADCAST]
+|  05:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  hash predicates: ps.ps_partkey = p.p_partkey
+|  |  runtime filters: RF003 <- p.p_partkey
 |  |
-|  00:SCAN HDFS [tpch.part p]
-|     partitions=1/1 files=1 size=22.83MB
-|     predicates: p.p_size = 15, p.p_type LIKE '%BRASS'
+|  |--09:EXCHANGE [BROADCAST]
+|  |  |
+|  |  00:SCAN HDFS [tpch.part p]
+|  |     partitions=1/1 files=1 size=22.83MB
+|  |     predicates: p.p_size = 15, p.p_type LIKE '%BRASS'
+|  |
+|  02:SCAN HDFS [tpch.partsupp ps]
+|     partitions=1/1 files=1 size=112.71MB
+|     runtime filters: RF003 -> ps.ps_partkey
 |
-02:SCAN HDFS [tpch.partsupp ps]
-   partitions=1/1 files=1 size=112.71MB
-   runtime filters: RF002 -> ps.ps_suppkey, RF003 -> ps.ps_partkey
+01:SCAN HDFS [tpch.supplier s]
+   partitions=1/1 files=1 size=1.33MB
+   runtime filters: RF001 -> s.s_nationkey, RF002 -> s.s_suppkey
 ====
 # Q4 - Order Priority Checking Query
 # the largest input is prevented from becoming the leftmost input by the semi-join
@@ -467,6 +485,8 @@ order by
   o_orderpriority
 limit 10
 ---- PLAN
+PLAN-ROOT SINK
+|
 04:TOP-N [LIMIT=10]
 |  order by: o_orderpriority ASC
 |
@@ -480,13 +500,15 @@ limit 10
 |
 |--00:SCAN HDFS [tpch.orders]
 |     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1993-07-01', o_orderdate < '1993-10-01'
+|     predicates: o_orderdate < '1993-10-01', o_orderdate >= '1993-07-01'
 |
 01:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
    predicates: l_commitdate < l_receiptdate
    runtime filters: RF000 -> l_orderkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 09:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: o_orderpriority ASC
 |  limit: 10
@@ -512,7 +534,7 @@ limit 10
 |  |
 |  00:SCAN HDFS [tpch.orders]
 |     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1993-07-01', o_orderdate < '1993-10-01'
+|     predicates: o_orderdate < '1993-10-01', o_orderdate >= '1993-07-01'
 |
 05:EXCHANGE [HASH(l_orderkey)]
 |
@@ -529,6 +551,8 @@ from tpch.orders
 group by o_orderpriority
 order by o_orderpriority limit 10
 ---- PLAN
+PLAN-ROOT SINK
+|
 04:TOP-N [LIMIT=10]
 |  order by: o_orderpriority ASC
 |
@@ -545,6 +569,8 @@ order by o_orderpriority limit 10
 00:SCAN HDFS [tpch.orders]
    partitions=1/1 files=1 size=162.56MB
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 09:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: o_orderpriority ASC
 |  limit: 10
@@ -583,6 +609,8 @@ from tpch.orders
 group by o_orderpriority
 order by o_orderpriority limit 10
 ---- PLAN
+PLAN-ROOT SINK
+|
 04:TOP-N [LIMIT=10]
 |  order by: o_orderpriority ASC
 |
@@ -601,6 +629,8 @@ order by o_orderpriority limit 10
    partitions=1/1 files=1 size=162.56MB
    runtime filters: RF000 -> o_orderkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 09:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: o_orderpriority ASC
 |  limit: 10
@@ -641,6 +671,8 @@ from tpch.customer
   join tpch.nation on (c_nationkey = n_nationkey)
 where n_name = 'x'
 ---- PLAN
+PLAN-ROOT SINK
+|
 05:AGGREGATE [FINALIZE]
 |  output: count(*)
 |
@@ -664,6 +696,8 @@ where n_name = 'x'
    partitions=1/1 files=1 size=162.56MB
    runtime filters: RF001 -> o_custkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 10:AGGREGATE [FINALIZE]
 |  output: count:merge(*)
 |
@@ -706,6 +740,8 @@ from tpch.customer
   join tpch.nation on (c_nationkey = n_nationkey)
 where n_name = 'x'
 ---- PLAN
+PLAN-ROOT SINK
+|
 05:AGGREGATE [FINALIZE]
 |  output: count(*)
 |
@@ -726,6 +762,8 @@ where n_name = 'x'
    partitions=1/1 files=1 size=23.08MB
    runtime filters: RF000 -> c_nationkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 09:AGGREGATE [FINALIZE]
 |  output: count:merge(*)
 |
@@ -763,6 +801,8 @@ select c.int_col from functional.alltypestiny a
 cross join functional.alltypestiny b
 cross join functional.alltypes c
 ---- PLAN
+PLAN-ROOT SINK
+|
 04:NESTED LOOP JOIN [CROSS JOIN]
 |
 |--03:NESTED LOOP JOIN [CROSS JOIN]
@@ -786,47 +826,52 @@ right join functional.alltypesagg t4 on (t3.id = t4.id)
 inner join functional.alltypes t5 on (t4.id = t5.id)
 inner join functional.alltypestiny t6 on (t5.id = t6.id)
 ---- PLAN
+PLAN-ROOT SINK
+|
 11:AGGREGATE [FINALIZE]
 |  output: count(*)
 |
 10:HASH JOIN [INNER JOIN]
-|  hash predicates: t5.id = t6.id
-|  runtime filters: RF000 <- t6.id
+|  hash predicates: t5.id = t4.id
+|  runtime filters: RF000 <- t4.id
 |
-|--05:SCAN HDFS [functional.alltypestiny t6]
-|     partitions=4/4 files=4 size=460B
-|
-09:HASH JOIN [INNER JOIN]
-|  hash predicates: t4.id = t5.id
-|  runtime filters: RF001 <- t5.id
-|
-|--04:SCAN HDFS [functional.alltypes t5]
-|     partitions=24/24 files=24 size=478.45KB
-|
-08:HASH JOIN [LEFT OUTER JOIN]
-|  hash predicates: t4.id = t3.id
-|
-|--07:HASH JOIN [INNER JOIN]
-|  |  hash predicates: t2.id = t3.id
-|  |  runtime filters: RF002 <- t3.id
+|--09:HASH JOIN [INNER JOIN]
+|  |  hash predicates: t4.id = t6.id
+|  |  runtime filters: RF001 <- t6.id
 |  |
-|  |--02:SCAN HDFS [functional.alltypessmall t3]
-|  |     partitions=4/4 files=4 size=6.32KB
-|  |
-|  06:HASH JOIN [INNER JOIN]
-|  |  hash predicates: t2.id = t1.id
-|  |  runtime filters: RF003 <- t1.id
-|  |
-|  |--00:SCAN HDFS [functional.alltypestiny t1]
+|  |--05:SCAN HDFS [functional.alltypestiny t6]
 |  |     partitions=4/4 files=4 size=460B
 |  |
-|  01:SCAN HDFS [functional.alltypes t2]
-|     partitions=24/24 files=24 size=478.45KB
-|     runtime filters: RF002 -> t2.id, RF003 -> t2.id
+|  08:HASH JOIN [LEFT OUTER JOIN]
+|  |  hash predicates: t4.id = t3.id
+|  |
+|  |--07:HASH JOIN [INNER JOIN]
+|  |  |  hash predicates: t3.id = t2.id
+|  |  |  runtime filters: RF002 <- t2.id
+|  |  |
+|  |  |--06:HASH JOIN [INNER JOIN]
+|  |  |  |  hash predicates: t2.id = t1.id
+|  |  |  |  runtime filters: RF003 <- t1.id
+|  |  |  |
+|  |  |  |--00:SCAN HDFS [functional.alltypestiny t1]
+|  |  |  |     partitions=4/4 files=4 size=460B
+|  |  |  |     runtime filters: RF001 -> t1.id
+|  |  |  |
+|  |  |  01:SCAN HDFS [functional.alltypes t2]
+|  |  |     partitions=24/24 files=24 size=478.45KB
+|  |  |     runtime filters: RF001 -> t2.id, RF003 -> t2.id
+|  |  |
+|  |  02:SCAN HDFS [functional.alltypessmall t3]
+|  |     partitions=4/4 files=4 size=6.32KB
+|  |     runtime filters: RF001 -> t3.id, RF002 -> t3.id
+|  |
+|  03:SCAN HDFS [functional.alltypesagg t4]
+|     partitions=11/11 files=11 size=814.73KB
+|     runtime filters: RF001 -> t4.id
 |
-03:SCAN HDFS [functional.alltypesagg t4]
-   partitions=11/11 files=11 size=814.73KB
-   runtime filters: RF000 -> t4.id, RF001 -> t4.id
+04:SCAN HDFS [functional.alltypes t5]
+   partitions=24/24 files=24 size=478.45KB
+   runtime filters: RF000 -> t5.id
 ====
 # No tables can be re-ordered because of semi and outer joins that must
 # remain at a fixed position in the plan (IMPALA-860).
@@ -838,44 +883,48 @@ left semi join functional.alltypesagg t4 on (t3.id = t4.id)
 inner join functional.alltypes t5 on (t3.id = t5.id)
 right join functional.alltypestiny t6 on (t5.id = t6.id)
 ---- PLAN
-11:AGGREGATE [FINALIZE]
+PLAN-ROOT SINK
+|
+13:AGGREGATE [FINALIZE]
 |  output: count(*)
 |
-10:HASH JOIN [LEFT OUTER JOIN]
+12:HASH JOIN [LEFT OUTER JOIN]
 |  hash predicates: t6.id = t5.id
 |
-|--09:HASH JOIN [INNER JOIN]
-|  |  hash predicates: t3.id = t5.id
-|  |  runtime filters: RF000 <- t5.id
+|--11:HASH JOIN [INNER JOIN]
+|  |  hash predicates: t5.id = t3.id
+|  |  runtime filters: RF000 <- t3.id
 |  |
-|  |--04:SCAN HDFS [functional.alltypes t5]
-|  |     partitions=24/24 files=24 size=478.45KB
-|  |
-|  08:HASH JOIN [RIGHT SEMI JOIN]
-|  |  hash predicates: t4.id = t3.id
-|  |  runtime filters: RF001 <- t3.id
-|  |
-|  |--07:HASH JOIN [INNER JOIN]
-|  |  |  hash predicates: t2.id = t3.id
-|  |  |  runtime filters: RF002 <- t3.id
+|  |--10:HASH JOIN [RIGHT SEMI JOIN]
+|  |  |  hash predicates: t4.id = t3.id
+|  |  |  runtime filters: RF001 <- t3.id
 |  |  |
-|  |  |--02:SCAN HDFS [functional.alltypessmall t3]
+|  |  |--09:HASH JOIN [INNER JOIN]
+|  |  |  |  hash predicates: t3.id = t2.id
+|  |  |  |  runtime filters: RF002 <- t2.id
+|  |  |  |
+|  |  |  |--08:HASH JOIN [RIGHT OUTER JOIN]
+|  |  |  |  |  hash predicates: t2.id = t1.id
+|  |  |  |  |  runtime filters: RF003 <- t1.id
+|  |  |  |  |
+|  |  |  |  |--00:SCAN HDFS [functional.alltypestiny t1]
+|  |  |  |  |     partitions=4/4 files=4 size=460B
+|  |  |  |  |
+|  |  |  |  01:SCAN HDFS [functional.alltypes t2]
+|  |  |  |     partitions=24/24 files=24 size=478.45KB
+|  |  |  |     runtime filters: RF003 -> t2.id
+|  |  |  |
+|  |  |  02:SCAN HDFS [functional.alltypessmall t3]
 |  |  |     partitions=4/4 files=4 size=6.32KB
+|  |  |     runtime filters: RF002 -> t3.id
 |  |  |
-|  |  06:HASH JOIN [RIGHT OUTER JOIN]
-|  |  |  hash predicates: t2.id = t1.id
-|  |  |  runtime filters: RF003 <- t1.id
-|  |  |
-|  |  |--00:SCAN HDFS [functional.alltypestiny t1]
-|  |  |     partitions=4/4 files=4 size=460B
-|  |  |
-|  |  01:SCAN HDFS [functional.alltypes t2]
-|  |     partitions=24/24 files=24 size=478.45KB
-|  |     runtime filters: RF002 -> t2.id, RF003 -> t2.id
+|  |  03:SCAN HDFS [functional.alltypesagg t4]
+|  |     partitions=11/11 files=11 size=814.73KB
+|  |     runtime filters: RF001 -> t4.id
 |  |
-|  03:SCAN HDFS [functional.alltypesagg t4]
-|     partitions=11/11 files=11 size=814.73KB
-|     runtime filters: RF000 -> t4.id, RF001 -> t4.id
+|  04:SCAN HDFS [functional.alltypes t5]
+|     partitions=24/24 files=24 size=478.45KB
+|     runtime filters: RF000 -> t5.id
 |
 05:SCAN HDFS [functional.alltypestiny t6]
    partitions=4/4 files=4 size=460B
@@ -890,48 +939,53 @@ inner join functional.alltypessmall t4 on (t3.id = t4.id)
 left semi join functional.alltypes t5 on (t4.id = t5.id)
 inner join functional.alltypestiny t6 on (t3.id = t6.id)
 ---- PLAN
-12:AGGREGATE [FINALIZE]
+PLAN-ROOT SINK
+|
+13:AGGREGATE [FINALIZE]
 |  output: count(*)
 |
-11:HASH JOIN [INNER JOIN]
-|  hash predicates: t3.id = t6.id
-|  runtime filters: RF000 <- t6.id
+12:HASH JOIN [INNER JOIN]
+|  hash predicates: t6.id = t3.id
+|  runtime filters: RF000 <- t3.id
 |
-|--05:SCAN HDFS [functional.alltypestiny t6]
-|     partitions=4/4 files=4 size=460B
-|
-10:HASH JOIN [RIGHT SEMI JOIN]
-|  hash predicates: t5.id = t4.id
-|  runtime filters: RF001 <- t4.id
-|
-|--09:HASH JOIN [INNER JOIN]
-|  |  hash predicates: t3.id = t4.id
-|  |  runtime filters: RF002 <- t4.id
+|--11:HASH JOIN [RIGHT SEMI JOIN]
+|  |  hash predicates: t5.id = t4.id
+|  |  runtime filters: RF001 <- t4.id
 |  |
-|  |--03:SCAN HDFS [functional.alltypessmall t4]
-|  |     partitions=4/4 files=4 size=6.32KB
-|  |
-|  08:HASH JOIN [INNER JOIN]
-|  |  hash predicates: t2.id = t3.id
-|  |  runtime filters: RF003 <- t3.id
-|  |
-|  |--02:SCAN HDFS [functional.alltypesagg t3]
+|  |--10:HASH JOIN [INNER JOIN]
+|  |  |  hash predicates: t3.id = t2.id
+|  |  |  runtime filters: RF002 <- t2.id
+|  |  |
+|  |  |--09:HASH JOIN [INNER JOIN]
+|  |  |  |  hash predicates: t4.id = t2.id
+|  |  |  |  runtime filters: RF003 <- t2.id
+|  |  |  |
+|  |  |  |--08:HASH JOIN [RIGHT OUTER JOIN]
+|  |  |  |  |  hash predicates: t2.id = t1.id
+|  |  |  |  |  runtime filters: RF004 <- t1.id
+|  |  |  |  |
+|  |  |  |  |--00:SCAN HDFS [functional.alltypestiny t1]
+|  |  |  |  |     partitions=4/4 files=4 size=460B
+|  |  |  |  |
+|  |  |  |  01:SCAN HDFS [functional.alltypes t2]
+|  |  |  |     partitions=24/24 files=24 size=478.45KB
+|  |  |  |     runtime filters: RF004 -> t2.id
+|  |  |  |
+|  |  |  03:SCAN HDFS [functional.alltypessmall t4]
+|  |  |     partitions=4/4 files=4 size=6.32KB
+|  |  |     runtime filters: RF003 -> t4.id
+|  |  |
+|  |  02:SCAN HDFS [functional.alltypesagg t3]
 |  |     partitions=11/11 files=11 size=814.73KB
+|  |     runtime filters: RF002 -> t3.id
 |  |
-|  07:HASH JOIN [RIGHT OUTER JOIN]
-|  |  hash predicates: t2.id = t1.id
-|  |  runtime filters: RF004 <- t1.id
-|  |
-|  |--00:SCAN HDFS [functional.alltypestiny t1]
-|  |     partitions=4/4 files=4 size=460B
-|  |
-|  01:SCAN HDFS [functional.alltypes t2]
+|  04:SCAN HDFS [functional.alltypes t5]
 |     partitions=24/24 files=24 size=478.45KB
-|     runtime filters: RF002 -> t2.id, RF003 -> t2.id, RF004 -> t2.id
+|     runtime filters: RF001 -> t5.id
 |
-04:SCAN HDFS [functional.alltypes t5]
-   partitions=24/24 files=24 size=478.45KB
-   runtime filters: RF000 -> t5.id, RF001 -> t5.id
+05:SCAN HDFS [functional.alltypestiny t6]
+   partitions=4/4 files=4 size=460B
+   runtime filters: RF000 -> t6.id
 ====
 # Same above but using an anti join instead of a semi join.
 select count(*) from
@@ -942,47 +996,51 @@ inner join functional.alltypessmall t4 on (t3.id = t4.id)
 left anti join functional.alltypes t5 on (t4.id = t5.id)
 inner join functional.alltypestiny t6 on (t3.id = t6.id)
 ---- PLAN
-12:AGGREGATE [FINALIZE]
+PLAN-ROOT SINK
+|
+13:AGGREGATE [FINALIZE]
 |  output: count(*)
 |
-11:HASH JOIN [INNER JOIN]
-|  hash predicates: t3.id = t6.id
-|  runtime filters: RF000 <- t6.id
+12:HASH JOIN [INNER JOIN]
+|  hash predicates: t6.id = t3.id
+|  runtime filters: RF000 <- t3.id
 |
-|--05:SCAN HDFS [functional.alltypestiny t6]
-|     partitions=4/4 files=4 size=460B
-|
-10:HASH JOIN [RIGHT ANTI JOIN]
-|  hash predicates: t5.id = t4.id
-|
-|--09:HASH JOIN [INNER JOIN]
-|  |  hash predicates: t3.id = t4.id
-|  |  runtime filters: RF001 <- t4.id
+|--11:HASH JOIN [RIGHT ANTI JOIN]
+|  |  hash predicates: t5.id = t4.id
 |  |
-|  |--03:SCAN HDFS [functional.alltypessmall t4]
-|  |     partitions=4/4 files=4 size=6.32KB
-|  |
-|  08:HASH JOIN [INNER JOIN]
-|  |  hash predicates: t2.id = t3.id
-|  |  runtime filters: RF002 <- t3.id
-|  |
-|  |--02:SCAN HDFS [functional.alltypesagg t3]
+|  |--10:HASH JOIN [INNER JOIN]
+|  |  |  hash predicates: t3.id = t2.id
+|  |  |  runtime filters: RF001 <- t2.id
+|  |  |
+|  |  |--09:HASH JOIN [INNER JOIN]
+|  |  |  |  hash predicates: t4.id = t2.id
+|  |  |  |  runtime filters: RF002 <- t2.id
+|  |  |  |
+|  |  |  |--08:HASH JOIN [RIGHT OUTER JOIN]
+|  |  |  |  |  hash predicates: t2.id = t1.id
+|  |  |  |  |  runtime filters: RF003 <- t1.id
+|  |  |  |  |
+|  |  |  |  |--00:SCAN HDFS [functional.alltypestiny t1]
+|  |  |  |  |     partitions=4/4 files=4 size=460B
+|  |  |  |  |
+|  |  |  |  01:SCAN HDFS [functional.alltypes t2]
+|  |  |  |     partitions=24/24 files=24 size=478.45KB
+|  |  |  |     runtime filters: RF003 -> t2.id
+|  |  |  |
+|  |  |  03:SCAN HDFS [functional.alltypessmall t4]
+|  |  |     partitions=4/4 files=4 size=6.32KB
+|  |  |     runtime filters: RF002 -> t4.id
+|  |  |
+|  |  02:SCAN HDFS [functional.alltypesagg t3]
 |  |     partitions=11/11 files=11 size=814.73KB
+|  |     runtime filters: RF001 -> t3.id
 |  |
-|  07:HASH JOIN [RIGHT OUTER JOIN]
-|  |  hash predicates: t2.id = t1.id
-|  |  runtime filters: RF003 <- t1.id
-|  |
-|  |--00:SCAN HDFS [functional.alltypestiny t1]
-|  |     partitions=4/4 files=4 size=460B
-|  |
-|  01:SCAN HDFS [functional.alltypes t2]
+|  04:SCAN HDFS [functional.alltypes t5]
 |     partitions=24/24 files=24 size=478.45KB
-|     runtime filters: RF001 -> t2.id, RF002 -> t2.id, RF003 -> t2.id
 |
-04:SCAN HDFS [functional.alltypes t5]
-   partitions=24/24 files=24 size=478.45KB
-   runtime filters: RF000 -> t5.id
+05:SCAN HDFS [functional.alltypestiny t6]
+   partitions=4/4 files=4 size=460B
+   runtime filters: RF000 -> t6.id
 ====
 # Test inverting outer joins in a complex query plan.
 select 1 from
@@ -1000,6 +1058,8 @@ on (t2.id = t3.id)
 inner join functional.alltypestiny t4
 on (t3.id = t4.id)
 ---- PLAN
+PLAN-ROOT SINK
+|
 12:HASH JOIN [INNER JOIN]
 |  hash predicates: t3.id = t4.id
 |  runtime filters: RF000 <- t4.id
@@ -1063,6 +1123,8 @@ on (t2.id = t3.id)
 inner join functional.alltypestiny t4
 on (t3.id = t4.id)
 ---- PLAN
+PLAN-ROOT SINK
+|
 12:HASH JOIN [INNER JOIN]
 |  hash predicates: t3.id = t4.id
 |  runtime filters: RF000 <- t4.id
@@ -1125,6 +1187,8 @@ inner join functional.alltypestiny t4
 on (t2.id = t4.id)
 where t2.month = 1
 ---- PLAN
+PLAN-ROOT SINK
+|
 12:HASH JOIN [INNER JOIN]
 |  hash predicates: b.id = t4.id
 |  runtime filters: RF000 <- t4.id
@@ -1163,10 +1227,11 @@ where t2.month = 1
 |  |
 |  |--05:SCAN HDFS [functional.alltypestiny a]
 |  |     partitions=4/4 files=4 size=460B
+|  |     runtime filters: RF000 -> a.id, RF002 -> a.id
 |  |
 |  06:SCAN HDFS [functional.alltypes b]
 |     partitions=2/24 files=2 size=40.32KB
-|     runtime filters: RF002 -> b.id, RF003 -> b.id
+|     runtime filters: RF000 -> b.id, RF002 -> b.id, RF003 -> b.id
 |
 08:SCAN HDFS [functional.alltypes t3]
    partitions=24/24 files=24 size=478.45KB
@@ -1188,6 +1253,8 @@ inner join functional.alltypestiny t4
 on (t2.id = t4.id)
 where t2.month = 1
 ---- PLAN
+PLAN-ROOT SINK
+|
 12:HASH JOIN [INNER JOIN]
 |  hash predicates: b.id = t4.id
 |  runtime filters: RF000 <- t4.id
@@ -1224,6 +1291,7 @@ where t2.month = 1
 |  |
 |  |--05:SCAN HDFS [functional.alltypestiny a]
 |  |     partitions=4/4 files=4 size=460B
+|  |     runtime filters: RF000 -> a.id, RF001 -> a.id
 |  |
 |  06:SCAN HDFS [functional.alltypes b]
 |     partitions=2/24 files=2 size=40.32KB
@@ -1231,6 +1299,7 @@ where t2.month = 1
 |
 08:SCAN HDFS [functional.alltypes t3]
    partitions=24/24 files=24 size=478.45KB
+   runtime filters: RF000 -> t3.id
 ====
 # Regression test for IMPALA-1343.
 SELECT sum(t4.tinyint_col)
@@ -1249,6 +1318,8 @@ LEFT SEMI JOIN
 ON t4.bigint_col = `$a$3`.`$c$1`
 WHERE `$a$2`.`$c$1` > t4.id
 ---- PLAN
+PLAN-ROOT SINK
+|
 10:AGGREGATE [FINALIZE]
 |  output: sum(t4.tinyint_col)
 |
@@ -1262,12 +1333,6 @@ WHERE `$a$2`.`$c$1` > t4.id
 08:NESTED LOOP JOIN [INNER JOIN]
 |  predicates: sum(t1.int_col) > t4.id
 |
-|--00:SCAN HDFS [functional.alltypestiny t4]
-|     partitions=4/4 files=4 size=460B
-|     runtime filters: RF000 -> t4.bigint_col
-|
-07:NESTED LOOP JOIN [CROSS JOIN]
-|
 |--05:AGGREGATE [FINALIZE]
 |  |  output: sum(t1.int_col)
 |  |  limit: 1
@@ -1275,17 +1340,23 @@ WHERE `$a$2`.`$c$1` > t4.id
 |  04:SCAN HDFS [functional.alltypesagg t1]
 |     partitions=11/11 files=11 size=814.73KB
 |
-03:HASH JOIN [INNER JOIN]
-|  hash predicates: t1.bigint_col = t2.smallint_col
-|  runtime filters: RF001 <- t2.smallint_col
-|  limit: 1
+07:NESTED LOOP JOIN [CROSS JOIN]
 |
-|--02:SCAN HDFS [functional.alltypestiny t2]
-|     partitions=4/4 files=4 size=460B
+|--03:HASH JOIN [INNER JOIN]
+|  |  hash predicates: t1.bigint_col = t2.smallint_col
+|  |  runtime filters: RF001 <- t2.smallint_col
+|  |  limit: 1
+|  |
+|  |--02:SCAN HDFS [functional.alltypestiny t2]
+|  |     partitions=4/4 files=4 size=460B
+|  |
+|  01:SCAN HDFS [functional.alltypes t1]
+|     partitions=24/24 files=24 size=478.45KB
+|     runtime filters: RF001 -> t1.bigint_col
 |
-01:SCAN HDFS [functional.alltypes t1]
-   partitions=24/24 files=24 size=478.45KB
-   runtime filters: RF001 -> t1.bigint_col
+00:SCAN HDFS [functional.alltypestiny t4]
+   partitions=4/4 files=4 size=460B
+   runtime filters: RF000 -> t4.bigint_col
 ====
 # Tests assignment of conjuncts to inverted outer joins (IMPALA-1342).
 select 1
@@ -1295,6 +1366,8 @@ left outer join functional.alltypessmall b
 # both predicates should appear in the 'other predicates'
 where a.int_col = b.int_col and b.bigint_col < a.tinyint_col
 ---- PLAN
+PLAN-ROOT SINK
+|
 02:HASH JOIN [RIGHT OUTER JOIN]
 |  hash predicates: b.id = a.id
 |  other predicates: a.int_col = b.int_col, b.bigint_col < a.tinyint_col
@@ -1318,9 +1391,11 @@ right outer join functional.alltypes c
 where a.int_col = b.int_col and b.bigint_col < a.tinyint_col
   and b.tinyint_col = c.tinyint_col and b.bool_col != c.bool_col
 ---- PLAN
+PLAN-ROOT SINK
+|
 04:HASH JOIN [LEFT OUTER JOIN]
 |  hash predicates: c.id = b.id
-|  other predicates: a.int_col = b.int_col, b.bigint_col < a.tinyint_col, b.tinyint_col = c.tinyint_col, b.bool_col != c.bool_col
+|  other predicates: a.int_col = b.int_col, b.bool_col != c.bool_col, b.tinyint_col = c.tinyint_col, b.bigint_col < a.tinyint_col
 |  runtime filters: RF000 <- b.tinyint_col
 |
 |--03:HASH JOIN [RIGHT OUTER JOIN]
@@ -1348,9 +1423,11 @@ right outer join functional.alltypes c
 # all predicates should appear in the 'other predicates'
 where b.tinyint_col = c.tinyint_col and b.bool_col != c.bool_col
 ---- PLAN
+PLAN-ROOT SINK
+|
 04:HASH JOIN [LEFT OUTER JOIN]
 |  hash predicates: c.id = b.id
-|  other predicates: b.tinyint_col = c.tinyint_col, b.bool_col != c.bool_col
+|  other predicates: b.bool_col != c.bool_col, b.tinyint_col = c.tinyint_col
 |  runtime filters: RF000 <- b.tinyint_col
 |
 |--03:HASH JOIN [INNER JOIN]
@@ -1378,6 +1455,8 @@ select count(1) from
 left outer join functional.alltypestiny t3
 on (t3.string_col = t1.string_col_1 and t3.date_string_col = t1.string_col_2)
 ---- PLAN
+PLAN-ROOT SINK
+|
 05:AGGREGATE [FINALIZE]
 |  output: count(1)
 |
@@ -1408,17 +1487,19 @@ on (t3.string_col = t1.string_col_1 and t3.date_string_col = t1.string_col_2)
 select * from functional.alltypes a
 left semi join
 (select * from functional.alltypes
-where timestamp_col = now()) b
+ where timestamp_col = cast("2016-11-20" as timestamp)) b
 on (a.id = b.id)
 and a.date_string_col = ''
 ---- PLAN
+PLAN-ROOT SINK
+|
 02:HASH JOIN [LEFT SEMI JOIN]
 |  hash predicates: a.id = functional.alltypes.id
 |  runtime filters: RF000 <- functional.alltypes.id
 |
 |--01:SCAN HDFS [functional.alltypes]
 |     partitions=24/24 files=24 size=478.45KB
-|     predicates: timestamp_col = now()
+|     predicates: timestamp_col = TIMESTAMP '2016-11-20 00:00:00'
 |
 00:SCAN HDFS [functional.alltypes a]
    partitions=24/24 files=24 size=478.45KB
@@ -1430,15 +1511,17 @@ left semi join
 (select * from functional.alltypes
 where date_string_col = '') b
 on (a.id = b.id)
-and a.timestamp_col = now()
+and a.timestamp_col = cast("2016-11-20" as timestamp)
 ---- PLAN
+PLAN-ROOT SINK
+|
 02:HASH JOIN [RIGHT SEMI JOIN]
 |  hash predicates: functional.alltypes.id = a.id
 |  runtime filters: RF000 <- a.id
 |
 |--00:SCAN HDFS [functional.alltypes a]
 |     partitions=24/24 files=24 size=478.45KB
-|     predicates: a.timestamp_col = now()
+|     predicates: a.timestamp_col = TIMESTAMP '2016-11-20 00:00:00'
 |
 01:SCAN HDFS [functional.alltypes]
    partitions=24/24 files=24 size=478.45KB
@@ -1449,17 +1532,19 @@ and a.timestamp_col = now()
 select * from functional.alltypes a
 left semi join
 (select * from functional.alltypes
-where timestamp_col <=> now()) b
+where timestamp_col <=> cast("2016-11-20" as timestamp)) b
 on (a.id = b.id)
 and a.date_string_col <=> ''
 ---- PLAN
+PLAN-ROOT SINK
+|
 02:HASH JOIN [LEFT SEMI JOIN]
 |  hash predicates: a.id = functional.alltypes.id
 |  runtime filters: RF000 <- functional.alltypes.id
 |
 |--01:SCAN HDFS [functional.alltypes]
 |     partitions=24/24 files=24 size=478.45KB
-|     predicates: timestamp_col IS NOT DISTINCT FROM now()
+|     predicates: timestamp_col IS NOT DISTINCT FROM TIMESTAMP '2016-11-20 00:00:00'
 |
 00:SCAN HDFS [functional.alltypes a]
    partitions=24/24 files=24 size=478.45KB
@@ -1471,15 +1556,17 @@ left semi join
 (select * from functional.alltypes
 where date_string_col <=> '') b
 on (a.id = b.id)
-and a.timestamp_col <=> now()
+and a.timestamp_col <=> cast("2016-11-20" as timestamp)
 ---- PLAN
+PLAN-ROOT SINK
+|
 02:HASH JOIN [RIGHT SEMI JOIN]
 |  hash predicates: functional.alltypes.id = a.id
 |  runtime filters: RF000 <- a.id
 |
 |--00:SCAN HDFS [functional.alltypes a]
 |     partitions=24/24 files=24 size=478.45KB
-|     predicates: a.timestamp_col IS NOT DISTINCT FROM now()
+|     predicates: a.timestamp_col IS NOT DISTINCT FROM TIMESTAMP '2016-11-20 00:00:00'
 |
 01:SCAN HDFS [functional.alltypes]
    partitions=24/24 files=24 size=478.45KB

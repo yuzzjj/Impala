@@ -1,9 +1,25 @@
-# Copyright (c) 2015 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 import pytest
 import re
+
 from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.common.test_vector import TestDimension
+from tests.common.test_vector import ImpalaTestDimension
 
 class TestHashJoinTimer(ImpalaTestSuite):
   """Tests that the local time in hash join is correct in the ExecSummary, average
@@ -44,8 +60,12 @@ class TestHashJoinTimer(ImpalaTestSuite):
               " where a.id>b.id and a.id=99",
               "NESTED LOOP JOIN"]
              ]
-  HASH_JOIN_UPPER_BOUND_MS = 1000 
-  HASH_JOIN_LOWER_BOUND_MS = 1
+  # IMPALA-2973: For non-code-coverage builds, 1000 milliseconds are sufficent, but more
+  # time is needed in code-coverage builds.
+  HASH_JOIN_UPPER_BOUND_MS = 2000
+  # IMPALA-2973: Temporary workaround: when timers are using Linux COARSE clockid_t, very
+  # short times may be measured as zero.
+  HASH_JOIN_LOWER_BOUND_MS = 0
 
   @classmethod
   def get_workload(self):
@@ -54,8 +74,9 @@ class TestHashJoinTimer(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestHashJoinTimer, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(TestDimension('test cases', *cls.TEST_CASES))
-    cls.TestMatrix.add_constraint(lambda v: cls.__is_valid_test_vector(v))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('test cases', *cls.TEST_CASES))
+    cls.ImpalaTestMatrix.add_constraint(lambda v: cls.__is_valid_test_vector(v))
 
   @classmethod
   def __is_valid_test_vector(cls, vector):
@@ -90,7 +111,6 @@ class TestHashJoinTimer(ImpalaTestSuite):
     profile = self.client.get_runtime_profile(handle)
     check_execsummary_count = 0
     check_fragment_count = 0
-    async_build = False
 
     for line in profile.split("\n"):
         # Matching for ExecSummary

@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <boost/bind.hpp>
 
@@ -21,6 +24,8 @@
 #include "runtime/runtime-state.h"
 #include "runtime/string-search.h"
 #include "util/codec.h"
+#include "util/runtime-profile-counters.h"
+#include "util/test-info.h"
 
 #include "common/names.h"
 
@@ -31,13 +36,12 @@ const int BaseSequenceScanner::SYNC_MARKER = -1;
 
 // Constants used in ReadPastSize()
 static const double BLOCK_SIZE_PADDING_PERCENT = 0.1;
-static const int REMAINING_BLOCK_SIZE_GUESS = 100 * 1024; // bytes
-static const int MIN_SYNC_READ_SIZE = 10 * 1024; // bytes
+static const int MIN_SYNC_READ_SIZE = 64 * 1024; // bytes
 
 // Macro to convert between SerdeUtil errors to Status returns.
 #define RETURN_IF_FALSE(x) if (UNLIKELY(!(x))) return parse_status_
 
-Status BaseSequenceScanner::IssueInitialRanges(HdfsScanNode* scan_node,
+Status BaseSequenceScanner::IssueInitialRanges(HdfsScanNodeBase* scan_node,
     const vector<HdfsFileDesc*>& files) {
   // Issue just the header range for each file.  When the header is complete,
   // we'll issue the splits for that file.  Splits cannot be processed until the
@@ -45,15 +49,15 @@ Status BaseSequenceScanner::IssueInitialRanges(HdfsScanNode* scan_node,
   vector<DiskIoMgr::ScanRange*> header_ranges;
   for (int i = 0; i < files.size(); ++i) {
     ScanRangeMetadata* metadata =
-        reinterpret_cast<ScanRangeMetadata*>(files[i]->splits[0]->meta_data());
+        static_cast<ScanRangeMetadata*>(files[i]->splits[0]->meta_data());
     int64_t header_size = min<int64_t>(HEADER_SIZE, files[i]->file_length);
     // The header is almost always a remote read. Set the disk id to -1 and indicate
     // it is not cached.
     // TODO: add remote disk id and plumb that through to the io mgr.  It should have
     // 1 queue for each NIC as well?
-    DiskIoMgr::ScanRange* header_range = scan_node->AllocateScanRange(
-        files[i]->fs, files[i]->filename.c_str(), header_size, 0, metadata->partition_id,
-        -1, false, false, files[i]->mtime);
+    DiskIoMgr::ScanRange* header_range = scan_node->AllocateScanRange(files[i]->fs,
+        files[i]->filename.c_str(), header_size, 0, metadata->partition_id, -1, false,
+        DiskIoMgr::BufferOpts::Uncached());
     header_ranges.push_back(header_range);
   }
   // Issue the header ranges only.  ProcessSplit() will issue the files' scan ranges
@@ -62,7 +66,7 @@ Status BaseSequenceScanner::IssueInitialRanges(HdfsScanNode* scan_node,
   return Status::OK();
 }
 
-BaseSequenceScanner::BaseSequenceScanner(HdfsScanNode* node, RuntimeState* state)
+BaseSequenceScanner::BaseSequenceScanner(HdfsScanNodeBase* node, RuntimeState* state)
   : HdfsScanner(node, state),
     header_(NULL),
     block_start_(0),
@@ -70,18 +74,30 @@ BaseSequenceScanner::BaseSequenceScanner(HdfsScanNode* node, RuntimeState* state
     num_syncs_(0) {
 }
 
+BaseSequenceScanner::BaseSequenceScanner()
+  : HdfsScanner(),
+    header_(NULL),
+    block_start_(0),
+    total_block_size_(0),
+    num_syncs_(0) {
+  DCHECK(TestInfo::is_test());
+}
+
 BaseSequenceScanner::~BaseSequenceScanner() {
 }
 
-Status BaseSequenceScanner::Prepare(ScannerContext* context) {
-  RETURN_IF_ERROR(HdfsScanner::Prepare(context));
+Status BaseSequenceScanner::Open(ScannerContext* context) {
+  RETURN_IF_ERROR(HdfsScanner::Open(context));
   stream_->set_read_past_size_cb(bind(&BaseSequenceScanner::ReadPastSize, this, _1));
   bytes_skipped_counter_ = ADD_COUNTER(
       scan_node_->runtime_profile(), "BytesSkipped", TUnit::BYTES);
+  // Allocate a new row batch. May fail if mem limit is exceeded.
+  RETURN_IF_ERROR(StartNewRowBatch());
   return Status::OK();
 }
 
-void BaseSequenceScanner::Close() {
+void BaseSequenceScanner::Close(RowBatch* row_batch) {
+  DCHECK(!is_closed_);
   VLOG_FILE << "Bytes read past scan range: " << -stream_->bytes_left();
   VLOG_FILE << "Average block size: "
             << (num_syncs_ > 1 ? total_block_size_ / (num_syncs_ - 1) : 0);
@@ -91,34 +107,53 @@ void BaseSequenceScanner::Close() {
     decompressor_->Close();
     decompressor_.reset(NULL);
   }
-  AttachPool(data_buffer_pool_.get(), false);
-  AddFinalRowBatch();
-  if (!only_parsing_header_) {
+  if (row_batch != NULL) {
+    row_batch->tuple_data_pool()->AcquireData(data_buffer_pool_.get(), false);
+    context_->ReleaseCompletedResources(row_batch, true);
+    if (scan_node_->HasRowBatchQueue()) {
+      static_cast<HdfsScanNode*>(scan_node_)->AddMaterializedRowBatch(row_batch);
+    }
+  }
+  // Transfer template tuple pool to scan node pool. The scanner may be closed and
+  // subsequently re-used for another range, so we need to ensure that the template
+  // tuples are backed by live memory.
+  if (template_tuple_pool_.get() != NULL) {
+    static_cast<HdfsScanNode*>(scan_node_)->TransferToScanNodePool(
+        template_tuple_pool_.get());
+  }
+
+  // Verify all resources (if any) have been transferred.
+  DCHECK_EQ(template_tuple_pool_.get()->total_allocated_bytes(), 0);
+  DCHECK_EQ(data_buffer_pool_.get()->total_allocated_bytes(), 0);
+  DCHECK_EQ(context_->num_completed_io_buffers(), 0);
+  // 'header_' can be NULL if HdfsScanNodeBase::CreateAndOpenScanner() failed.
+  if (!only_parsing_header_ && header_ != NULL) {
     scan_node_->RangeComplete(file_format(), header_->compression_type);
   }
-  HdfsScanner::Close();
+  HdfsScanner::Close(row_batch);
 }
 
 Status BaseSequenceScanner::ProcessSplit() {
+  DCHECK(scan_node_->HasRowBatchQueue());
   header_ = reinterpret_cast<FileHeader*>(
-      scan_node_->GetFileMetadata(stream_->filename()));
+      static_cast<HdfsScanNode*>(scan_node_)->GetFileMetadata(stream_->filename()));
   if (header_ == NULL) {
     // This is the initial scan range just to parse the header
     only_parsing_header_ = true;
     header_ = state_->obj_pool()->Add(AllocateFileHeader());
     Status status = ReadFileHeader();
     if (!status.ok()) {
-      if (state_->abort_on_error()) return status;
-      state_->LogError(status.msg());
+      RETURN_IF_ERROR(state_->LogOrReturnError(status.msg()));
       // We need to complete the ranges for this file.
       CloseFileRanges(stream_->filename());
       return Status::OK();
     }
 
     // Header is parsed, set the metadata in the scan node and issue more ranges
-    scan_node_->SetFileMetadata(stream_->filename(), header_);
+    static_cast<HdfsScanNode*>(scan_node_)->SetFileMetadata(
+        stream_->filename(), header_);
     HdfsFileDesc* desc = scan_node_->GetFileDesc(stream_->filename());
-    scan_node_->AddDiskIoRanges(desc);
+    RETURN_IF_ERROR(scan_node_->AddDiskIoRanges(desc));
     return Status::OK();
   }
 
@@ -177,7 +212,10 @@ Status BaseSequenceScanner::ReadSync() {
   uint8_t* hash;
   int64_t out_len;
   RETURN_IF_FALSE(stream_->GetBytes(SYNC_HASH_SIZE, &hash, &out_len, &parse_status_));
-  if (out_len != SYNC_HASH_SIZE || memcmp(hash, header_->sync, SYNC_HASH_SIZE)) {
+  if (out_len != SYNC_HASH_SIZE) {
+    return Status(Substitute("Hit end of stream after reading $0 bytes of $1-byte "
+        "synchronization marker", out_len, SYNC_HASH_SIZE));
+  } else if (memcmp(hash, header_->sync, SYNC_HASH_SIZE) != 0) {
     stringstream ss;
     ss  << "Bad synchronization marker" << endl
         << "  Expected: '"
@@ -285,11 +323,9 @@ void BaseSequenceScanner::CloseFileRanges(const char* filename) {
 
 int BaseSequenceScanner::ReadPastSize(int64_t file_offset) {
   DCHECK_GE(total_block_size_, 0);
-  if (total_block_size_ == 0) {
-    // This scan range didn't include a complete block, so we have no idea how many bytes
-    // remain in the block. Guess.
-    return REMAINING_BLOCK_SIZE_GUESS;
-  }
+  // This scan range didn't include a complete block, so we have no idea how many bytes
+  // remain in the block. Let ScannerContext use its default strategy.
+  if (total_block_size_ == 0) return 0;
   DCHECK_GE(num_syncs_, 2);
   int average_block_size = total_block_size_ / (num_syncs_ - 1);
 
@@ -299,7 +335,5 @@ int BaseSequenceScanner::ReadPastSize(int64_t file_offset) {
   int bytes_left = max(average_block_size - block_bytes_read, 0);
   // Include some padding
   bytes_left += average_block_size * BLOCK_SIZE_PADDING_PERCENT;
-
-  int max_read_size = state_->io_mgr()->max_read_buffer_size();
-  return min(max(bytes_left, MIN_SYNC_READ_SIZE), max_read_size);
+  return max(bytes_left, MIN_SYNC_READ_SIZE);
 }

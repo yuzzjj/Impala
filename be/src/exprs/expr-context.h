@@ -1,26 +1,30 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_EXPRS_EXPR_CONTEXT_H
 #define IMPALA_EXPRS_EXPR_CONTEXT_H
 
 #include <boost/scoped_ptr.hpp>
 
+#include "common/object-pool.h"
 #include "common/status.h"
 #include "exprs/expr-value.h"
-#include "udf/udf.h"
 #include "udf/udf-internal.h" // for CollectionVal
+#include "udf/udf.h"
 
 using namespace impala_udf;
 
@@ -45,6 +49,8 @@ class ExprContext {
 
   /// Prepare expr tree for evaluation.
   /// Allocations from this context will be counted against 'tracker'.
+  /// If Prepare() is called, Close() must be called before destruction to release
+  /// resources, regardless of whether Prepare() succeeded.
   Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
                  MemTracker* tracker);
 
@@ -58,38 +64,39 @@ class ExprContext {
   /// originals but have their own MemPool and thread-local state. Clone() should be used
   /// to create an ExprContext for each execution thread that needs to evaluate
   /// 'root'. Note that clones are already opened. '*new_context' must be initialized by
-  /// the caller to NULL.
+  /// the caller to NULL. The cloned ExprContext cannot be used after the original
+  /// ExprContext is destroyed because it may reference fragment-local state from the
+  /// original.
   Status Clone(RuntimeState* state, ExprContext** new_context);
 
   /// Closes all FunctionContexts. Must be called on every ExprContext, including clones.
+  /// Has no effect if already closed.
   void Close(RuntimeState* state);
 
   /// Calls the appropriate Get*Val() function on this context's expr tree and stores the
   /// result in result_.
-  void* GetValue(TupleRow* row);
+  void* GetValue(const TupleRow* row);
 
-  /// Convenience function: extract value into col_val and sets the
-  /// appropriate __isset flag.
-  /// If the value is NULL and as_ascii is false, nothing is set.
-  /// If 'as_ascii' is true, writes the value in ascii into stringVal
-  /// (nulls turn into "NULL");
-  /// if it is false, the specific field in col_val that receives the value is
-  /// based on the type of the expr:
+  /// Convenience function for evaluating Exprs that don't reference slots from the FE.
+  /// Extracts value into 'col_val' and sets the appropriate __isset flag. No fields are
+  /// set for NULL values. The specific field in 'col_val' that receives the value is
+  /// based on the expr type:
   /// TYPE_BOOLEAN: boolVal
   /// TYPE_TINYINT/SMALLINT/INT: intVal
   /// TYPE_BIGINT: longVal
   /// TYPE_FLOAT/DOUBLE: doubleVal
-  /// TYPE_STRING: stringVal
-  /// TYPE_TIMESTAMP: stringVal
-  /// Note: timestamp is converted to string via RawValue::PrintValue because HiveServer2
-  /// requires timestamp in a string format.
-  void GetValue(TupleRow* row, bool as_ascii, TColumnValue* col_val);
+  /// TYPE_STRING: binaryVal. Do not populate stringVal directly because BE/FE
+  ///              conversions do not work properly for strings with ASCII chars
+  ///              above 127. Pass the raw bytes so the caller can decide what to
+  ///              do with the result (e.g., bail constant folding).
+  /// TYPE_TIMESTAMP: binaryVal has the raw data, stringVal its string representation.
+  void EvaluateWithoutRow(TColumnValue* col_val);
 
   /// Convenience functions: print value into 'str' or 'stream'.  NULL turns into "NULL".
-  void PrintValue(TupleRow* row, std::string* str);
+  void PrintValue(const TupleRow* row, std::string* str);
   void PrintValue(void* value, std::string* str);
   void PrintValue(void* value, std::stringstream* stream);
-  void PrintValue(TupleRow* row, std::stringstream* stream);
+  void PrintValue(const TupleRow* row, std::stringstream* stream);
 
   /// Creates a FunctionContext, and returns the index that's passed to fn_context() to
   /// retrieve the created context. Exprs that need a FunctionContext should call this in
@@ -107,8 +114,10 @@ class ExprContext {
     return fn_contexts_[i];
   }
 
-  Expr* root() { return root_; }
-  bool closed() { return closed_; }
+  Expr* root() const { return root_; }
+  bool opened() const { return opened_; }
+  bool closed() const { return closed_; }
+  bool is_clone() const { return is_clone_; }
 
   /// Calls Get*Val on root_
   BooleanVal GetBooleanVal(TupleRow* row);
@@ -123,17 +132,24 @@ class ExprContext {
   TimestampVal GetTimestampVal(TupleRow* row);
   DecimalVal GetDecimalVal(TupleRow* row);
 
+  /// Returns true if any of the expression contexts in the array has local allocations.
+  /// The last two are helper functions.
+  static bool HasLocalAllocations(const std::vector<ExprContext*>& ctxs);
+  bool HasLocalAllocations();
+  static bool HasLocalAllocations(const std::vector<FunctionContext*>& fn_ctxs);
+
   /// Frees all local allocations made by fn_contexts_. This can be called when result
-  /// data from this context is no longer needed.
-  void FreeLocalAllocations();
+  /// data from this context is no longer needed. The last two are helper functions.
   static void FreeLocalAllocations(const std::vector<ExprContext*>& ctxs);
+  void FreeLocalAllocations();
   static void FreeLocalAllocations(const std::vector<FunctionContext*>& ctxs);
 
   static const char* LLVM_CLASS_NAME;
 
  private:
   friend class Expr;
-  /// Users of private GetValue()
+  /// Users of private GetValue() or 'pool_'.
+  friend class CaseExpr;
   friend class HiveUdfCall;
   friend class ScalarFnCall;
 
@@ -166,7 +182,7 @@ class ExprContext {
 
   /// Calls the appropriate Get*Val() function on 'e' and stores the result in result_.
   /// This is used by Exprs to call GetValue() on a child expr, rather than root_.
-  void* GetValue(Expr* e, TupleRow* row);
+  void* GetValue(Expr* e, const TupleRow* row);
 };
 
 }

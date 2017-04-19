@@ -1,17 +1,21 @@
 #!/usr/bin/env impala-python
-# Copyright 2012 Cloudera Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 # Starts up an Impala cluster (ImpalaD + State Store) with the specified number of
 # ImpalaD instances. Each ImpalaD runs on a different port allowing this to be run
@@ -24,17 +28,21 @@ from time import sleep, time
 from optparse import OptionParser
 from testdata.common import cgroups
 
+KUDU_MASTER_HOSTS = os.getenv('KUDU_MASTER_HOSTS', '127.0.0.1')
+DEFAULT_IMPALA_MAX_LOG_FILES = os.environ.get('IMPALA_MAX_LOG_FILES', 10)
+
+
 # Options
 parser = OptionParser()
 parser.add_option("-s", "--cluster_size", type="int", dest="cluster_size", default=3,
                   help="Size of the cluster (number of impalad instances to start).")
+parser.add_option("-c", "--num_coordinators", type="int", dest="num_coordinators",
+                  default=3, help="Number of coordinators.")
 parser.add_option("--build_type", dest="build_type", default= 'latest',
                   help="Build type to use - debug / release / latest")
 parser.add_option("--impalad_args", dest="impalad_args", action="append", type="string",
                   default=[],
                   help="Additional arguments to pass to each Impalad during startup")
-parser.add_option("--enable_rm", dest="enable_rm", action="store_true", default=False,
-                  help="Enable resource management with Yarn and Llama.")
 parser.add_option("--state_store_args", dest="state_store_args", action="append",
                   type="string", default=[],
                   help="Additional arguments to pass to State Store during startup")
@@ -51,8 +59,11 @@ parser.add_option("-r", "--restart_impalad_only", dest="restart_impalad_only",
                   help="Restarts only the impalad processes")
 parser.add_option("--in-process", dest="inprocess", action="store_true", default=False,
                   help="Start all Impala backends and state store in a single process.")
-parser.add_option("--log_dir", dest="log_dir", default="/tmp",
+parser.add_option("--log_dir", dest="log_dir",
+                  default=os.environ['IMPALA_CLUSTER_LOGS_DIR'],
                   help="Directory to store output logs to.")
+parser.add_option('--max_log_files', default=DEFAULT_IMPALA_MAX_LOG_FILES,
+                  help='Max number of log files before rotation occurs.')
 parser.add_option("-v", "--verbose", dest="verbose", action="store_true", default=False,
                   help="Prints all output to stderr/stdout.")
 parser.add_option("--wait_for_cluster", dest="wait_for_cluster", action="store_true",
@@ -62,6 +73,9 @@ parser.add_option("--log_level", type="int", dest="log_level", default=1,
                    help="Set the impalad backend logging level")
 parser.add_option("--jvm_args", dest="jvm_args", default="",
                   help="Additional arguments to pass to the JVM(s) during startup.")
+parser.add_option("--kudu_master_hosts", default=KUDU_MASTER_HOSTS,
+                  help="The host name or address of the Kudu master. Multiple masters "
+                      "can be specified using a comma separated list.")
 
 options, args = parser.parse_args()
 
@@ -77,16 +91,13 @@ MINI_IMPALA_CLUSTER_PATH = IMPALAD_PATH + " -in-process"
 
 IMPALA_SHELL = os.path.join(IMPALA_HOME, 'bin/impala-shell.sh')
 IMPALAD_PORTS = ("-beeswax_port=%d -hs2_port=%d  -be_port=%d "
-                 "-state_store_subscriber_port=%d -webserver_port=%d "
-                 "-llama_callback_port=%d")
+                 "-state_store_subscriber_port=%d -webserver_port=%d")
 JVM_ARGS = "-jvm_debug_port=%s -jvm_args=%s"
-BE_LOGGING_ARGS = "-log_filename=%s -log_dir=%s -v=%s -logbufsecs=5"
-RM_ARGS = ("-enable_rm=true -llama_addresses=%s -cgroup_hierarchy_path=%s "
-           "-fair_scheduler_allocation_path=%s")
+BE_LOGGING_ARGS = "-log_filename=%s -log_dir=%s -v=%s -logbufsecs=5 -max_log_files=%s"
 CLUSTER_WAIT_TIMEOUT_IN_SECONDS = 240
 # Kills have a timeout to prevent automated scripts from hanging indefinitely.
 # It is set to a high value to avoid failing if processes are slow to shut down.
-KILL_TIMEOUT_IN_SECONDS = 120
+KILL_TIMEOUT_IN_SECONDS = 240
 
 def find_user_processes(binaries):
   """Returns an iterator over all processes owned by the current user with a matching
@@ -182,36 +193,30 @@ def build_impalad_port_args(instance_num):
   BASE_BE_PORT = 22000
   BASE_STATE_STORE_SUBSCRIBER_PORT = 23000
   BASE_WEBSERVER_PORT = 25000
-  BASE_LLAMA_CALLBACK_PORT = 28000
   return IMPALAD_PORTS % (BASE_BEESWAX_PORT + instance_num, BASE_HS2_PORT + instance_num,
                           BASE_BE_PORT + instance_num,
                           BASE_STATE_STORE_SUBSCRIBER_PORT + instance_num,
-                          BASE_WEBSERVER_PORT + instance_num,
-                          BASE_LLAMA_CALLBACK_PORT + instance_num)
+                          BASE_WEBSERVER_PORT + instance_num)
 
 def build_impalad_logging_args(instance_num, service_name):
-  log_file_path = os.path.join(options.log_dir, "%s.INFO" % service_name)
-  return BE_LOGGING_ARGS % (service_name, options.log_dir, options.log_level)
+  return BE_LOGGING_ARGS % (service_name, options.log_dir, options.log_level,
+                            options.max_log_files)
 
 def build_jvm_args(instance_num):
   BASE_JVM_DEBUG_PORT = 30000
   return JVM_ARGS % (BASE_JVM_DEBUG_PORT + instance_num, options.jvm_args)
 
-def build_rm_args(instance_num):
-  if not options.enable_rm: return ""
-  try:
-    cgroup_path = cgroups.create_impala_cgroup_path(instance_num + 1)
-  except Exception, ex:
-    raise RuntimeError("Unable to initialize RM: %s" % str(ex))
-  llama_address = "localhost:15000"
+def start_impalad_instances(cluster_size, num_coordinators):
+  if cluster_size == 0:
+    # No impalad instances should be started.
+    return
 
-  # Don't bother checking if the path doesn't exist, the impalad won't start up
-  relative_fs_cfg_path = 'cdh%s/node-%d/etc/hadoop/conf/fair-scheduler.xml' %\
-      (os.environ.get('CDH_MAJOR_VERSION'), instance_num + 1)
-  fs_cfg_path = os.path.join(os.environ.get('CLUSTER_DIR'), relative_fs_cfg_path)
-  return RM_ARGS % (llama_address, cgroup_path, fs_cfg_path)
+  # The default memory limit for an impalad is 80% of the total system memory. On a
+  # mini-cluster with 3 impalads that means 240%. Since having an impalad be OOM killed
+  # is very annoying, the mem limit will be reduced. This can be overridden using the
+  # --impalad_args flag. virtual_memory().total returns the total physical memory.
+  mem_limit = int(0.8 * psutil.virtual_memory().total / cluster_size)
 
-def start_impalad_instances(cluster_size):
   # Start each impalad instance and optionally redirect the output to a log file.
   for i in range(cluster_size):
     if i == 0:
@@ -229,10 +234,17 @@ def start_impalad_instances(cluster_size):
 
     # impalad args from the --impalad_args flag. Also replacing '#ID' with the instance.
     param_args = (" ".join(options.impalad_args)).replace("#ID", str(i))
-    args = "%s %s %s %s %s" %\
-          (build_impalad_logging_args(i, service_name), build_jvm_args(i),
-           build_impalad_port_args(i), param_args,
-           build_rm_args(i))
+    args = "--mem_limit=%s %s %s %s %s" %\
+          (mem_limit,  # Goes first so --impalad_args will override it.
+           build_impalad_logging_args(i, service_name), build_jvm_args(i),
+           build_impalad_port_args(i), param_args)
+    if options.kudu_master_hosts:
+      # Must be prepended, otherwise the java options interfere.
+      args = "-kudu_master_hosts %s %s" % (options.kudu_master_hosts, args)
+
+    if i >= num_coordinators:
+      args = "-is_coordinator=false %s" % (args)
+
     stderr_log_file_path = os.path.join(options.log_dir, '%s-error.log' % service_name)
     exec_impala_process(IMPALAD_PATH, args, stderr_log_file_path)
 
@@ -273,9 +285,10 @@ def wait_for_cluster_web(timeout_in_seconds=CLUSTER_WAIT_TIMEOUT_IN_SECONDS):
   # impalad processes may take a while to come up.
   wait_for_impala_process_count(impala_cluster)
   for impalad in impala_cluster.impalads:
-    impalad.service.wait_for_num_known_live_backends(options.cluster_size,
-        timeout=CLUSTER_WAIT_TIMEOUT_IN_SECONDS, interval=2)
-    wait_for_catalog(impalad, timeout_in_seconds=CLUSTER_WAIT_TIMEOUT_IN_SECONDS)
+    if impalad._get_arg_value('is_coordinator', default='true') == 'true':
+      impalad.service.wait_for_num_known_live_backends(options.cluster_size,
+          timeout=CLUSTER_WAIT_TIMEOUT_IN_SECONDS, interval=2)
+      wait_for_catalog(impalad, timeout_in_seconds=CLUSTER_WAIT_TIMEOUT_IN_SECONDS)
 
 def wait_for_catalog(impalad, timeout_in_seconds):
   """Waits for the impalad catalog to become ready"""
@@ -320,6 +333,14 @@ if __name__ == "__main__":
     print 'Please specify a cluster size >= 0'
     sys.exit(1)
 
+  if options.num_coordinators <= 0:
+    print 'Please specify a valid number of coordinators > 0'
+    sys.exit(1)
+
+  if not os.path.isdir(options.log_dir):
+    print 'Log dir does not exist or is not a directory: %s' % options.log_dir
+    sys.exit(1)
+
   # Kill existing cluster processes based on the current configuration.
   if options.restart_impalad_only:
     if options.inprocess:
@@ -362,7 +383,7 @@ if __name__ == "__main__":
       if not options.restart_impalad_only:
         start_statestore()
         start_catalogd()
-      start_impalad_instances(options.cluster_size)
+      start_impalad_instances(options.cluster_size, options.num_coordinators)
       # Sleep briefly to reduce log spam: the cluster takes some time to start up.
       sleep(3)
       wait_for_cluster()
@@ -370,4 +391,5 @@ if __name__ == "__main__":
       print 'Error starting cluster: %s' % e
       sys.exit(1)
 
-  print 'Impala Cluster Running with %d nodes.' % options.cluster_size
+  print 'Impala Cluster Running with %d nodes and %d coordinators.' % (
+      options.cluster_size, options.num_coordinators)

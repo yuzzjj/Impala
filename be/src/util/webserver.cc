@@ -1,49 +1,53 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/webserver.h"
 
 #include <boost/algorithm/string.hpp>
 #include <boost/bind.hpp>
 #include <boost/filesystem.hpp>
-#include <boost/foreach.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/mem_fn.hpp>
 #include <boost/thread/locks.hpp>
+#include <fstream>
 #include <gutil/strings/substitute.h>
 #include <map>
-#include <fstream>
 #include <stdio.h>
 #include <signal.h>
 #include <string>
-#include <mustache/mustache.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/prettywriter.h>
 
-#include "util/asan.h"
 #include "common/logging.h"
+#include "rpc/thrift-util.h"
+#include "runtime/exec-env.h"
+#include "service/impala-server.h"
+#include "thirdparty/mustache/mustache.h"
+#include "util/asan.h"
+#include "util/coding-util.h"
 #include "util/cpu-info.h"
 #include "util/disk-info.h"
 #include "util/mem-info.h"
 #include "util/os-info.h"
 #include "util/os-util.h"
 #include "util/process-state-info.h"
-#include "util/url-coding.h"
 #include "util/debug-util.h"
 #include "util/pretty-printer.h"
 #include "util/stopwatch.h"
-#include "rpc/thrift-util.h"
 
 #include "common/names.h"
 
@@ -78,8 +82,8 @@ DEFINE_string(webserver_certificate_file, "",
     "The location of the debug webserver's SSL certificate file, in .pem format. If "
     "empty, webserver SSL support is not enabled");
 DEFINE_string(webserver_private_key_file, "", "The full path to the private key used as a"
-    " counterpart to the public key contained in --ssl_server_certificate. If "
-    "--ssl_server_certificate is set, this option must be set as well.");
+    " counterpart to the public key contained in --webserver_certificate_file. If "
+    "--webserver_certificate_file is set, this option must be set as well.");
 DEFINE_string(webserver_private_key_password_cmd, "", "A Unix command whose output "
     "returns the password used to decrypt the Webserver's certificate private key file "
     "specified in --webserver_private_key_file. If the .PEM key file is not "
@@ -91,6 +95,11 @@ DEFINE_string(webserver_authentication_domain, "",
 DEFINE_string(webserver_password_file, "",
     "(Optional) Location of .htpasswd file containing user names and hashed passwords for"
     " debug webserver authentication");
+
+DEFINE_string(webserver_x_frame_options, "DENY",
+    "webserver will add X-Frame-Options HTTP header with this value");
+
+DECLARE_bool(is_coordinator);
 
 static const char* DOC_FOLDER = "/www/";
 static const int DOC_FOLDER_LEN = strlen(DOC_FOLDER);
@@ -111,7 +120,7 @@ static const char* ERROR_KEY = "__error_msg__";
 const char* GetDefaultDocumentRoot() {
   stringstream ss;
   char* impala_home = getenv("IMPALA_HOME");
-  if (impala_home == NULL) {
+  if (impala_home == nullptr) {
     return ""; // Empty document root means don't serve static files
   } else {
     ss << impala_home;
@@ -138,15 +147,16 @@ string BuildHeaderString(ResponseCode response, ContentType content_type) {
   static const string RESPONSE_TEMPLATE = "HTTP/1.1 $0 $1\r\n"
       "Content-Type: text/$2\r\n"
       "Content-Length: %d\r\n"
-      "X-Frame-Options: DENY\r\n"
+      "X-Frame-Options: $3\r\n"
       "\r\n";
 
   return Substitute(RESPONSE_TEMPLATE, response, response == OK ? "OK" : "Not found",
-      content_type == HTML ? "html" : "plain");
+      content_type == HTML ? "html" : "plain",
+      FLAGS_webserver_x_frame_options.c_str());
 }
 
 Webserver::Webserver()
-    : context_(NULL),
+    : context_(nullptr),
       error_handler_(UrlHandler(bind<void>(&Webserver::ErrorHandler, this, _1, _2),
           "error.tmpl", false)) {
   http_address_ = MakeNetworkAddress(
@@ -155,7 +165,7 @@ Webserver::Webserver()
 }
 
 Webserver::Webserver(const int port)
-    : context_(NULL),
+    : context_(nullptr),
       error_handler_(UrlHandler(bind<void>(&Webserver::ErrorHandler, this, _1, _2),
           "error.tmpl", false)) {
   http_address_ = MakeNetworkAddress("0.0.0.0", port);
@@ -180,6 +190,13 @@ void Webserver::RootHandler(const ArgumentMap& args, Document* document) {
     document->GetAllocator());
   document->AddMember("process_state_info", process_state_info,
     document->GetAllocator());
+
+  ExecEnv* env = ExecEnv::GetInstance();
+  if (env == nullptr || env->impala_server() == nullptr) return;
+  string mode = (env->impala_server()->IsCoordinator()) ?
+      "Coordinator + Executor" : "Executor";
+  Value impala_server_mode(mode.c_str(), document->GetAllocator());
+  document->AddMember("impala_server_mode", impala_server_mode, document->GetAllocator());
 }
 
 void Webserver::ErrorHandler(const ArgumentMap& args, Document* document) {
@@ -194,7 +211,7 @@ void Webserver::BuildArgumentMap(const string& args, ArgumentMap* output) {
   vector<string> arg_pairs;
   split(arg_pairs, args, is_any_of("&"));
 
-  BOOST_FOREACH(const string& arg_pair, arg_pairs) {
+  for (const string& arg_pair: arg_pairs) {
     vector<string> key_value;
     split(key_value, arg_pair, is_any_of("="));
     if (key_value.empty()) continue;
@@ -210,6 +227,17 @@ void Webserver::BuildArgumentMap(const string& args, ArgumentMap* output) {
 
 bool Webserver::IsSecure() const {
   return !FLAGS_webserver_certificate_file.empty();
+}
+
+string Webserver::Url() {
+  string hostname = http_address_.hostname;
+  if (IsWildcardAddress(http_address_.hostname)) {
+    if (!GetHostname(&hostname).ok()) {
+      hostname = http_address_.hostname;
+    }
+  }
+  return Substitute("$0://$1:$2", IsSecure() ? "https" : "http",
+      hostname, http_address_.port);
 }
 
 Status Webserver::Start() {
@@ -236,6 +264,10 @@ Status Webserver::Start() {
 
   string key_password;
   if (IsSecure()) {
+    // Impala initializes OpenSSL (see authentication.h).
+    options.push_back("ssl_global_init");
+    options.push_back("false");
+
     options.push_back("ssl_certificate");
     options.push_back(FLAGS_webserver_certificate_file.c_str());
 
@@ -243,12 +275,11 @@ Status Webserver::Start() {
       options.push_back("ssl_private_key");
       options.push_back(FLAGS_webserver_private_key_file.c_str());
 
-      if (!FLAGS_webserver_private_key_password_cmd.empty()) {
-        if (!RunShellProcess(FLAGS_webserver_private_key_password_cmd, &key_password)) {
-          return Status(TErrorCode::SSL_PASSWORD_CMD_FAILED,
-              FLAGS_webserver_private_key_password_cmd, key_password);
+      const string& password_cmd = FLAGS_webserver_private_key_password_cmd;
+      if (!password_cmd.empty()) {
+        if (!RunShellProcess(password_cmd, &key_password, true)) {
+          return Status(TErrorCode::SSL_PASSWORD_CMD_FAILED, password_cmd, key_password);
         }
-        trim_right(key_password);
         options.push_back("ssl_private_key_password");
         options.push_back(key_password.c_str());
       }
@@ -280,7 +311,7 @@ Status Webserver::Start() {
   options.push_back("no");
 
   // Options must be a NULL-terminated list
-  options.push_back(NULL);
+  options.push_back(nullptr);
 
   // squeasel ignores SIGCHLD and we need it to run kinit. This means that since
   // squeasel does not reap its own children CGI programs must be avoided.
@@ -301,7 +332,7 @@ Status Webserver::Start() {
   // Restore the child signal handler so wait() works properly.
   signal(SIGCHLD, sig_chld);
 
-  if (context_ == NULL) {
+  if (context_ == nullptr) {
     stringstream error_msg;
     error_msg << "Webserver: Could not start on address " << http_address_;
     return Status(error_msg.str());
@@ -317,20 +348,20 @@ Status Webserver::Start() {
 }
 
 void Webserver::Stop() {
-  if (context_ != NULL) {
+  if (context_ != nullptr) {
     sq_stop(context_);
-    context_ = NULL;
+    context_ = nullptr;
   }
 }
 
 void Webserver::GetCommonJson(Document* document) {
-  DCHECK(document != NULL);
+  DCHECK(document != nullptr);
   Value obj(kObjectType);
   obj.AddMember("process-name", google::ProgramInvocationShortName(),
       document->GetAllocator());
 
   Value lst(kArrayType);
-  BOOST_FOREACH(const UrlHandlerMap::value_type& handler, url_handlers_) {
+  for (const UrlHandlerMap::value_type& handler: url_handlers_) {
     if (handler.second.is_on_nav_bar()) {
       Value obj(kObjectType);
       obj.AddMember("link", handler.first.c_str(), document->GetAllocator());
@@ -345,7 +376,7 @@ void Webserver::GetCommonJson(Document* document) {
 
 int Webserver::LogMessageCallbackStatic(const struct sq_connection* connection,
     const char* message) {
-  if (message != NULL) {
+  if (message != nullptr) {
     LOG(INFO) << "Webserver: " << message;
   }
   return PROCESSING_COMPLETE;
@@ -369,7 +400,7 @@ int Webserver::BeginRequestCallback(struct sq_connection* connection,
   }
 
   map<string, string> arguments;
-  if (request_info->query_string != NULL) {
+  if (request_info->query_string != nullptr) {
     BuildArgumentMap(request_info->query_string, &arguments);
   }
 
@@ -377,7 +408,7 @@ int Webserver::BeginRequestCallback(struct sq_connection* connection,
   UrlHandlerMap::const_iterator it = url_handlers_.find(request_info->uri);
   ResponseCode response = OK;
   ContentType content_type = HTML;
-  const UrlHandler* url_handler = NULL;
+  const UrlHandler* url_handler = nullptr;
   if (it == url_handlers_.end()) {
     response = NOT_FOUND;
     arguments[ERROR_KEY] = Substitute("No URI handler for '$0'", request_info->uri);
@@ -404,7 +435,13 @@ int Webserver::BeginRequestCallback(struct sq_connection* connection,
   const string& str = output.str();
 
   const string& headers = BuildHeaderString(response, content_type);
+
+  // printf with a non-literal format string is a security concern, but BuildHeaderString
+  // returns a limited set of strings and all members of that set are safe.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
   sq_printf(connection, headers.c_str(), (int)str.length());
+#pragma clang diagnostic pop
 
   // Make sure to use sq_write for printing the body; sq_printf truncates at 8kb
   sq_write(connection, str.c_str(), str.length());

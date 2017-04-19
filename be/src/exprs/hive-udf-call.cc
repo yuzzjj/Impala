@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exprs/hive-udf-call.h"
 
@@ -30,18 +33,20 @@
 
 #include "common/names.h"
 
-const char* EXECUTOR_CLASS = "com/cloudera/impala/hive/executor/UdfExecutor";
+const char* EXECUTOR_CLASS = "org/apache/impala/hive/executor/UdfExecutor";
 const char* EXECUTOR_CTOR_SIGNATURE ="([B)V";
 const char* EXECUTOR_EVALUATE_SIGNATURE = "()V";
 const char* EXECUTOR_CLOSE_SIGNATURE = "()V";
 
 namespace impala {
 
+jclass HiveUdfCall::executor_cl_ = NULL;
+jmethodID HiveUdfCall::executor_ctor_id_ = NULL;
+jmethodID HiveUdfCall::executor_evaluate_id_ = NULL;
+jmethodID HiveUdfCall::executor_close_id_ = NULL;
+
 struct JniContext {
-  jclass cl;
   jobject executor;
-  jmethodID evalute_id;
-  jmethodID close_id;
 
   uint8_t* input_values_buffer;
   uint8_t* input_nulls_buffer;
@@ -49,29 +54,26 @@ struct JniContext {
   uint8_t output_null_value;
   bool warning_logged;
 
+  /// AnyVal to evaluate the expression into. Only used as temporary storage during
+  /// expression evaluation.
   AnyVal* output_anyval;
 
   JniContext()
-    : cl(NULL),
-      executor(NULL),
-      evalute_id(NULL),
-      close_id(NULL),
+    : executor(NULL),
       input_values_buffer(NULL),
       input_nulls_buffer(NULL),
       output_value_buffer(NULL),
       warning_logged(false),
-      output_anyval(NULL) {
-  }
+      output_anyval(NULL) {}
 };
 
-HiveUdfCall::HiveUdfCall(const TExprNode& node)
-  : Expr(node),
-    input_buffer_size_(0) {
+HiveUdfCall::HiveUdfCall(const TExprNode& node) : Expr(node), input_buffer_size_(0) {
   DCHECK_EQ(node.node_type, TExprNodeType::FUNCTION_CALL);
   DCHECK_EQ(node.fn.binary_type, TFunctionBinaryType::JAVA);
+  DCHECK(executor_cl_ != NULL) << "Init() was not called!";
 }
 
-AnyVal* HiveUdfCall::Evaluate(ExprContext* ctx, TupleRow* row) {
+AnyVal* HiveUdfCall::Evaluate(ExprContext* ctx, const TupleRow* row) {
   FunctionContext* fn_ctx = ctx->fn_context(fn_context_index_);
   JniContext* jni_ctx = reinterpret_cast<JniContext*>(
       fn_ctx->GetFunctionState(FunctionContext::THREAD_LOCAL));
@@ -127,7 +129,7 @@ AnyVal* HiveUdfCall::Evaluate(ExprContext* ctx, TupleRow* row) {
   // Using this version of Call has the lowest overhead. This eliminates the
   // vtable lookup and setting up return stacks.
   env->CallNonvirtualVoidMethodA(
-      jni_ctx->executor, jni_ctx->cl, jni_ctx->evalute_id, NULL);
+      jni_ctx->executor, executor_cl_, executor_evaluate_id_, NULL);
   Status status = JniUtil::GetJniExceptionMsg(env);
   if (!status.ok()) {
     if (!jni_ctx->warning_logged) {
@@ -148,6 +150,23 @@ AnyVal* HiveUdfCall::Evaluate(ExprContext* ctx, TupleRow* row) {
     AnyValUtil::SetAnyVal(jni_ctx->output_value_buffer, type(), jni_ctx->output_anyval);
   }
   return jni_ctx->output_anyval;
+}
+
+Status HiveUdfCall::Init() {
+  DCHECK(executor_cl_ == NULL) << "Init() already called!";
+  JNIEnv* env = getJNIEnv();
+  if (env == NULL) return Status("Failed to get/create JVM");
+  RETURN_IF_ERROR(JniUtil::GetGlobalClassRef(env, EXECUTOR_CLASS, &executor_cl_));
+  executor_ctor_id_ = env->GetMethodID(
+      executor_cl_, "<init>", EXECUTOR_CTOR_SIGNATURE);
+  RETURN_ERROR_IF_EXC(env);
+  executor_evaluate_id_ = env->GetMethodID(
+      executor_cl_, "evaluate", EXECUTOR_EVALUATE_SIGNATURE);
+  RETURN_ERROR_IF_EXC(env);
+  executor_close_id_ = env->GetMethodID(
+      executor_cl_, "close", EXECUTOR_CLOSE_SIGNATURE);
+  RETURN_ERROR_IF_EXC(env);
+  return Status::OK();
 }
 
 Status HiveUdfCall::Prepare(RuntimeState* state, const RowDescriptor& row_desc,
@@ -185,17 +204,6 @@ Status HiveUdfCall::Open(RuntimeState* state, ExprContext* ctx,
   JNIEnv* env = getJNIEnv();
   if (env == NULL) return Status("Failed to get/create JVM");
 
-  RETURN_IF_ERROR(JniUtil::GetGlobalClassRef(env, EXECUTOR_CLASS, &jni_ctx->cl));
-  jmethodID executor_ctor = env->GetMethodID(
-      jni_ctx->cl, "<init>", EXECUTOR_CTOR_SIGNATURE);
-  RETURN_ERROR_IF_EXC(env);
-  jni_ctx->evalute_id = env->GetMethodID(
-      jni_ctx->cl, "evaluate", EXECUTOR_EVALUATE_SIGNATURE);
-  RETURN_ERROR_IF_EXC(env);
-  jni_ctx->close_id = env->GetMethodID(
-      jni_ctx->cl, "close", EXECUTOR_CLOSE_SIGNATURE);
-  RETURN_ERROR_IF_EXC(env);
-
   THiveUdfExecutorCtorParams ctor_params;
   ctor_params.fn = fn_;
   ctor_params.local_location = local_location_;
@@ -219,13 +227,12 @@ Status HiveUdfCall::Open(RuntimeState* state, ExprContext* ctx,
 
   RETURN_IF_ERROR(SerializeThriftMsg(env, &ctor_params, &ctor_params_bytes));
   // Create the java executor object
-  jni_ctx->executor = env->NewObject(jni_ctx->cl,
-      executor_ctor, ctor_params_bytes);
+  jni_ctx->executor = env->NewObject(executor_cl_, executor_ctor_id_, ctor_params_bytes);
   RETURN_ERROR_IF_EXC(env);
-  jni_ctx->executor = env->NewGlobalRef(jni_ctx->executor);
+  RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(env, jni_ctx->executor, &jni_ctx->executor));
 
-  jni_ctx->output_anyval = CreateAnyVal(type_);
-
+  RETURN_IF_ERROR(AllocateAnyVal(state, ctx->pool_.get(), type_,
+      "Could not allocate JNI output value", &jni_ctx->output_anyval));
   return Status::OK();
 }
 
@@ -240,11 +247,9 @@ void HiveUdfCall::Close(RuntimeState* state, ExprContext* ctx,
       JNIEnv* env = getJNIEnv();
       if (jni_ctx->executor != NULL) {
         env->CallNonvirtualVoidMethodA(
-            jni_ctx->executor, jni_ctx->cl, jni_ctx->close_id, NULL);
-        env->DeleteGlobalRef(jni_ctx->executor);
-        // Clear any exceptions. Not much we can do about them here.
-        Status status = JniUtil::GetJniExceptionMsg(env);
-        if (!status.ok()) VLOG_QUERY << status.GetDetail();
+            jni_ctx->executor, executor_cl_, executor_close_id_, NULL);
+        Status status = JniUtil::FreeGlobalRef(env, jni_ctx->executor);
+        if (!status.ok()) LOG(ERROR) << status.GetDetail();
       }
       if (jni_ctx->input_values_buffer != NULL) {
         delete[] jni_ctx->input_values_buffer;
@@ -258,10 +263,8 @@ void HiveUdfCall::Close(RuntimeState* state, ExprContext* ctx,
         delete[] jni_ctx->output_value_buffer;
         jni_ctx->output_value_buffer = NULL;
       }
-      if (jni_ctx->output_anyval != NULL) {
-        delete jni_ctx->output_anyval;
-        jni_ctx->output_anyval = NULL;
-      }
+      jni_ctx->output_anyval = NULL;
+      delete jni_ctx;
     } else {
       DCHECK(!ctx->opened_);
     }
@@ -270,8 +273,8 @@ void HiveUdfCall::Close(RuntimeState* state, ExprContext* ctx,
   Expr::Close(state, ctx, scope);
 }
 
-Status HiveUdfCall::GetCodegendComputeFn(RuntimeState* state, llvm::Function** fn) {
-  return GetCodegendComputeFnWrapper(state, fn);
+Status HiveUdfCall::GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn) {
+  return GetCodegendComputeFnWrapper(codegen, fn);
 }
 
 string HiveUdfCall::DebugString() const {
@@ -282,52 +285,61 @@ string HiveUdfCall::DebugString() const {
   return out.str();
 }
 
-BooleanVal HiveUdfCall::GetBooleanVal(ExprContext* ctx, TupleRow* row) {
+BooleanVal HiveUdfCall::GetBooleanVal(ExprContext* ctx, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_BOOLEAN);
   return *reinterpret_cast<BooleanVal*>(Evaluate(ctx, row));
 }
 
-TinyIntVal HiveUdfCall::GetTinyIntVal(ExprContext* ctx, TupleRow* row) {
+TinyIntVal HiveUdfCall::GetTinyIntVal(ExprContext* ctx, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_TINYINT);
   return *reinterpret_cast<TinyIntVal*>(Evaluate(ctx, row));
 }
 
-SmallIntVal HiveUdfCall::GetSmallIntVal(ExprContext* ctx, TupleRow* row) {
+SmallIntVal HiveUdfCall::GetSmallIntVal(ExprContext* ctx, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_SMALLINT);
   return * reinterpret_cast<SmallIntVal*>(Evaluate(ctx, row));
 }
 
-IntVal HiveUdfCall::GetIntVal(ExprContext* ctx, TupleRow* row) {
+IntVal HiveUdfCall::GetIntVal(ExprContext* ctx, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_INT);
   return *reinterpret_cast<IntVal*>(Evaluate(ctx, row));
 }
 
-BigIntVal HiveUdfCall::GetBigIntVal(ExprContext* ctx, TupleRow* row) {
+BigIntVal HiveUdfCall::GetBigIntVal(ExprContext* ctx, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_BIGINT);
   return *reinterpret_cast<BigIntVal*>(Evaluate(ctx, row));
 }
 
-FloatVal HiveUdfCall::GetFloatVal(ExprContext* ctx, TupleRow* row) {
+FloatVal HiveUdfCall::GetFloatVal(ExprContext* ctx, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_FLOAT);
   return *reinterpret_cast<FloatVal*>(Evaluate(ctx, row));
 }
 
-DoubleVal HiveUdfCall::GetDoubleVal(ExprContext* ctx, TupleRow* row) {
+DoubleVal HiveUdfCall::GetDoubleVal(ExprContext* ctx, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_DOUBLE);
   return *reinterpret_cast<DoubleVal*>(Evaluate(ctx, row));
 }
 
-StringVal HiveUdfCall::GetStringVal(ExprContext* ctx, TupleRow* row) {
+StringVal HiveUdfCall::GetStringVal(ExprContext* ctx, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_STRING);
-  return *reinterpret_cast<StringVal*>(Evaluate(ctx, row));
+  StringVal result = *reinterpret_cast<StringVal*>(Evaluate(ctx, row));
+
+  // Copy the string into a local allocation with the usual lifetime for expr results.
+  // Needed because the UDF output buffer is owned by the Java UDF executor and may be
+  // freed or reused by the next call into the Java UDF executor.
+  FunctionContext* fn_ctx = ctx->fn_context(fn_context_index_);
+  uint8_t* local_alloc = fn_ctx->impl()->AllocateLocal(result.len);
+  memcpy(local_alloc, result.ptr, result.len);
+  result.ptr = local_alloc;
+  return result;
 }
 
-TimestampVal HiveUdfCall::GetTimestampVal(ExprContext* ctx, TupleRow* row) {
+TimestampVal HiveUdfCall::GetTimestampVal(ExprContext* ctx, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_TIMESTAMP);
   return *reinterpret_cast<TimestampVal*>(Evaluate(ctx, row));
 }
 
-DecimalVal HiveUdfCall::GetDecimalVal(ExprContext* ctx, TupleRow* row) {
+DecimalVal HiveUdfCall::GetDecimalVal(ExprContext* ctx, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_DECIMAL);
   return *reinterpret_cast<DecimalVal*>(Evaluate(ctx, row));
 }

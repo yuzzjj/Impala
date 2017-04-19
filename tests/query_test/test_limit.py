@@ -1,13 +1,25 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
-# Validates limit on scan nodes
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-import logging
-import pytest
-from copy import copy
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Validates limit on scan nodes
+
 from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
 from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.common.test_vector import *
-from tests.util.test_file_parser import QueryTestSectionReader
+from tests.common.test_vector import ImpalaTestDimension
 
 class TestLimit(ImpalaTestSuite):
   LIMIT_VALUES = [1, 2, 3, 4, 5, 10, 100, 5000]
@@ -28,20 +40,20 @@ class TestLimit(ImpalaTestSuite):
 
     # Add two more dimensions
     if cls.exploration_strategy() == 'core':
-      cls.TestMatrix.add_dimension(
-          TestDimension('limit_value', *TestLimit.LIMIT_VALUES_CORE))
+      cls.ImpalaTestMatrix.add_dimension(
+          ImpalaTestDimension('limit_value', *TestLimit.LIMIT_VALUES_CORE))
     else:
-      cls.TestMatrix.add_dimension(
-          TestDimension('limit_value', *TestLimit.LIMIT_VALUES))
-    cls.TestMatrix.add_dimension(TestDimension('query', *TestLimit.QUERIES))
+      cls.ImpalaTestMatrix.add_dimension(
+          ImpalaTestDimension('limit_value', *TestLimit.LIMIT_VALUES))
+    cls.ImpalaTestMatrix.add_dimension(ImpalaTestDimension('query', *TestLimit.QUERIES))
 
     # Don't run with large limits and tiny batch sizes.  This generates excessive
     # network traffic and makes the machine run very slowly.
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('limit_value') < 100 or v.get_value('exec_option')['batch_size'] == 0)
     # TPCH is not generated in hbase format.
     # TODO: Add test coverage for hbase.
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('table_format').file_format != "hbase")
 
   def test_limit(self, vector):

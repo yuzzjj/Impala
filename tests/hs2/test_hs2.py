@@ -1,16 +1,19 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # Client tests for Impala's HiveServer2 interface
 
@@ -24,12 +27,23 @@ from ImpalaService import ImpalaHiveServer2Service
 from tests.hs2.hs2_test_suite import HS2TestSuite, needs_session, operation_id_to_query_id
 from TCLIService import TCLIService
 
+SQLSTATE_GENERAL_ERROR = "HY000"
 
 class TestHS2(HS2TestSuite):
   def test_open_session(self):
     """Check that a session can be opened"""
     open_session_req = TCLIService.TOpenSessionReq()
     TestHS2.check_response(self.hs2_client.OpenSession(open_session_req))
+
+  def test_open_sesssion_query_options(self):
+    """Check that OpenSession sets query options"""
+    open_session_req = TCLIService.TOpenSessionReq()
+    open_session_req.configuration = {'MAX_ERRORS': '45678',
+        'NUM_NODES': '1234', 'MAX_NUM_RUNTIME_FILTERS': '333'}
+    open_session_resp = self.hs2_client.OpenSession(open_session_req)
+    TestHS2.check_response(open_session_resp)
+    for k, v in open_session_req.configuration.items():
+      assert open_session_resp.configuration[k] == v
 
   def test_open_session_http_addr(self):
     """Check that OpenSession returns the coordinator's http address."""
@@ -54,6 +68,22 @@ class TestHS2(HS2TestSuite):
     TestHS2.check_response(open_session_resp)
     assert open_session_resp.serverProtocolVersion == \
         TCLIService.TProtocolVersion.HIVE_CLI_SERVICE_PROTOCOL_V6
+
+  def test_open_session_empty_user(self):
+    """Test that we get the expected errors back if either impala.doas.user is set but
+    username is empty, or username is set but impala.doas.user is empty."""
+    open_session_req = TCLIService.TOpenSessionReq()
+    open_session_req.username = ""
+    open_session_req.configuration = {"impala.doas.user": "do_as_user"}
+    open_session_resp = self.hs2_client.OpenSession(open_session_req)
+    TestHS2.check_response(open_session_resp, TCLIService.TStatusCode.ERROR_STATUS, \
+        "Unable to delegate using empty proxy username.")
+
+    open_session_req.username = "user"
+    open_session_req.configuration = {"impala.doas.user": ""}
+    open_session_resp = self.hs2_client.OpenSession(open_session_req)
+    TestHS2.check_response(open_session_resp, TCLIService.TStatusCode.ERROR_STATUS, \
+        "Unable to delegate using empty doAs username.")
 
   def test_close_session(self):
     """Test that an open session can be closed"""
@@ -148,17 +178,32 @@ class TestHS2(HS2TestSuite):
     execute_statement_resp = self.hs2_client.ExecuteStatement(execute_statement_req)
     TestHS2.check_response(execute_statement_resp)
 
-    get_operation_status_req = TCLIService.TGetOperationStatusReq()
-    get_operation_status_req.operationHandle = execute_statement_resp.operationHandle
-
     get_operation_status_resp = \
-        self.hs2_client.GetOperationStatus(get_operation_status_req)
+        self.get_operation_status(execute_statement_resp.operationHandle)
     TestHS2.check_response(get_operation_status_resp)
 
     assert get_operation_status_resp.operationState in \
         [TCLIService.TOperationState.INITIALIZED_STATE,
          TCLIService.TOperationState.RUNNING_STATE,
          TCLIService.TOperationState.FINISHED_STATE]
+
+  @needs_session(conf_overlay={"abort_on_error": "1"})
+  def test_get_operation_status_error(self):
+    """Tests that GetOperationStatus returns a valid result for a query that encountered
+    an error"""
+    execute_statement_req = TCLIService.TExecuteStatementReq()
+    execute_statement_req.sessionHandle = self.session_handle
+    execute_statement_req.statement = "SELECT * FROM functional.alltypeserror"
+    execute_statement_resp = self.hs2_client.ExecuteStatement(execute_statement_req)
+    TestHS2.check_response(execute_statement_resp)
+
+    get_operation_status_resp = self.wait_for_operation_state( \
+        execute_statement_resp.operationHandle, TCLIService.TOperationState.ERROR_STATE)
+
+    # Check that an error message and sql state have been set.
+    assert get_operation_status_resp.errorMessage is not None and \
+        get_operation_status_resp.errorMessage is not ""
+    assert get_operation_status_resp.sqlState == SQLSTATE_GENERAL_ERROR
 
   @needs_session()
   def test_malformed_get_operation_status(self):
@@ -173,16 +218,30 @@ class TestHS2(HS2TestSuite):
     operation_handle.operationType = TCLIService.TOperationType.EXECUTE_STATEMENT
     operation_handle.hasResultSet = False
 
-    get_operation_status_req = TCLIService.TGetOperationStatusReq()
-    get_operation_status_req.operationHandle = operation_handle
+    get_operation_status_resp = self.get_operation_status(operation_handle)
+    TestHS2.check_response(get_operation_status_resp, \
+        TCLIService.TStatusCode.ERROR_STATUS)
 
-    get_operation_status_resp = \
-        self.hs2_client.GetOperationStatus(get_operation_status_req)
-    TestHS2.check_response(get_operation_status_resp,
-                           TCLIService.TStatusCode.ERROR_STATUS)
     err_msg = "(guid size: %d, expected 16, secret size: %d, expected 16)" \
         % (len(operation_handle.operationId.guid),
            len(operation_handle.operationId.secret))
+    assert err_msg in get_operation_status_resp.status.errorMessage
+
+  @needs_session()
+  def test_invalid_query_handle(self):
+    operation_handle = TCLIService.TOperationHandle()
+    operation_handle.operationId = TCLIService.THandleIdentifier()
+    operation_handle.operationId.guid = "\x01\x23\x45\x67\x89\xab\xcd\xef76543210"
+    operation_handle.operationId.secret = "PasswordIsPencil"
+    operation_handle.operationType = TCLIService.TOperationType.EXECUTE_STATEMENT
+    operation_handle.hasResultSet = False
+
+    get_operation_status_resp = self.get_operation_status(operation_handle)
+    TestHS2.check_response(get_operation_status_resp, \
+        TCLIService.TStatusCode.ERROR_STATUS)
+
+    print get_operation_status_resp.status.errorMessage
+    err_msg = "Invalid query handle: efcdab8967452301:3031323334353637"
     assert err_msg in get_operation_status_resp.status.errorMessage
 
   @pytest.mark.execute_serially
@@ -242,6 +301,27 @@ class TestHS2(HS2TestSuite):
     assert "Sql Statement: GET_SCHEMAS" in profile_page
     assert "Query Type: DDL" in profile_page
 
+  @needs_session(conf_overlay={"idle_session_timeout": "5"})
+  def test_get_operation_status_session_timeout(self):
+    """Regression test for IMPALA-4488: GetOperationStatus() would not keep a session
+    alive"""
+    execute_statement_req = TCLIService.TExecuteStatementReq()
+    execute_statement_req.sessionHandle = self.session_handle
+    # Choose a long-running query so that it can't finish before the session timeout.
+    execute_statement_req.statement = """select * from functional.alltypes a
+    join functional.alltypes b join functional.alltypes c"""
+    execute_statement_resp = self.hs2_client.ExecuteStatement(execute_statement_req)
+    TestHS2.check_response(execute_statement_resp)
+
+    now = time.time()
+    # Loop until the session would be timed-out if IMPALA-4488 had not been fixed.
+    while time.time() - now < 10:
+      get_operation_status_resp = \
+        self.get_operation_status(execute_statement_resp.operationHandle)
+      # Will fail if session has timed out.
+      TestHS2.check_response(get_operation_status_resp)
+      time.sleep(0.1)
+
   def get_log(self, query_stmt):
     execute_statement_req = TCLIService.TExecuteStatementReq()
     execute_statement_req.sessionHandle = self.session_handle
@@ -249,12 +329,16 @@ class TestHS2(HS2TestSuite):
     execute_statement_resp = self.hs2_client.ExecuteStatement(execute_statement_req)
     TestHS2.check_response(execute_statement_resp)
 
-    # Fetch results to make sure errors are generated
-    fetch_results_req = TCLIService.TFetchResultsReq()
-    fetch_results_req.operationHandle = execute_statement_resp.operationHandle
-    fetch_results_req.maxRows = 100
-    fetch_results_resp = self.hs2_client.FetchResults(fetch_results_req)
-    TestHS2.check_response(fetch_results_resp)
+    # Fetch results to make sure errors are generated. Errors are only guaranteed to be
+    # seen by the coordinator after FetchResults() returns eos.
+    has_more_results = True
+    while has_more_results:
+      fetch_results_req = TCLIService.TFetchResultsReq()
+      fetch_results_req.operationHandle = execute_statement_resp.operationHandle
+      fetch_results_req.maxRows = 100
+      fetch_results_resp = self.hs2_client.FetchResults(fetch_results_req)
+      TestHS2.check_response(fetch_results_resp)
+      has_more_results = fetch_results_resp.hasMoreRows
 
     get_log_req = TCLIService.TGetLogReq()
     get_log_req.operationHandle = execute_statement_resp.operationHandle

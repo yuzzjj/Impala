@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_HDFS_TABLE_WRITER_H
@@ -49,7 +52,7 @@ class HdfsTableWriter {
   /// The sequence of calls to this object are:
   /// 1. Init()
   /// 2. InitNewFile()
-  /// 3. AppendRowBatch() - called repeatedly
+  /// 3. AppendRows() - called repeatedly
   /// 4. Finalize()
   /// For files formats that are splittable (and therefore can be written to an
   /// arbitrarily large file), 1-4 is called once.
@@ -62,17 +65,14 @@ class HdfsTableWriter {
   /// Called when a new file is started.
   virtual Status InitNewFile() = 0;
 
-  /// Appends the current batch of rows to the partition.  If there are multiple
-  /// partitions then row_group_indices will contain the rows that are for this
-  /// partition, otherwise all rows in the batch are appended.
-  /// If the current file is full, the writer stops appending and
-  /// returns with *new_file == true.  A new file will be opened and
-  /// the same row batch will be passed again.  The writer must track how
-  /// much of the batch it had already processed asking for a new file.
-  /// Otherwise the writer will return with *newfile == false.
-  virtual Status AppendRowBatch(RowBatch* batch,
-                                const std::vector<int32_t>& row_group_indices,
-                                bool* new_file) = 0;
+  /// Appends rows of 'batch' to the partition that are selected via 'row_group_indices',
+  /// and if the latter is empty, appends every row.
+  /// If the current file is full, the writer stops appending and returns with
+  /// *new_file == true. A new file will be opened and the same row batch will be passed
+  /// again. The writer must track how much of the batch it had already processed asking
+  /// for a new file. Otherwise the writer will return with *newfile == false.
+  virtual Status AppendRows(
+      RowBatch* batch, const std::vector<int32_t>& row_group_indices, bool* new_file) = 0;
 
   /// Finalize this partition. The writer needs to finish processing
   /// all data have written out after the return from this call.
@@ -83,7 +83,7 @@ class HdfsTableWriter {
   virtual void Close() = 0;
 
   /// Returns the stats for this writer.
-  TInsertStats& stats() { return stats_; };
+  TInsertStats& stats() { return stats_; }
 
   /// Default block size to use for this file format.  If the file format doesn't
   /// care, it should return 0 and the hdfs config default will be used.
@@ -115,6 +115,9 @@ class HdfsTableWriter {
   RuntimeState* state_;
 
   /// Structure describing partition written to by this writer.
+  /// NOTE: OutputPartition is usually accessed with a unique_ptr. It is safe to use
+  /// a raw pointer here, because the OutputPartition maintains a scoped_ptr to
+  /// the HdfsTableWriter objects. This will never outlive the OutputPartition.
   OutputPartition* output_;
 
   /// Table descriptor of table to be written.

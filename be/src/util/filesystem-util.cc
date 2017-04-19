@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <fcntl.h>
 #include <sys/resource.h>
@@ -34,7 +37,7 @@ using namespace strings;
 // of those functions that throw exceptions.
 namespace impala {
 
-Status FileSystemUtil::CreateDirectory(const string& directory) {
+Status FileSystemUtil::RemoveAndCreateDirectory(const string& directory) {
   error_code errcode;
   bool exists = filesystem::exists(directory, errcode);
   // Need to check for no_such_file_or_directory error case - Boost's exists() sometimes
@@ -106,17 +109,6 @@ Status FileSystemUtil::CreateFile(const string& file_path) {
     return Status(ErrorMsg(TErrorCode::RUNTIME_ERROR,
         Substitute("Close file $0 failed with errno=$1 description=$2",
             file_path.c_str(), errno, GetStrErrMsg())));
-  }
-
-  return Status::OK();
-}
-
-Status FileSystemUtil::ResizeFile(const string& file_path, int64_t trunc_len) {
-  int success = truncate(file_path.c_str(), trunc_len);
-  if (success != 0) {
-    return Status(ErrorMsg(TErrorCode::RUNTIME_ERROR, Substitute(
-        "Truncate file $0 to length $1 failed with errno $2 ($3)",
-        file_path, trunc_len, errno, GetStrErrMsg())));
   }
 
   return Status::OK();

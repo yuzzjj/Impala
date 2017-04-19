@@ -30,7 +30,7 @@ using std::pair;
 
 #include "gutil/int128.h"
 #include "gutil/integral_types.h"
-#include <glog/logging.h>
+#include <common/logging.h>
 #include "gutil/logging-inl.h"
 #include "gutil/hash/hash128to64.h"
 #include "gutil/endian.h"
@@ -305,7 +305,7 @@ uint128 CityHash128(const char *s, size_t len) {
                                uint128(LittleEndian::Load64(s) ^ k3,
                                        LittleEndian::Load64(s + 8)));
   } else if (len >= 8) {
-    return CityHash128WithSeed(NULL,
+    return CityHash128WithSeed(nullptr,
                                0,
                                uint128(LittleEndian::Load64(s) ^ (len * k0),
                                        LittleEndian::Load64(s + len - 8) ^ k1));

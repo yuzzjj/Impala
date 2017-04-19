@@ -1,23 +1,27 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <iostream>
 #include <limits.h>
-#include <gtest/gtest.h>
-#include "exec/hdfs-parquet-scanner.h"
+
+#include "exec/parquet-metadata-utils.h"
+#include "testutil/gtest-util.h"
 
 #include "common/names.h"
 
@@ -26,7 +30,7 @@ namespace impala {
 void CheckVersionParse(const string& s, const string& expected_application,
     int expected_major, int expected_minor, int expected_patch,
     bool expected_is_internal) {
-  HdfsParquetScanner::FileVersion v(s);
+  ParquetFileVersion v(s);
   EXPECT_EQ(v.application, expected_application) << "String: " << s;
   EXPECT_EQ(v.version.major, expected_major) << "String: " << s;
   EXPECT_EQ(v.version.minor, expected_minor) << "String: " << s;
@@ -62,7 +66,7 @@ TEST(ParquetVersionTest, Parsing) {
 }
 
 TEST(ParquetVersionTest, Comparisons) {
-  HdfsParquetScanner::FileVersion v("foo version 1.2.3");
+  ParquetFileVersion v("foo version 1.2.3");
   EXPECT_TRUE(v.VersionEq(1, 2, 3));
   EXPECT_FALSE(v.VersionEq(1, 2, 4));
   EXPECT_TRUE(v.VersionLt(3, 2, 1));
@@ -76,8 +80,5 @@ TEST(ParquetVersionTest, Comparisons) {
 
 }
 
-int main(int argc, char **argv) {
-  impala::CpuInfo::Init();
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
+IMPALA_TEST_MAIN();
+

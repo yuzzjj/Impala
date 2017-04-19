@@ -1,16 +1,19 @@
-# Copyright 2012 Cloudera Inc.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 
 cmake_minimum_required(VERSION 2.6)
@@ -60,8 +63,7 @@ function(THRIFT_GEN VAR)
       set(CPP_ARGS -r ${THRIFT_INCLUDE_DIR_OPTION} --gen cpp -o ${BE_OUTPUT_DIR})
     ENDIF(FIL STREQUAL "beeswax.thrift")
 
-    IF (FIL STREQUAL "TCLIService.thrift" OR FIL STREQUAL "parquet.thrift" OR
-        FIL STREQUAL "cli_service.thrift")
+    IF (FIL STREQUAL "TCLIService.thrift" OR FIL STREQUAL "parquet.thrift")
       # HiveServer2 and Parquet thrift generation
       # Do not generate Java source because we should use the jar from Hive or Parquet
       add_custom_command(
@@ -72,8 +74,7 @@ function(THRIFT_GEN VAR)
         COMMENT "Running thrift compiler on ${FIL}"
         VERBATIM
       )
-    ELSE (FIL STREQUAL "TCLIService.thrift" OR FIL STREQUAL "parquet.thrift" OR
-          FIL STREQUAL "cli_service.thrift")
+    ELSE (FIL STREQUAL "TCLIService.thrift" OR FIL STREQUAL "parquet.thrift")
       add_custom_command(
         OUTPUT ${OUTPUT_BE_FILE}
         COMMAND ${THRIFT_COMPILER} ${CPP_ARGS} ${FIL}
@@ -83,8 +84,7 @@ function(THRIFT_GEN VAR)
         COMMENT "Running thrift compiler on ${FIL}"
         VERBATIM
     )
-    ENDIF(FIL STREQUAL "TCLIService.thrift" OR FIL STREQUAL "parquet.thrift" OR
-          FIL STREQUAL "cli_service.thrift")
+    ENDIF(FIL STREQUAL "TCLIService.thrift" OR FIL STREQUAL "parquet.thrift")
   endforeach(FIL)
 
   set(${VAR} ${${VAR}} PARENT_SCOPE)
@@ -116,7 +116,7 @@ function(THRIFT_GEN_DS VAR)
 endfunction(THRIFT_GEN_DS)
 
 message("Using Thrift compiler: ${THRIFT_COMPILER}")
-set(THRIFT_INCLUDE_DIR_OPTION -I ${THRIFT_CONTRIB_DIR} -I $ENV{HIVE_HOME}/src/metastore/if)
+set(THRIFT_INCLUDE_DIR_OPTION -I ${THRIFT_CONTRIB_DIR} -I $ENV{HIVE_SRC_DIR}/metastore/if)
 set(BE_OUTPUT_DIR ${CMAKE_SOURCE_DIR}/be/generated-sources)
 set(FE_OUTPUT_DIR ${CMAKE_SOURCE_DIR}/fe/generated-sources)
 # TODO: avoid duplicating generated java classes
@@ -144,11 +144,11 @@ set (EXT_DATA_SRC_FILES
 set (SRC_FILES
   ErrorCodes.thrift
   beeswax.thrift
+  BackendGflags.thrift
   CatalogInternalService.thrift
   CatalogObjects.thrift
   CatalogService.thrift
   TCLIService.thrift
-  cli_service.thrift # TODO: Remove when thirdparty Hive supports V6
   DataSinks.thrift
   Descriptors.thrift
   ExecStats.thrift
@@ -159,7 +159,6 @@ set (SRC_FILES
   ImpalaService.thrift
   JniCatalog.thrift
   LineageGraph.thrift
-  Llama.thrift
   Logging.thrift
   NetworkTest.thrift
   MetricDefs.thrift
@@ -168,7 +167,6 @@ set (SRC_FILES
   Planner.thrift
   Partitions.thrift
   parquet.thrift
-  ResourceBrokerService.thrift
   Results.thrift
   RuntimeProfile.thrift
   StatestoreService.thrift

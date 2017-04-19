@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exprs/case-expr.h"
 
@@ -60,13 +63,14 @@ Status CaseExpr::Open(RuntimeState* state, ExprContext* ctx,
     return fn_ctx->impl()->state()->GetQueryStatus();
   }
   fn_ctx->SetFunctionState(FunctionContext::THREAD_LOCAL, case_state);
-  if (has_case_expr_) {
-    case_state->case_val = CreateAnyVal(state->obj_pool(), children_[0]->type());
-    case_state->when_val = CreateAnyVal(state->obj_pool(), children_[1]->type());
-  } else {
-    case_state->case_val = CreateAnyVal(state->obj_pool(), TYPE_BOOLEAN);
-    case_state->when_val = CreateAnyVal(state->obj_pool(), children_[0]->type());
-  }
+
+  const ColumnType& case_val_type = has_case_expr_ ? children_[0]->type() : TYPE_BOOLEAN;
+  RETURN_IF_ERROR(AllocateAnyVal(state, ctx->pool_.get(), case_val_type,
+      "Could not allocate expression value", &case_state->case_val));
+  const ColumnType& when_val_type =
+      has_case_expr_ ? children_[1]->type() : children_[0]->type();
+  RETURN_IF_ERROR(AllocateAnyVal(state, ctx->pool_.get(), when_val_type,
+      "Could not allocate expression value", &case_state->when_val));
   return Status::OK();
 }
 
@@ -179,7 +183,7 @@ string CaseExpr::DebugString() const {
 //                                   %"class.impala::TupleRow"* %row)
 //   ret i16 %else_val
 // }
-Status CaseExpr::GetCodegendComputeFn(RuntimeState* state, Function** fn) {
+Status CaseExpr::GetCodegendComputeFn(LlvmCodeGen* codegen, Function** fn) {
   if (ir_compute_fn_ != NULL) {
     *fn = ir_compute_fn_;
     return Status::OK();
@@ -188,13 +192,11 @@ Status CaseExpr::GetCodegendComputeFn(RuntimeState* state, Function** fn) {
   const int num_children = GetNumChildren();
   Function* child_fns[num_children];
   for (int i = 0; i < num_children; ++i) {
-    RETURN_IF_ERROR(children()[i]->GetCodegendComputeFn(state, &child_fns[i]));
+    RETURN_IF_ERROR(children()[i]->GetCodegendComputeFn(codegen, &child_fns[i]));
   }
 
-  LlvmCodeGen* codegen;
-  RETURN_IF_ERROR(state->GetCodegen(&codegen));
   LLVMContext& context = codegen->context();
-  LlvmCodeGen::LlvmBuilder builder(context);
+  LlvmBuilder builder(context);
 
   Value* args[2];
   Function* function = CreateIrFunctionPrototype(codegen, "CaseExpr", &args);
@@ -290,7 +292,7 @@ Status CaseExpr::GetCodegendComputeFn(RuntimeState* state, Function** fn) {
   return Status::OK();
 }
 
-void CaseExpr::GetChildVal(int child_idx, ExprContext* ctx, TupleRow* row, AnyVal* dst) {
+void CaseExpr::GetChildVal(int child_idx, ExprContext* ctx, const TupleRow* row, AnyVal* dst) {
   switch (children()[child_idx]->type().type) {
     case TYPE_BOOLEAN:
       *reinterpret_cast<BooleanVal*>(dst) = children()[child_idx]->GetBooleanVal(ctx, row);
@@ -368,7 +370,7 @@ bool CaseExpr::AnyValEq(const ColumnType& type, const AnyVal* v1, const AnyVal* 
 }
 
 #define CASE_COMPUTE_FN(THEN_TYPE) \
-  THEN_TYPE CaseExpr::Get##THEN_TYPE(ExprContext* ctx, TupleRow* row) { \
+  THEN_TYPE CaseExpr::Get##THEN_TYPE(ExprContext* ctx, const TupleRow* row) { \
     FunctionContext* fn_ctx = ctx->fn_context(fn_context_index_); \
     CaseExprState* state = reinterpret_cast<CaseExprState*>( \
         fn_ctx->GetFunctionState(FunctionContext::THREAD_LOCAL)); \

@@ -1,27 +1,28 @@
-// Copyright 2015 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_UTIL_PROCESS_STATE_INFO_H
 #define IMPALA_UTIL_PROCESS_STATE_INFO_H
 
 #include <map>
 #include <string>
-
 #include <boost/cstdint.hpp>
-#include "common/logging.h"
-#include "common/names.h"
 
+#include "common/logging.h"
 
 namespace impala {
 
@@ -83,20 +84,20 @@ class ProcessStateInfo {
   /// to be thread safe.
   ProcessStateInfo();
 
-  string DebugString() const;
+  std::string DebugString() const;
 
-  int GetInt(const string& state_key) const;
-  int64_t GetInt64(const string& state_key) const;
-  string GetString(const string& state_key) const;
+  int GetInt(const std::string& state_key) const;
+  int64_t GetInt64(const std::string& state_key) const;
+  std::string GetString(const std::string& state_key) const;
 
   /// Original data's unit is B or KB.
-  int64_t GetBytes(const string& state_key) const;
+  int64_t GetBytes(const std::string& state_key) const;
  private:
-  typedef map<string, string> ProcessStateMap;
+  typedef std::map<std::string, std::string> ProcessStateMap;
   ProcessStateMap process_state_map_;
 
   /// The description info for each file.
-  typedef map<int, string> FileDescriptorMap;
+  typedef std::map<int, std::string> FileDescriptorMap;
   FileDescriptorMap fd_desc_;
 
   /// Read I/O info from /proc/<pid>/io.

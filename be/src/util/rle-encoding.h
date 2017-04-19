@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_RLE_ENCODING_H
 #define IMPALA_RLE_ENCODING_H
@@ -85,14 +88,14 @@ class RleDecoder {
       repeat_count_(0),
       literal_count_(0) {
     DCHECK_GE(bit_width_, 0);
-    DCHECK_LE(bit_width_, 64);
+    DCHECK_LE(bit_width_, BitReader::MAX_BITWIDTH);
   }
 
   RleDecoder() : bit_width_(-1) {}
 
   void Reset(uint8_t* buffer, int buffer_len, int bit_width) {
     DCHECK_GE(bit_width, 0);
-    DCHECK_LE(bit_width, 64);
+    DCHECK_LE(bit_width, BitReader::MAX_BITWIDTH);
     bit_reader_.Reset(buffer, buffer_len);
     bit_width_ = bit_width;
     current_value_ = 0;
@@ -105,17 +108,17 @@ class RleDecoder {
   bool Get(T* val);
 
  protected:
+  /// Fills literal_count_ and repeat_count_ with next values. Returns false if there
+  /// are no more.
+  template<typename T>
+  bool NextCounts();
+
   BitReader bit_reader_;
   /// Number of bits needed to encode the value. Must be between 0 and 64.
   int bit_width_;
   uint64_t current_value_;
   uint32_t repeat_count_;
   uint32_t literal_count_;
- private:
-  /// Fills literal_count_ and repeat_count_ with next values. Returns false if there
-  /// are no more.
-  template<typename T>
-  bool NextCounts();
 };
 
 /// Class to incrementally build the rle data.   This class does not allocate any memory.
@@ -176,6 +179,7 @@ class RleEncoder {
   /// Returns pointer to underlying buffer
   uint8_t* buffer() { return bit_writer_.buffer(); }
   int32_t len() { return bit_writer_.bytes_written(); }
+  bool buffer_full() const { return buffer_full_; }
 
  private:
   /// Flushes any buffered values.  If this is part of a repeated run, this is largely
@@ -244,8 +248,13 @@ class RleEncoder {
 template<typename T>
 inline bool RleDecoder::Get(T* val) {
   DCHECK_GE(bit_width_, 0);
-  if (UNLIKELY(literal_count_ == 0 && repeat_count_ == 0)) {
-    if (!NextCounts<T>()) return false;
+  // Profiling has shown that the quality and performance of the generated code is very
+  // sensitive to the exact shape of this check. For example, the version below performs
+  // significantly better than UNLIKELY(literal_count_ == 0 && repeat_count_ == 0)
+  if (repeat_count_ == 0) {
+    if (literal_count_ == 0) {
+      if (!NextCounts<T>()) return false;
+    }
   }
 
   if (LIKELY(repeat_count_ > 0)) {
@@ -253,8 +262,7 @@ inline bool RleDecoder::Get(T* val) {
     --repeat_count_;
   } else {
     DCHECK_GT(literal_count_, 0);
-    bool result = bit_reader_.GetValue(bit_width_, val);
-    DCHECK(result);
+    if (UNLIKELY(!bit_reader_.GetValue(bit_width_, val))) return false;
     --literal_count_;
   }
 
@@ -266,18 +274,18 @@ bool RleDecoder::NextCounts() {
   // Read the next run's indicator int, it could be a literal or repeated run.
   // The int is encoded as a vlq-encoded value.
   int32_t indicator_value = 0;
-  bool result = bit_reader_.GetVlqInt(&indicator_value);
-  if (!result) return false;
+  if (UNLIKELY(!bit_reader_.GetVlqInt(&indicator_value))) return false;
 
   // lsb indicates if it is a literal run or repeated run
   bool is_literal = indicator_value & 1;
   if (is_literal) {
     literal_count_ = (indicator_value >> 1) * 8;
+    if (UNLIKELY(literal_count_ == 0)) return false;
   } else {
     repeat_count_ = indicator_value >> 1;
     bool result = bit_reader_.GetAligned<T>(
         BitUtil::Ceil(bit_width_, 8), reinterpret_cast<T*>(&current_value_));
-    DCHECK(result);
+    if (UNLIKELY(!result || repeat_count_ == 0)) return false;
   }
   return true;
 }

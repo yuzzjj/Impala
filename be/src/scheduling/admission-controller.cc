@@ -1,33 +1,35 @@
-// Copyright 2014 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "scheduling/admission-controller.h"
 
 #include <boost/algorithm/string.hpp>
 #include <boost/bind.hpp>
-#include <boost/foreach.hpp>
 #include <boost/mem_fn.hpp>
 #include <gutil/strings/substitute.h>
 
 #include "common/logging.h"
-#include "scheduling/simple-scheduler.h"
 #include "runtime/exec-env.h"
 #include "runtime/mem-tracker.h"
+#include "scheduling/scheduler.h"
 #include "util/debug-util.h"
-#include "util/time.h"
-#include "util/runtime-profile.h"
 #include "util/pretty-printer.h"
+#include "util/runtime-profile-counters.h"
+#include "util/time.h"
 
 #include "common/names.h"
 
@@ -96,14 +98,18 @@ const string POOL_MAX_QUEUED_METRIC_KEY_FORMAT =
 
 // Profile query events
 const string QUERY_EVENT_SUBMIT_FOR_ADMISSION = "Submit for admission";
+const string QUERY_EVENT_QUEUED = "Queued";
 const string QUERY_EVENT_COMPLETED_ADMISSION = "Completed admission";
 
-// Profile info string for admission result
+// Profile info strings
 const string PROFILE_INFO_KEY_ADMISSION_RESULT = "Admission result";
 const string PROFILE_INFO_VAL_ADMIT_IMMEDIATELY = "Admitted immediately";
+const string PROFILE_INFO_VAL_QUEUED = "Queued";
 const string PROFILE_INFO_VAL_ADMIT_QUEUED = "Admitted (queued)";
 const string PROFILE_INFO_VAL_REJECTED = "Rejected";
 const string PROFILE_INFO_VAL_TIME_OUT = "Timed out (queued)";
+const string PROFILE_INFO_KEY_QUEUE_DETAIL = "Admission queue details";
+const string PROFILE_INFO_VAL_QUEUE_DETAIL = "waited $0 ms, reason: $1";
 
 // Error status string formats
 // $0 = pool, $1 = rejection reason (see REASON_XXX below)
@@ -192,10 +198,12 @@ string AdmissionController::PoolStats::DebugString() const {
 }
 
 // TODO: do we need host_id_ to come from host_addr or can it just take the same id
-// the SimpleScheduler has (coming from the StatestoreSubscriber)?
-AdmissionController::AdmissionController(RequestPoolService* request_pool_service,
-    MetricGroup* metrics, const TNetworkAddress& host_addr)
-    : request_pool_service_(request_pool_service),
+// the Scheduler has (coming from the StatestoreSubscriber)?
+AdmissionController::AdmissionController(StatestoreSubscriber* subscriber,
+    RequestPoolService* request_pool_service, MetricGroup* metrics,
+    const TNetworkAddress& host_addr)
+    : subscriber_(subscriber),
+      request_pool_service_(request_pool_service),
       metrics_group_(metrics),
       host_id_(TNetworkAddressToString(host_addr)),
       thrift_serializer_(false),
@@ -218,10 +226,10 @@ AdmissionController::~AdmissionController() {
   dequeue_thread_->Join();
 }
 
-Status AdmissionController::Init(StatestoreSubscriber* subscriber) {
+Status AdmissionController::Init() {
   StatestoreSubscriber::UpdateCallback cb =
     bind<void>(mem_fn(&AdmissionController::UpdatePoolStats), this, _1, _2);
-  Status status = subscriber->AddTopic(IMPALA_REQUEST_QUEUE_TOPIC, true, cb);
+  Status status = subscriber_->AddTopic(IMPALA_REQUEST_QUEUE_TOPIC, true, cb);
   if (!status.ok()) {
     status.AddDetail("AdmissionController failed to register request queue topic");
   }
@@ -289,7 +297,7 @@ void AdmissionController::PoolStats::Dequeue(const QuerySchedule& schedule,
 void AdmissionController::UpdateHostMemAdmitted(const QuerySchedule& schedule,
     int64_t per_node_mem) {
   const unordered_set<TNetworkAddress>& hosts = schedule.unique_hosts();
-  BOOST_FOREACH(const TNetworkAddress& host_addr, hosts) {
+  for (const TNetworkAddress& host_addr: hosts) {
     const string host = TNetworkAddressToString(host_addr);
     VLOG_ROW << "Update admitted mem reserved for host=" << host
              << " prev=" << PrintBytes(host_mem_admitted_[host])
@@ -317,7 +325,7 @@ bool AdmissionController::HasAvailableMemResources(const QuerySchedule& schedule
 
   // Case 1:
   PoolStats* stats = GetPoolStats(pool_name);
-  VLOG_ROW << "Checking agg mem in pool=" << pool_name << " : " << stats->DebugString()
+  VLOG_RPC << "Checking agg mem in pool=" << pool_name << " : " << stats->DebugString()
            << " cluster_mem_needed=" << PrintBytes(cluster_mem_needed)
            << " pool_max_mem=" << PrintBytes(pool_max_mem);
   if (stats->EffectiveMemReserved() + cluster_mem_needed > pool_max_mem) {
@@ -329,7 +337,7 @@ bool AdmissionController::HasAvailableMemResources(const QuerySchedule& schedule
 
   // Case 2:
   int64_t proc_mem_limit = GetProcMemLimit();
-  BOOST_FOREACH(const TNetworkAddress& host, schedule.unique_hosts()) {
+  for (const TNetworkAddress& host: schedule.unique_hosts()) {
     const string host_id = TNetworkAddressToString(host);
     int64_t mem_reserved = host_mem_reserved_[host_id];
     int64_t mem_admitted = host_mem_admitted_[host_id];
@@ -431,10 +439,11 @@ Status AdmissionController::AdmitQuery(QuerySchedule* schedule) {
     pool_config_map_[pool_name] = pool_cfg;
     PoolStats* stats = GetPoolStats(pool_name);
     stats->UpdateConfigMetrics(pool_cfg);
-    VLOG_QUERY << "Schedule for id=" << schedule->query_id()
-               << " in pool_name=" << pool_name << " PoolConfig: max_requests="
-               << max_requests << " max_queued=" << max_queued
-               << " max_mem=" << PrintBytes(max_mem);
+    VLOG_QUERY << "Schedule for id=" << schedule->query_id() << " in pool_name="
+               << pool_name << " cluster_mem_needed="
+               << PrintBytes(schedule->GetClusterMemoryEstimate())
+               << " PoolConfig: max_requests=" << max_requests << " max_queued="
+               << max_queued << " max_mem=" << PrintBytes(max_mem);
     VLOG_QUERY << "Stats: " << stats->DebugString();
     RETURN_IF_ERROR(RejectImmediately(schedule, pool_cfg));
     pools_for_updates_.insert(pool_name);
@@ -442,12 +451,12 @@ Status AdmissionController::AdmitQuery(QuerySchedule* schedule) {
     if (CanAdmitRequest(*schedule, pool_cfg, false, &not_admitted_reason)) {
       DCHECK_EQ(stats->local_stats().num_queued, 0);
       VLOG_QUERY << "Admitted query id=" << schedule->query_id();
-      VLOG_RPC << "Final: " << stats->DebugString();
       stats->Admit(*schedule);
       UpdateHostMemAdmitted(*schedule, schedule->GetPerHostMemoryEstimate());
       schedule->set_is_admitted(true);
       schedule->summary_profile()->AddInfoString(PROFILE_INFO_KEY_ADMISSION_RESULT,
           PROFILE_INFO_VAL_ADMIT_IMMEDIATELY);
+      VLOG_RPC << "Final: " << stats->DebugString();
       return Status::OK();
     }
 
@@ -456,6 +465,14 @@ Status AdmissionController::AdmitQuery(QuerySchedule* schedule) {
     stats->Queue(*schedule);
     queue->Enqueue(&queue_node);
   }
+
+  // Update the profile info before waiting. These properties will be updated with
+  // their final state after being dequeued.
+  schedule->summary_profile()->AddInfoString(PROFILE_INFO_KEY_ADMISSION_RESULT,
+      PROFILE_INFO_VAL_QUEUED);
+  schedule->summary_profile()->AddInfoString(PROFILE_INFO_KEY_QUEUE_DETAIL,
+      not_admitted_reason);
+  schedule->query_events()->MarkEvent(QUERY_EVENT_QUEUED);
 
   int64_t queue_wait_timeout_ms = FLAGS_queue_wait_timeout_ms;
   if (pool_cfg.__isset.queue_timeout_ms) {
@@ -472,6 +489,8 @@ Status AdmissionController::AdmitQuery(QuerySchedule* schedule) {
   bool timed_out;
   queue_node.is_admitted.Get(queue_wait_timeout_ms, &timed_out);
   int64_t wait_time_ms = MonotonicMillis() - wait_start_ms;
+  schedule->summary_profile()->AddInfoString(PROFILE_INFO_KEY_QUEUE_DETAIL,
+      Substitute(PROFILE_INFO_VAL_QUEUE_DETAIL, wait_time_ms, not_admitted_reason));
 
   // Take the lock in order to check the result of is_admitted as there could be a race
   // with the timeout. If the Get() timed out, then we need to dequeue the request.
@@ -542,7 +561,7 @@ void AdmissionController::UpdatePoolStats(
       // and then re-compute the pool stats for any pools that changed.
       if (!delta.is_delta) {
         VLOG_ROW << "Full impala-request-queue stats update";
-        BOOST_FOREACH(PoolStatsMap::value_type& entry, pool_stats_) {
+        for (PoolStatsMap::value_type& entry: pool_stats_) {
           entry.second.ClearRemoteStats();
         }
       }
@@ -561,12 +580,12 @@ void AdmissionController::PoolStats::UpdateRemoteStats(const string& host_id,
   if (VLOG_ROW_IS_ON) {
     stringstream ss;
     ss << "Stats update for pool=" << name_ << " backend=" << host_id;
-    if (host_stats == NULL) ss << " topic deletion";
+    if (host_stats == nullptr) ss << " topic deletion";
     if (it != remote_stats_.end()) ss << " previous: " << DebugPoolStats(it->second);
-    if (host_stats != NULL) ss << " new: " << DebugPoolStats(*host_stats);
+    if (host_stats != nullptr) ss << " new: " << DebugPoolStats(*host_stats);
     VLOG_ROW << ss.str();
   }
-  if (host_stats == NULL) {
+  if (host_stats == nullptr) {
     if (it != remote_stats_.end()) {
       remote_stats_.erase(it);
     } else {
@@ -578,7 +597,7 @@ void AdmissionController::PoolStats::UpdateRemoteStats(const string& host_id,
 }
 
 void AdmissionController::HandleTopicUpdates(const vector<TTopicItem>& topic_updates) {
-  BOOST_FOREACH(const TTopicItem& item, topic_updates) {
+  for (const TTopicItem& item: topic_updates) {
     string pool_name;
     string topic_backend_id;
     if (!ParsePoolTopicKey(item.key, &pool_name, &topic_backend_id)) continue;
@@ -598,12 +617,12 @@ void AdmissionController::HandleTopicUpdates(const vector<TTopicItem>& topic_upd
 }
 
 void AdmissionController::HandleTopicDeletions(const vector<string>& topic_deletions) {
-  BOOST_FOREACH(const string& topic_key, topic_deletions) {
+  for (const string& topic_key: topic_deletions) {
     string pool_name;
     string topic_backend_id;
     if (!ParsePoolTopicKey(topic_key, &pool_name, &topic_backend_id)) continue;
     if (topic_backend_id == host_id_) continue;
-    GetPoolStats(pool_name)->UpdateRemoteStats(topic_backend_id, NULL);
+    GetPoolStats(pool_name)->UpdateRemoteStats(topic_backend_id, nullptr);
   }
 }
 
@@ -613,8 +632,8 @@ void AdmissionController::PoolStats::UpdateAggregates(
   int64_t num_running = 0;
   int64_t num_queued = 0;
   int64_t mem_reserved = 0;
-  BOOST_FOREACH(const PoolStats::RemoteStatsMap::value_type& remote_entry,
-      remote_stats_) {
+  for (const PoolStats::RemoteStatsMap::value_type& remote_entry:
+       remote_stats_) {
     const string& host = remote_entry.first;
     // Skip an update from this subscriber as the information may be outdated.
     // The stats from this coordinator will be added below.
@@ -662,7 +681,7 @@ void AdmissionController::PoolStats::UpdateAggregates(
 void AdmissionController::UpdateClusterAggregates() {
   // Recompute the host mem reserved.
   HostMemMap updated_mem_reserved;
-  BOOST_FOREACH(PoolStatsMap::value_type& entry, pool_stats_) {
+  for (PoolStatsMap::value_type& entry: pool_stats_) {
     entry.second.UpdateAggregates(&updated_mem_reserved);
   }
 
@@ -670,7 +689,7 @@ void AdmissionController::UpdateClusterAggregates() {
     stringstream ss;
     ss << "Updated mem reserved for hosts:";
     int i = 0;
-    BOOST_FOREACH(const HostMemMap::value_type& e, updated_mem_reserved) {
+    for (const HostMemMap::value_type& e: updated_mem_reserved) {
       if (host_mem_reserved_[e.first] == e.second) continue;
       ss << endl << e.first << ": " << PrintBytes(host_mem_reserved_[e.first]);
       ss << " -> " << PrintBytes(e.second);
@@ -684,10 +703,11 @@ void AdmissionController::UpdateClusterAggregates() {
 void AdmissionController::PoolStats::UpdateMemTrackerStats() {
   // May be NULL if no queries have ever executed in this pool on this node but another
   // node sent stats for this pool.
-  const MemTracker* tracker = MemTracker::GetRequestPoolMemTracker(name_, NULL);
+  const MemTracker* tracker =
+      ExecEnv::GetInstance()->pool_mem_trackers()->GetRequestPoolMemTracker(name_, false);
 
   const int64_t current_reserved =
-      tracker == NULL ? static_cast<int64_t>(0) : tracker->GetPoolMemReserved();
+      tracker == nullptr ? static_cast<int64_t>(0) : tracker->GetPoolMemReserved();
   if (current_reserved != local_stats_.backend_mem_reserved) {
     parent_->pools_for_updates_.insert(name_);
     local_stats_.backend_mem_reserved = current_reserved;
@@ -695,21 +715,21 @@ void AdmissionController::PoolStats::UpdateMemTrackerStats() {
   }
 
   const int64_t current_usage =
-      tracker == NULL ? static_cast<int64_t>(0) : tracker->consumption();
+      tracker == nullptr ? static_cast<int64_t>(0) : tracker->consumption();
   metrics_.local_backend_mem_usage->set_value(current_usage);
 }
 
 void AdmissionController::AddPoolUpdates(vector<TTopicDelta>* topic_updates) {
   // local_stats_ are updated eagerly except for backend_mem_reserved (which isn't used
   // for local admission control decisions). Update that now before sending local_stats_.
-  BOOST_FOREACH(PoolStatsMap::value_type& entry, pool_stats_) {
+  for (PoolStatsMap::value_type& entry: pool_stats_) {
     entry.second.UpdateMemTrackerStats();
   }
   if (pools_for_updates_.empty()) return;
   topic_updates->push_back(TTopicDelta());
   TTopicDelta& topic_delta = topic_updates->back();
   topic_delta.topic_name = IMPALA_REQUEST_QUEUE_TOPIC;
-  BOOST_FOREACH(const string& pool_name, pools_for_updates_) {
+  for (const string& pool_name: pools_for_updates_) {
     DCHECK(pool_stats_.find(pool_name) != pool_stats_.end());
     PoolStats* stats = GetPoolStats(pool_name);
     VLOG_ROW << "Sending topic update " << stats->DebugString();
@@ -731,7 +751,7 @@ void AdmissionController::DequeueLoop() {
     unique_lock<mutex> lock(admission_ctrl_lock_);
     if (done_) break;
     dequeue_cv_.wait(lock);
-    BOOST_FOREACH(const PoolConfigMap::value_type& entry, pool_config_map_) {
+    for (const PoolConfigMap::value_type& entry: pool_config_map_) {
       const string& pool_name = entry.first;
       const TPoolConfig& pool_config = entry.second;
       const int64_t max_requests = pool_config.max_requests;
@@ -779,7 +799,7 @@ void AdmissionController::DequeueLoop() {
 
       while (max_to_dequeue > 0 && !queue.empty()) {
         QueueNode* queue_node = queue.head();
-        DCHECK(queue_node != NULL);
+        DCHECK(queue_node != nullptr);
         DCHECK(!queue_node->is_admitted.IsSet());
         const QuerySchedule& schedule = queue_node->schedule;
         string not_admitted_reason;

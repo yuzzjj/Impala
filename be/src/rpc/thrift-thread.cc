@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "rpc/thrift-thread.h"
 
@@ -41,17 +44,17 @@ void ThriftThread::join() {
   impala_thread_->Join();
 }
 
-shared_ptr<atc::Thread> ThriftThreadFactory::newThread(
-    shared_ptr<atc::Runnable> runnable) const {
+boost::shared_ptr<atc::Thread> ThriftThreadFactory::newThread(
+    boost::shared_ptr<atc::Runnable> runnable) const {
   stringstream name;
   name << prefix_ << "-" << count_++;
-  shared_ptr<ThriftThread> result =
-      shared_ptr<ThriftThread>(new ThriftThread(group_, name.str(), runnable));
+  boost::shared_ptr<ThriftThread> result =
+      boost::shared_ptr<ThriftThread>(new ThriftThread(group_, name.str(), runnable));
   runnable->thread(result);
   return result;
 }
 
-void ThriftThread::RunRunnable(shared_ptr<atc::Runnable> runnable,
+void ThriftThread::RunRunnable(boost::shared_ptr<atc::Runnable> runnable,
     Promise<atc::Thread::id_t>* promise) {
   promise->Set(get_current());
   // Passing runnable in to this method (rather than reading from this->runnable())
@@ -66,7 +69,7 @@ atc::Thread::id_t ThriftThreadFactory::getCurrentThreadId() const {
 }
 
 ThriftThread::ThriftThread(const string& group, const string& name,
-    shared_ptr<atc::Runnable> runnable)
+    boost::shared_ptr<atc::Runnable> runnable)
     : group_(group), name_(name) {
   // Sets this::runnable (and no, I don't know why it's not protected in atc::Thread)
   this->Thread::runnable(runnable);

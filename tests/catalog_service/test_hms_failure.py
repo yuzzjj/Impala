@@ -1,28 +1,30 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # Tests to validate the Catalog Service continues to function even if the HMS fails.
 
-import logging
 import pytest
 import os
 from subprocess import check_call
-from tests.common.test_vector import *
-from tests.common.test_dimensions import *
-from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.common.impala_cluster import ImpalaCluster
+
 from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
+from tests.common.impala_test_suite import ImpalaTestSuite
+from tests.common.test_dimensions import create_single_exec_option_dimension
+from tests.util.filesystem_utils import IS_ISILON, IS_LOCAL
 
 class TestHiveMetaStoreFailure(ImpalaTestSuite):
   @classmethod
@@ -32,10 +34,10 @@ class TestHiveMetaStoreFailure(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestHiveMetaStoreFailure, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(create_single_exec_option_dimension())
+    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
 
     # There is no reason to run these tests using all dimensions.
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('table_format').file_format == 'parquet' and\
         v.get_value('table_format').compression_codec == 'none')
 
@@ -44,11 +46,18 @@ class TestHiveMetaStoreFailure(ImpalaTestSuite):
     super(TestHiveMetaStoreFailure, cls).setup_class()
 
   @classmethod
+  def run_hive_server(cls):
+    script = os.path.join(os.environ['IMPALA_HOME'], 'testdata/bin/run-hive-server.sh')
+    run_cmd = [script]
+    if IS_LOCAL or IS_ISILON:
+      run_cmd.append('-only_metastore')
+    check_call(run_cmd, close_fds=True)
+
+  @classmethod
   def teardown_class(cls):
     # Make sure the metastore is running even if the test aborts somewhere unexpected
     # before restarting the metastore itself.
-    run_cmd = os.path.join(os.environ['IMPALA_HOME'], 'testdata/bin/run-hive-server.sh')
-    check_call([run_cmd], close_fds=True)
+    cls.run_hive_server()
     cls.client.execute("invalidate metadata")
     super(TestHiveMetaStoreFailure, cls).teardown_class()
 
@@ -72,9 +81,7 @@ class TestHiveMetaStoreFailure(ImpalaTestSuite):
       print str(e)
       assert "Failed to load metadata for table: %s. Running 'invalidate metadata %s' "\
           "may resolve this problem." % (tbl_name, tbl_name) in str(e)
-
-    run_cmd = os.path.join(os.environ['IMPALA_HOME'], 'testdata/bin/run-hive-server.sh')
-    check_call([run_cmd], close_fds=True)
+    self.run_hive_server()
 
     self.client.execute("invalidate metadata %s" % tbl_name)
     self.client.execute("describe %s" % tbl_name)

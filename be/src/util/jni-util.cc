@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/jni-util.h"
 
@@ -27,9 +30,9 @@ namespace impala {
 jclass JniUtil::jni_util_cl_ = NULL;
 jclass JniUtil::internal_exc_cl_ = NULL;
 jmethodID JniUtil::get_jvm_metrics_id_ = NULL;
+jmethodID JniUtil::get_jvm_threads_id_ = NULL;
 jmethodID JniUtil::throwable_to_string_id_ = NULL;
 jmethodID JniUtil::throwable_to_stack_trace_id_ = NULL;
-vector<jobject> JniUtil::global_refs_;
 
 Status JniLocalFrame::push(JNIEnv* env, int max_local_ref) {
   DCHECK(env_ == NULL);
@@ -57,8 +60,7 @@ Status JniUtil::GetGlobalClassRef(JNIEnv* env, const char* class_str, jclass* cl
   *class_ref = NULL;
   jclass local_cl = env->FindClass(class_str);
   RETURN_ERROR_IF_EXC(env);
-  RETURN_IF_ERROR(LocalToGlobalRef(env, reinterpret_cast<jobject>(local_cl),
-      reinterpret_cast<jobject*>(class_ref)));
+  RETURN_IF_ERROR(LocalToGlobalRef(env, local_cl, class_ref));
   env->DeleteLocalRef(local_cl);
   RETURN_ERROR_IF_EXC(env);
   return Status::OK();
@@ -67,7 +69,12 @@ Status JniUtil::GetGlobalClassRef(JNIEnv* env, const char* class_str, jclass* cl
 Status JniUtil::LocalToGlobalRef(JNIEnv* env, jobject local_ref, jobject* global_ref) {
   *global_ref = env->NewGlobalRef(local_ref);
   RETURN_ERROR_IF_EXC(env);
-  global_refs_.push_back(*global_ref);
+  return Status::OK();
+}
+
+Status JniUtil::FreeGlobalRef(JNIEnv* env, jobject global_ref) {
+  env->DeleteGlobalRef(global_ref);
+  RETURN_ERROR_IF_EXC(env);
   return Status::OK();
 }
 
@@ -76,7 +83,7 @@ Status JniUtil::Init() {
   JNIEnv* env = getJNIEnv();
   if (env == NULL) return Status("Failed to get/create JVM");
   // Find JniUtil class and create a global ref.
-  jclass local_jni_util_cl = env->FindClass("com/cloudera/impala/common/JniUtil");
+  jclass local_jni_util_cl = env->FindClass("org/apache/impala/common/JniUtil");
   if (local_jni_util_cl == NULL) {
     if (env->ExceptionOccurred()) env->ExceptionDescribe();
     return Status("Failed to find JniUtil class.");
@@ -93,7 +100,7 @@ Status JniUtil::Init() {
 
   // Find InternalException class and create a global ref.
   jclass local_internal_exc_cl =
-      env->FindClass("com/cloudera/impala/common/InternalException");
+      env->FindClass("org/apache/impala/common/InternalException");
   if (local_internal_exc_cl == NULL) {
     if (env->ExceptionOccurred()) env->ExceptionDescribe();
     return Status("Failed to find JniUtil class.");
@@ -133,6 +140,12 @@ Status JniUtil::Init() {
     return Status("Failed to find JniUtil.getJvmMetrics method.");
   }
 
+  get_jvm_threads_id_ =
+      env->GetStaticMethodID(jni_util_cl_, "getJvmThreadsInfo", "([B)[B");
+  if (get_jvm_threads_id_ == NULL) {
+    if (env->ExceptionOccurred()) env->ExceptionDescribe();
+    return Status("Failed to find JniUtil.getJvmThreadsInfo method.");
+  }
 
   return Status::OK();
 }
@@ -142,20 +155,6 @@ void JniUtil::InitLibhdfs() {
   // null; see xxx for an explanation
   hdfsFS fs = hdfsConnect("default", 0);
   hdfsDisconnect(fs);
-}
-
-Status JniUtil::Cleanup() {
-  // Get the JNIEnv* corresponding to current thread.
-  JNIEnv* env = getJNIEnv();
-  if (env == NULL) {
-    return Status("Failed to get/create JVM");
-  }
-  vector<jobject>::iterator it;
-  for (it = global_refs_.begin(); it != global_refs_.end(); ++it) {
-    env->DeleteGlobalRef(*it);
-  }
-  global_refs_.clear();
-  return Status::OK();
 }
 
 Status JniUtil::GetJniExceptionMsg(JNIEnv* env, bool log_stack, const string& prefix) {
@@ -190,9 +189,22 @@ Status JniUtil::GetJvmMetrics(const TGetJvmMetricsRequest& request,
   return JniUtil::CallJniMethod(jni_util_class(), get_jvm_metrics_id_, request, result);
 }
 
+Status JniUtil::GetJvmThreadsInfo(const TGetJvmThreadsInfoRequest& request,
+    TGetJvmThreadsInfoResponse* result) {
+  return JniUtil::CallJniMethod(jni_util_class(), get_jvm_threads_id_, request, result);
+}
+
 Status JniUtil::LoadJniMethod(JNIEnv* env, const jclass& jni_class,
     JniMethodDescriptor* descriptor) {
   (*descriptor->method_id) = env->GetMethodID(jni_class,
+      descriptor->name.c_str(), descriptor->signature.c_str());
+  RETURN_ERROR_IF_EXC(env);
+  return Status::OK();
+}
+
+Status JniUtil::LoadStaticJniMethod(JNIEnv* env, const jclass& jni_class,
+    JniMethodDescriptor* descriptor) {
+  (*descriptor->method_id) = env->GetStaticMethodID(jni_class,
       descriptor->name.c_str(), descriptor->signature.c_str());
   RETURN_ERROR_IF_EXC(env);
   return Status::OK();

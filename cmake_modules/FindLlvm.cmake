@@ -1,3 +1,22 @@
+##############################################################################
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+##############################################################################
+
 # Find the native LLVM includes and library
 #
 #  LLVM_ROOT        - hints the search path
@@ -66,7 +85,7 @@ execute_process(
 # Get the link libs we need.  llvm has many and we don't want to link all of the libs
 # if we don't need them.
 execute_process(
-  COMMAND ${LLVM_CONFIG_EXECUTABLE} --libnames core jit native ipo bitreader target linker
+  COMMAND ${LLVM_CONFIG_EXECUTABLE} --libnames core mcjit native ipo bitreader target linker analysis debuginfodwarf
   OUTPUT_VARIABLE LLVM_MODULE_LIBS
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
@@ -74,7 +93,7 @@ execute_process(
 # CMake really doesn't like adding link directories and wants absolute paths
 # Reconstruct it with LLVM_MODULE_LIBS and LLVM_LIBRARY_DIR
 string(REPLACE " " ";" LIBS_LIST ${LLVM_MODULE_LIBS})
-set (LLVM_MODULE_LIBS "-ldl")
+set (LLVM_MODULE_LIBS "")
 foreach (LIB ${LIBS_LIST})
   set(LLVM_MODULE_LIBS ${LLVM_MODULE_LIBS} "${LLVM_LIBRARY_DIR}/${LIB}")
 endforeach(LIB)

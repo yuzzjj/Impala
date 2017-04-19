@@ -1,43 +1,46 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_RUNTIME_ROW_BATCH_H
 #define IMPALA_RUNTIME_ROW_BATCH_H
 
-#include <vector>
 #include <cstring>
+#include <vector>
 #include <boost/scoped_ptr.hpp>
 
+#include "codegen/impala-ir.h"
+#include "common/compiler-util.h"
 #include "common/logging.h"
-#include "runtime/buffered-block-mgr.h" // for BufferedBlockMgr::Block
+#include "runtime/buffered-block-mgr.h"
+#include "runtime/bufferpool/buffer-pool.h"
 #include "runtime/descriptors.h"
 #include "runtime/disk-io-mgr.h"
 #include "runtime/mem-pool.h"
-#include "runtime/mem-tracker.h"
 
 namespace impala {
 
-class BufferedTupleStream;
 template <typename K, typename V> class FixedSizeHashTable;
 class MemTracker;
 class RowBatchSerializeTest;
+class RuntimeState;
 class TRowBatch;
 class Tuple;
 class TupleRow;
 class TupleDescriptor;
-
 
 /// A RowBatch encapsulates a batch of rows, each composed of a number of tuples.
 /// The maximum number of rows is fixed at the time of construction.
@@ -71,6 +74,14 @@ class TupleDescriptor;
 /// auxiliary memory up to a soft cap. (See at_capacity_mem_usage_ comment).
 class RowBatch {
  public:
+  /// Flag indicating whether the resources attached to a RowBatch need to be flushed.
+  /// Defined here as a convenience for other modules that need to communicate flushing
+  /// modes.
+  enum class FlushMode {
+    FLUSH_RESOURCES,
+    NO_FLUSH_RESOURCES,
+  };
+
   /// Create RowBatch for a maximum of 'capacity' rows of tuples specified
   /// by 'row_desc'.
   /// tracker cannot be NULL.
@@ -96,22 +107,22 @@ class RowBatch {
   /// are uninitialized and each tuple of the row must be set, after which CommitRows()
   /// can be called to update num_rows_. Two consecutive AddRow() calls without a
   /// CommitRows() call between them have the same effect as a single call.
-  int AddRows(int n) {
+  int ALWAYS_INLINE AddRows(int n) {
     DCHECK_LE(num_rows_ + n, capacity_);
     return num_rows_;
   }
 
-  int AddRow() { return AddRows(1); }
+  int ALWAYS_INLINE AddRow() { return AddRows(1); }
 
-  void CommitRows(int n) {
+  void ALWAYS_INLINE CommitRows(int n) {
     DCHECK_GE(n, 0);
     DCHECK_LE(num_rows_ + n, capacity_);
     num_rows_ += n;
   }
 
-  void CommitLastRow() { CommitRows(1); }
+  void ALWAYS_INLINE CommitLastRow() { CommitRows(1); }
 
-  /// Set function can be used to reduce the number of rows in the batch.  This is only
+  /// Set function can be used to reduce the number of rows in the batch. This is only
   /// used in the limit case where more rows were added than necessary.
   void set_num_rows(int num_rows) {
     DCHECK_LE(num_rows, num_rows_);
@@ -122,27 +133,82 @@ class RowBatch {
   /// Returns true if the row batch has filled rows up to its capacity or has accumulated
   /// enough memory. The memory calculation includes the tuple data pool and any
   /// auxiliary memory attached to the row batch.
-  bool AtCapacity() {
+  bool ALWAYS_INLINE AtCapacity() {
     DCHECK_LE(num_rows_, capacity_);
-    // Check AtCapacity() conditions enforced in MarkNeedToReturn() and AddTupleStream()
-    if (need_to_return_) DCHECK_EQ(num_rows_, capacity_);
-    if (num_tuple_streams() > 0) DCHECK_EQ(num_rows_, capacity_);
-    DCHECK((num_tuple_streams() == 0 && !need_to_return_) || num_rows_ == capacity_);
+    // Check AtCapacity() condition enforced in MarkNeedsDeepCopy() and
+    // MarkFlushResources().
+    DCHECK((!needs_deep_copy_ && flush_ == FlushMode::NO_FLUSH_RESOURCES)
+        || num_rows_ == capacity_);
     int64_t mem_usage = auxiliary_mem_usage_ + tuple_data_pool_.total_allocated_bytes();
     return num_rows_ == capacity_ || mem_usage >= AT_CAPACITY_MEM_USAGE;
   }
 
-  TupleRow* GetRow(int row_idx) {
+  TupleRow* ALWAYS_INLINE GetRow(int row_idx) {
     DCHECK(tuple_ptrs_ != NULL);
     DCHECK_GE(row_idx, 0);
     DCHECK_LT(row_idx, capacity_);
     return reinterpret_cast<TupleRow*>(tuple_ptrs_ + row_idx * num_tuples_per_row_);
   }
 
+  /// An iterator for going through a row batch, starting at 'row_idx'.
+  /// If 'limit' is specified, it will iterate up to row number 'row_idx + limit'
+  /// or the last row, whichever comes first. Otherwise, it will iterate till the last
+  /// row in the batch. This is more efficient than using GetRow() as it avoids loading
+  /// the row batch state and doing multiplication on each loop with GetRow().
+  class Iterator {
+   public:
+    Iterator(RowBatch* parent, int row_idx, int limit = -1) :
+        num_tuples_per_row_(parent->num_tuples_per_row_),
+        row_(parent->tuple_ptrs_ + num_tuples_per_row_ * row_idx),
+        row_batch_end_(parent->tuple_ptrs_ + num_tuples_per_row_ *
+            (limit == -1 ? parent->num_rows_ :
+                           std::min<int>(row_idx + limit, parent->num_rows_))),
+        parent_(parent) {
+      DCHECK_GE(row_idx, 0);
+      DCHECK_GT(num_tuples_per_row_, 0);
+      /// We allow empty row batches with num_rows_ == capacity_ == 0.
+      /// That's why we cannot call GetRow() above to initialize 'row_'.
+      DCHECK_LE(row_idx, parent->capacity_);
+    }
+
+    /// Return the current row pointed to by the row pointer.
+    TupleRow* IR_ALWAYS_INLINE Get() { return reinterpret_cast<TupleRow*>(row_); }
+
+    /// Increment the row pointer and return the next row.
+    TupleRow* IR_ALWAYS_INLINE Next() {
+      row_ += num_tuples_per_row_;
+      DCHECK_LE((row_ - parent_->tuple_ptrs_) / num_tuples_per_row_, parent_->capacity_);
+      return Get();
+    }
+
+    /// Returns true if the iterator is beyond the last row for read iterators.
+    /// Useful for read iterators to determine the limit. Write iterators should use
+    /// RowBatch::AtCapacity() instead.
+    bool IR_ALWAYS_INLINE AtEnd() { return row_ >= row_batch_end_; }
+
+    /// Returns the row batch which this iterator is iterating through.
+    RowBatch* parent() { return parent_; }
+
+   private:
+    /// Number of tuples per row.
+    const int num_tuples_per_row_;
+
+    /// Pointer to the current row.
+    Tuple** row_;
+
+    /// Pointer to the row after the last row for read iterators.
+    Tuple** const row_batch_end_;
+
+    /// The row batch being iterated on.
+    RowBatch* const parent_;
+  };
+
+  int num_tuples_per_row() { return num_tuples_per_row_; }
   int row_byte_size() { return num_tuples_per_row_ * sizeof(Tuple*); }
   MemPool* tuple_data_pool() { return &tuple_data_pool_; }
   int num_io_buffers() const { return io_buffers_.size(); }
-  int num_tuple_streams() const { return tuple_streams_.size(); }
+  int num_blocks() const { return blocks_.size(); }
+  int num_buffers() const { return buffers_.size(); }
 
   /// Resets the row batch, returning all resources it has accumulated.
   void Reset();
@@ -150,23 +216,53 @@ class RowBatch {
   /// Add io buffer to this row batch.
   void AddIoBuffer(DiskIoMgr::BufferDescriptor* buffer);
 
-  /// Add tuple stream to this row batch. The row batch takes ownership of the stream
-  /// and will call Close() on the stream and delete it when freeing resources.
-  void AddTupleStream(BufferedTupleStream* stream);
-
   /// Adds a block to this row batch. The block must be pinned. The blocks must be
-  /// deleted when freeing resources.
-  void AddBlock(BufferedBlockMgr::Block* block);
+  /// deleted when freeing resources. The block's memory remains accounted against
+  /// the original owner, even when the ownership of batches is transferred. If the
+  /// original owner wants the memory to be released, it should call this with 'mode'
+  /// FLUSH_RESOURCES (see MarkFlushResources() for further explanation).
+  void AddBlock(BufferedBlockMgr::Block* block, FlushMode flush);
 
-  /// Called to indicate that resources backing this row batch will be cleaned up after
-  /// the next GetNext() call and the batch must be returned up the operator tree.
-  /// This is used to control memory management for streaming rows.
-  void MarkNeedToReturn() {
-    need_to_return_ = true;
-    MarkAtCapacity();
+  /// Adds a buffer to this row batch. The buffer is deleted when freeing resources.
+  /// The buffer's memory remains accounted against the original owner, even when the
+  /// ownership of batches is transferred. If the original owner wants the memory to be
+  /// released, it should call this with 'mode' FLUSH_RESOURCES (see MarkFlushResources()
+  /// for further explanation).
+  /// TODO: IMPALA-4179: after IMPALA-3200, simplify the ownership transfer model and
+  /// make it consistent between buffers and I/O buffers.
+  void AddBuffer(
+      BufferPool::ClientHandle* client, BufferPool::BufferHandle buffer, FlushMode flush);
+
+  /// Used by an operator to indicate that it cannot produce more rows until the
+  /// resources that it has attached to the row batch are freed or acquired by an
+  /// ancestor operator. After this is called, the batch is at capacity and no more rows
+  /// can be added. The "flush" mark is transferred by TransferResourceOwnership(). This
+  /// ensures that batches are flushed by streaming operators all the way up the operator
+  /// tree. Blocking operators can still accumulate batches with this flag.
+  /// TODO: IMPALA-3200: blocking operators should acquire all memory resources including
+  /// attached blocks/buffers, so that MarkFlushResources() can guarantee that the
+  /// resources will not be accounted against the original operator (this is currently
+  /// not true for Blocks, which can't be transferred).
+  void MarkFlushResources() {
+    DCHECK_LE(num_rows_, capacity_);
+    capacity_ = num_rows_;
+    flush_ = FlushMode::FLUSH_RESOURCES;
   }
 
-  bool need_to_return() { return need_to_return_; }
+  /// Called to indicate that some resources backing this batch were not attached and
+  /// will be cleaned up after the next GetNext() call. This means that the batch must
+  /// be returned up the operator tree. Blocking operators must deep-copy any rows from
+  /// this batch or preceding batches.
+  ///
+  /// This is a stronger version of MarkFlushResources(), because blocking operators
+  /// are not allowed to accumulate batches with the 'needs_deep_copy' flag.
+  /// TODO: IMPALA-4179: always attach backing resources and remove this flag.
+  void MarkNeedsDeepCopy() {
+    MarkFlushResources(); // No more rows should be added to the batch.
+    needs_deep_copy_ = true;
+  }
+
+  bool needs_deep_copy() { return needs_deep_copy_; }
 
   /// Transfer ownership of resources to dest.  This includes tuple data in mem
   /// pool and io buffers.
@@ -216,8 +312,14 @@ class RowBatch {
   /// Utility function: returns total size of batch.
   static int GetBatchSize(const TRowBatch& batch);
 
-  int num_rows() const { return num_rows_; }
-  int capacity() const { return capacity_; }
+  int ALWAYS_INLINE num_rows() const { return num_rows_; }
+  int ALWAYS_INLINE capacity() const { return capacity_; }
+
+  // The maximum value that capacity_ ever took, before MarkCapacity() might have changed
+  // it.
+  int ALWAYS_INLINE InitialCapacity() const {
+    return tuple_ptrs_size_ / (num_tuples_per_row_ * sizeof(Tuple*));
+  }
 
   const RowDescriptor& row_desc() const { return row_desc_; }
 
@@ -226,8 +328,22 @@ class RowBatch {
   /// row's worth of data.
   static const int AT_CAPACITY_MEM_USAGE = 8 * 1024 * 1024;
 
-  /// Computes the maximum size needed to store tuple data for this row batch.
-  int MaxTupleBufferSize();
+  // Max memory out of AT_CAPACITY_MEM_USAGE that should be used for fixed-length data,
+  // in order to leave room for variable-length data.
+  static const int FIXED_LEN_BUFFER_LIMIT = AT_CAPACITY_MEM_USAGE / 2;
+
+  /// Allocates a buffer large enough for the fixed-length portion of 'capacity_' rows in
+  /// this batch from 'tuple_data_pool_'. 'capacity_' is reduced if the allocation would
+  /// exceed FIXED_LEN_BUFFER_LIMIT. Always returns enough space for at least one row.
+  /// Returns Status::MEM_LIMIT_EXCEEDED and sets 'buffer' to NULL if a memory limit would
+  /// have been exceeded. 'state' is used to log the error.
+  /// On success, sets 'buffer_size' to the size in bytes and 'buffer' to the buffer.
+  Status ResizeAndAllocateTupleBuffer(RuntimeState* state, int64_t* buffer_size,
+       uint8_t** buffer);
+
+  /// Helper function to log the batch's rows if VLOG_ROW is enabled. 'context' is a
+  /// string to prepend to the log message.
+  void VLogRows(const std::string& context);
 
  private:
   friend class RowBatchSerializeBaseline;
@@ -254,30 +370,27 @@ class RowBatch {
   void SerializeInternal(int64_t size, DedupMap* distinct_tuples,
       TRowBatch* output_batch);
 
-  /// Close owned tuple streams and delete if needed.
-  void CloseTupleStreams();
-
-  /// Mark that no more rows should be added to the batch.
-  void MarkAtCapacity() {
-    DCHECK_LE(num_rows_, capacity_);
-    capacity_ = num_rows_;
-  }
-
   /// All members below need to be handled in RowBatch::AcquireState()
 
   // Class members that are accessed on performance-critical paths should appear
   // up the top to fit in as few cache lines as possible.
 
   int num_rows_;  // # of committed rows
-  int capacity_; // the value of num_rows_ at which batch is considered full.
+  int capacity_;  // the value of num_rows_ at which batch is considered full.
+
+  /// If FLUSH_RESOURCES, the resources attached to this batch should be freed or
+  /// acquired by a new owner as soon as possible. See MarkFlushResources(). If
+  /// FLUSH_RESOURCES, AtCapacity() is also true.
+  FlushMode flush_;
 
   /// If true, this batch references unowned memory that will be cleaned up soon.
-  /// See MarkNeedToReturn().
-  bool need_to_return_;
+  /// See MarkNeedsDeepCopy(). If true, 'flush_' is FLUSH_RESOURCES and
+  /// AtCapacity() is true.
+  bool needs_deep_copy_;
 
-  int num_tuples_per_row_;
+  const int num_tuples_per_row_;
 
-  /// Array of pointers with capacity_ * num_tuples_per_row_ elements.
+  /// Array of pointers with InitialCapacity() * num_tuples_per_row_ elements.
   /// The memory ownership depends on whether legacy joins and aggs are enabled.
   ///
   /// Memory is malloc'd and owned by RowBatch:
@@ -316,23 +429,40 @@ class RowBatch {
   /// (i.e. they are not ref counted) so most row batches don't own any.
   std::vector<DiskIoMgr::BufferDescriptor*> io_buffers_;
 
-  /// Tuple streams currently owned by this row batch.
-  std::vector<BufferedTupleStream*> tuple_streams_;
-
   /// Blocks attached to this row batch. The underlying memory and block manager client
   /// are owned by the BufferedBlockMgr.
   std::vector<BufferedBlockMgr::Block*> blocks_;
 
+  struct BufferInfo {
+    BufferPool::ClientHandle* client;
+    BufferPool::BufferHandle buffer;
+  };
+
+  /// Pages attached to this row batch. See AddBuffer() for ownership semantics.
+  std::vector<BufferInfo> buffers_;
+
   /// String to write compressed tuple data to in Serialize().
   /// This is a string so we can swap() with the string in the TRowBatch we're serializing
   /// to (we don't compress directly into the TRowBatch in case the compressed data is
-  /// longer than the uncompressed data). Swapping avoids copying data to the TRowBatch and
-  /// avoids excess memory allocations: since we reuse RowBatchs and TRowBatchs, and
+  /// longer than the uncompressed data). Swapping avoids copying data to the TRowBatch
+  /// and avoids excess memory allocations: since we reuse RowBatchs and TRowBatchs, and
   /// assuming all row batches are roughly the same size, all strings will eventually be
   /// allocated to the right size.
   std::string compression_scratch_;
 };
-
 }
+
+/// Macros for iterating through '_row_batch', starting at '_start_row_idx'.
+/// '_row_batch' is the row batch to iterate through.
+/// '_start_row_idx' is the starting row index.
+/// '_iter' is the iterator.
+/// '_limit' is the max number of rows to iterate over.
+#define FOREACH_ROW(_row_batch, _start_row_idx, _iter)                  \
+    for (RowBatch::Iterator _iter(_row_batch, _start_row_idx);          \
+         !_iter.AtEnd(); _iter.Next())
+
+#define FOREACH_ROW_LIMIT(_row_batch, _start_row_idx, _limit, _iter)    \
+    for (RowBatch::Iterator _iter(_row_batch, _start_row_idx, _limit);  \
+         !_iter.AtEnd(); _iter.Next())
 
 #endif

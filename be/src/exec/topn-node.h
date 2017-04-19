@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_TOPN_NODE_H
@@ -19,6 +22,7 @@
 #include <queue>
 #include <boost/scoped_ptr.hpp>
 
+#include "codegen/impala-ir.h"
 #include "exec/exec-node.h"
 #include "exec/sort-exec-exprs.h"
 #include "runtime/descriptors.h"  // for TupleId
@@ -41,6 +45,7 @@ class TopNNode : public ExecNode {
 
   virtual Status Init(const TPlanNode& tnode, RuntimeState* state);
   virtual Status Prepare(RuntimeState* state);
+  virtual void Codegen(RuntimeState* state);
   virtual Status Open(RuntimeState* state);
   virtual Status GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos);
   virtual Status Reset(RuntimeState* state);
@@ -53,9 +58,12 @@ class TopNNode : public ExecNode {
 
   friend class TupleLessThan;
 
+  /// Inserts all the rows in 'batch' into the queue.
+  void InsertBatch(RowBatch* batch);
+
   /// Inserts a tuple row into the priority queue if it's in the TopN.  Creates a deep
   /// copy of tuple_row, which it stores in tuple_pool_.
-  void InsertTupleRow(TupleRow* tuple_row);
+  void IR_ALWAYS_INLINE InsertTupleRow(TupleRow* tuple_row);
 
   /// Flatten and reverse the priority queue.
   void PrepareForOutput();
@@ -86,8 +94,14 @@ class TopNNode : public ExecNode {
   /// Stores everything referenced in priority_queue_.
   boost::scoped_ptr<MemPool> tuple_pool_;
 
-  // Iterator over elements in sorted_top_n_.
+  /// Iterator over elements in sorted_top_n_.
   std::vector<Tuple*>::iterator get_next_iter_;
+
+  typedef void (*InsertBatchFn)(TopNNode*, RowBatch*);
+  InsertBatchFn codegend_insert_batch_fn_;
+
+  /// Timer for time spent in InsertBatch() function (or codegen'd version)
+  RuntimeProfile::Counter* insert_batch_timer_;
 
   /////////////////////////////////////////
   /// BEGIN: Members that must be Reset()
@@ -99,9 +113,8 @@ class TopNNode : public ExecNode {
   /// The stl priority queue doesn't support a max size, so to get that functionality,
   /// the order of the queue is the opposite of what the ORDER BY clause specifies, such
   /// that the top of the queue is the last sorted element.
-  boost::scoped_ptr<
-      std::priority_queue<Tuple*, std::vector<Tuple*>, TupleRowComparator> >
-          priority_queue_;
+  boost::scoped_ptr<std::priority_queue<Tuple*, std::vector<Tuple*>,
+      ComparatorWrapper<TupleRowComparator>>> priority_queue_;
 
   /// END: Members that must be Reset()
   /////////////////////////////////////////

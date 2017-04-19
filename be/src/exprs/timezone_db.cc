@@ -1,24 +1,36 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
-#include "timestamp-functions.h"
+#include "exprs/timezone_db.h"
+
+#include <boost/date_time/compiler_config.hpp>
+#include <boost/date_time/local_time/posix_time_zone.hpp>
+#include <boost/filesystem.hpp>
+
+#include "exprs/timestamp-functions.h"
+#include "gutil/strings/substitute.h"
 
 #include "common/names.h"
 
 using boost::local_time::tz_database;
 using boost::local_time::time_zone_ptr;
 using boost::local_time::posix_time_zone;
+
+DECLARE_string(local_library_dir);
 
 namespace impala {
 
@@ -27,6 +39,8 @@ vector<string> TimezoneDatabase::tz_region_list_;
 
 const time_zone_ptr TimezoneDatabase::TIMEZONE_MSK_PRE_2011_DST(time_zone_ptr(
     new posix_time_zone(string("MSK+03MSK+01,M3.5.0/02:00:00,M10.5.0/03:00:00"))));
+const time_zone_ptr TimezoneDatabase::TIMEZONE_MSK_PRE_2014(time_zone_ptr(
+    new posix_time_zone(string("MSK+04"))));
 
 const char* TimezoneDatabase::TIMEZONE_DATABASE_STR = "\"ID\",\"STD ABBR\",\"STD NAME\",\"DST ABBR\",\"DST NAME\",\"GMT offset\",\"DST adjustment\",\"DST Start Date rule\",\"Start time\",\"DST End date rule\",\"End time\"\n\
 \"ACT\",\"ACST\",\"Australian Central Standard Time (Northern Territory)\",\"\",\"\",\"+09:30:00\",\"+00:00:00\",\"\",\"\",\"\",\"\"\n\
@@ -493,7 +507,7 @@ const char* TimezoneDatabase::TIMEZONE_DATABASE_STR = "\"ID\",\"STD ABBR\",\"STD
 \"Europe/Mariehamn\",\"EET\",\"Eastern European Time\",\"EEST\",\"Eastern European Summer Time\",\"+02:00:00\",\"+01:00:00\",\"-1;0;3\",\"+01:00:00\",\"-1;0;10\",\"+01:00:00\"\n\
 \"Europe/Minsk\",\"MSK\",\"Moscow Standard Time\",\"\",\"\",\"+03:00:00\",\"+00:00:00\",\"\",\"\",\"\",\"\"\n\
 \"Europe/Monaco\",\"CET\",\"Central European Time\",\"CEST\",\"Central European Summer Time\",\"+01:00:00\",\"+01:00:00\",\"-1;0;3\",\"+01:00:00\",\"-1;0;10\",\"+01:00:00\"\n\
-\"Europe/Moscow\",\"MSK\",\"Moscow Standard Time\",\"\",\"\",\"+04:00:00\",\"+00:00:00\",\"\",\"\",\"\",\"\"\n\
+\"Europe/Moscow\",\"MSK\",\"Moscow Standard Time\",\"\",\"\",\"+03:00:00\",\"+00:00:00\",\"\",\"\",\"\",\"\"\n\
 \"Europe/Nicosia\",\"EET\",\"Eastern European Time\",\"EEST\",\"Eastern European Summer Time\",\"+02:00:00\",\"+01:00:00\",\"-1;0;3\",\"+01:00:00\",\"-1;0;10\",\"+01:00:00\"\n\
 \"Europe/Oslo\",\"CET\",\"Central European Time\",\"CEST\",\"Central European Summer Time\",\"+01:00:00\",\"+01:00:00\",\"-1;0;3\",\"+01:00:00\",\"-1;0;10\",\"+01:00:00\"\n\
 \"Europe/Paris\",\"CET\",\"Central European Time\",\"CEST\",\"Central European Summer Time\",\"+01:00:00\",\"+01:00:00\",\"-1;0;3\",\"+01:00:00\",\"-1;0;10\",\"+01:00:00\"\n\
@@ -653,5 +667,40 @@ const char* TimezoneDatabase::TIMEZONE_DATABASE_STR = "\"ID\",\"STD ABBR\",\"STD
 \"WET\",\"WET\",\"Western European Time\",\"WEST\",\"Western European Summer Time\",\"+00:00:00\",\"+01:00:00\",\"-1;0;3\",\"+01:00:00\",\"-1;0;10\",\"+01:00:00\"\n\
 \"Zulu\",\"UTC\",\"Coordinated Universal Time\",\"\",\"\",\"+00:00:00\",\"+00:00:00\",\"\",\"\",\"\",\"\"";
 
+Status TimezoneDatabase::Initialize() {
+  // Create a temporary file and write the timezone information.  The boost
+  // interface only loads this format from a file. We abort the startup if
+  // this initialization fails for some reason.
+  string pathname = (boost::filesystem::path(FLAGS_local_library_dir) /
+      string("impala.tzdb.XXXXXXX")).string();
+  // mkstemp operates in place, so we need a mutable array.
+  std::vector<char> filestr(pathname.c_str(), pathname.c_str() + pathname.size() + 1);
+  FILE* file;
+  int fd;
+  if ((fd = mkstemp(filestr.data())) == -1) {
+    return Status(Substitute("Could not create temporary timezone file: $0. Check that "
+        "the directory $1 is writable by the user running Impala.", filestr.data(),
+        FLAGS_local_library_dir));
+  }
+  if ((file = fopen(filestr.data(), "w")) == NULL) {
+    unlink(filestr.data());
+    close(fd);
+    return Status(Substitute("Could not open temporary timezone file: $0",
+      filestr.data()));
+  }
+  if (fputs(TIMEZONE_DATABASE_STR, file) == EOF) {
+    unlink(filestr.data());
+    close(fd);
+    fclose(file);
+    return Status(Substitute("Could not load temporary timezone file: $0",
+      filestr.data()));
+  }
+  fclose(file);
+  tz_database_.load_from_file(string(filestr.data()));
+  tz_region_list_ = tz_database_.region_list();
+  unlink(filestr.data());
+  close(fd);
+  return Status::OK();
+}
 
 }

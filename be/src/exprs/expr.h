@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 /// --- Terminology:
@@ -19,7 +22,7 @@
 /// and produces a scalar result. This function evaluates the necessary child arguments by
 /// calling their compute functions, then performs whatever computation is necessary on
 /// the arguments (e.g. calling a UDF with the child arguments). All compute functions
-/// take arguments (ExprContext*, TupleRow*). The return type is a *Val (i.e. a subclass
+/// take arguments (ExprContext*, const TupleRow*). The return type is a *Val (i.e. a subclass
 /// of AnyVal). Thus, a single expression will implement a compute function for every
 /// return type it supports.
 ///
@@ -85,21 +88,17 @@
 #ifndef IMPALA_EXPRS_EXPR_H
 #define IMPALA_EXPRS_EXPR_H
 
+#include <memory>
 #include <string>
 #include <vector>
+#include <boost/scoped_ptr.hpp>
 
+#include "common/global-types.h"
 #include "common/status.h"
 #include "impala-ir/impala-ir-functions.h"
-#include "runtime/descriptors.h"
-#include "runtime/decimal-value.h"
-#include "runtime/lib-cache.h"
-#include "runtime/raw-value.h"
-#include "runtime/tuple.h"
-#include "runtime/tuple-row.h"
-#include "runtime/string-value.h"
-#include "runtime/timestamp-value.h"
-#include "udf/udf.h"
+#include "runtime/types.h"
 #include "udf/udf-internal.h" // for CollectionVal
+#include "udf/udf.h"
 
 using namespace impala_udf;
 
@@ -112,15 +111,19 @@ namespace llvm {
 
 namespace impala {
 
-class Expr;
+class ExprContext;
 class IsNullExpr;
+class LibCacheEntry;
 class LlvmCodeGen;
+class MemTracker;
 class ObjectPool;
 class RowDescriptor;
 class RuntimeState;
 class TColumnValue;
 class TExpr;
 class TExprNode;
+class Tuple;
+class TupleRow;
 
 /// This is the superclass of all expr evaluation nodes.
 class Expr {
@@ -131,17 +134,19 @@ class Expr {
   /// the functions for the return type(s) it supports. For example, a boolean function
   /// will only implement GetBooleanVal(). Some Exprs, like Literal, have many possible
   /// return types and will implement multiple Get*Val() functions.
-  virtual BooleanVal GetBooleanVal(ExprContext* context, TupleRow*);
-  virtual TinyIntVal GetTinyIntVal(ExprContext* context, TupleRow*);
-  virtual SmallIntVal GetSmallIntVal(ExprContext* context, TupleRow*);
-  virtual IntVal GetIntVal(ExprContext* context, TupleRow*);
-  virtual BigIntVal GetBigIntVal(ExprContext* context, TupleRow*);
-  virtual FloatVal GetFloatVal(ExprContext* context, TupleRow*);
-  virtual DoubleVal GetDoubleVal(ExprContext* context, TupleRow*);
-  virtual StringVal GetStringVal(ExprContext* context, TupleRow*);
-  virtual CollectionVal GetCollectionVal(ExprContext* context, TupleRow*);
-  virtual TimestampVal GetTimestampVal(ExprContext* context, TupleRow*);
-  virtual DecimalVal GetDecimalVal(ExprContext* context, TupleRow*);
+  virtual BooleanVal GetBooleanVal(ExprContext* context, const TupleRow*);
+  virtual TinyIntVal GetTinyIntVal(ExprContext* context, const TupleRow*);
+  virtual SmallIntVal GetSmallIntVal(ExprContext* context, const TupleRow*);
+  virtual IntVal GetIntVal(ExprContext* context, const TupleRow*);
+  virtual BigIntVal GetBigIntVal(ExprContext* context, const TupleRow*);
+  virtual FloatVal GetFloatVal(ExprContext* context, const TupleRow*);
+  virtual DoubleVal GetDoubleVal(ExprContext* context, const TupleRow*);
+  virtual StringVal GetStringVal(ExprContext* context, const TupleRow*);
+  virtual CollectionVal GetCollectionVal(ExprContext* context, const TupleRow*);
+  virtual TimestampVal GetTimestampVal(ExprContext* context, const TupleRow*);
+  virtual DecimalVal GetDecimalVal(ExprContext* context, const TupleRow*);
+
+  const std::string& function_name() const { return fn_.name.function_name; }
 
   /// Get the number of digits after the decimal that should be displayed for this value.
   /// Returns -1 if no scale has been specified (currently the scale is only set for
@@ -155,6 +160,7 @@ class Expr {
 
   const ColumnType& type() const { return type_; }
   bool is_slotref() const { return is_slotref_; }
+  bool is_constant() const { return is_constant_; }
 
   const std::vector<Expr*>& children() const { return children_; }
 
@@ -162,14 +168,17 @@ class Expr {
   /// expr has an error set.
   Status GetFnContextError(ExprContext* ctx);
 
-  /// Returns true if GetValue(NULL) can be called on this expr and always returns the same
-  /// result (e.g., exprs that don't contain slotrefs). The default implementation returns
-  /// true if all children are constant.
-  virtual bool IsConstant() const;
+  /// Returns true if this is a literal expression.
+  virtual bool IsLiteral() const;
 
-  /// Returns the slots that are referenced by this expr tree in 'slot_ids'.
-  /// Returns the number of slots added to the vector
-  virtual int GetSlotIds(std::vector<SlotId>* slot_ids) const;
+  /// Returns the number of SlotRef nodes in the expr tree. If this returns 0, it means it
+  /// is valid to call GetValue(nullptr) on the expr tree.
+  /// If 'slot_ids' is non-null, add the slot ids to it.
+  virtual int GetSlotIds(std::vector<SlotId>* slot_ids = nullptr) const;
+
+  /// Returns true iff the expression 'texpr' contains UDF available only as LLVM IR. In
+  /// which case, it's impossible to interpret this expression and codegen must be used.
+  static bool NeedCodegen(const TExpr& texpr);
 
   /// Create expression tree from the list of nodes contained in texpr within 'pool'.
   /// Returns the root of expression tree in 'expr' and the corresponding ExprContext in
@@ -200,17 +209,6 @@ class Expr {
   /// Convenience function for closing multiple expr trees.
   static void Close(const std::vector<ExprContext*>& ctxs, RuntimeState* state);
 
-  /// Create a new literal expr of 'type' with initial 'data'.
-  /// data should match the ColumnType (i.e. type == TYPE_INT, data is a int*)
-  /// The new Expr will be allocated from the pool.
-  static Expr* CreateLiteral(ObjectPool* pool, const ColumnType& type, void* data);
-
-  /// Create a new literal expr of 'type' by parsing the string.
-  /// NULL will be returned if the string and type are not compatible.
-  /// The new Expr will be allocated from the pool.
-  static Expr* CreateLiteral(ObjectPool* pool, const ColumnType& type,
-      const std::string&);
-
   /// Computes a memory efficient layout for storing the results of evaluating
   /// 'exprs'. The results are assumed to be void* slot types (vs AnyVal types). Varlen
   /// data is not included (e.g. there will be space for a StringValue, but not the data
@@ -228,17 +226,20 @@ class Expr {
       std::vector<int>* offsets, int* var_result_begin);
 
   /// Returns an llvm::Function* with signature:
-  /// <subclass of AnyVal> ComputeFn(ExprContext* context, TupleRow* row)
+  /// <subclass of AnyVal> ComputeFn(ExprContext* context, const TupleRow* row)
   //
   /// The function should evaluate this expr over 'row' and return the result as the
   /// appropriate type of AnyVal.
-  virtual Status GetCodegendComputeFn(RuntimeState* state, llvm::Function** fn) = 0;
+  virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn) = 0;
 
-  /// If this expr is constant, evaluates the expr with no input row argument and returns
-  /// the output. Returns NULL if the argument is not constant. The returned AnyVal* is
-  /// owned by this expr. This should only be called after Open() has been called on this
-  /// expr.
-  virtual AnyVal* GetConstVal(ExprContext* context);
+  /// If this expr is constant according to is_constant(), evaluates the expr with no
+  /// input row argument and returns the result in 'const_val'. Otherwise sets
+  /// 'const_val' to nullptr. The returned AnyVal and associated varlen data is owned by
+  /// 'context'. This should only be called after Open() has been called on this expr.
+  /// Returns an error if there was an error evaluating the expression or if memory could
+  /// not be allocated for the expression result.
+  virtual Status GetConstVal(
+      RuntimeState* state, ExprContext* context, AnyVal** const_val);
 
   virtual std::string DebugString() const;
   static std::string DebugString(const std::vector<Expr*>& exprs);
@@ -250,41 +251,11 @@ class Expr {
   /// not strip these symbols.
   static void InitBuiltinsDummy();
 
-  // Any additions to this enum must be reflected in both GetConstant() and
-  // GetIrConstant().
-  enum ExprConstant {
-    RETURN_TYPE_SIZE, // int
-    ARG_TYPE_SIZE // int[]
-  };
-
-  // Static function for obtaining a runtime constant.  Expr compute functions and
-  // builtins implementing the UDF interface should use this function, rather than
-  // accessing runtime constants directly, so any constants can be inlined via
-  // InlineConstants() in the codegen path. In the interpreted path, this function will
-  // work as-is.
-  //
-  // 'c' determines which constant is returned. 'T' must match the type of the constant,
-  // which is annotated in the ExprConstant enum above. If the constant is an array, 'i'
-  // must be specified and indicates which element to return. 'T' is the element type in
-  // this case. 'i' must always be an immediate integer value so InlineConstants() can
-  // resolve the index, e.g., it cannot be a variable or an expression like "1 + 1".  For
-  // example, if 'c' = ARG_TYPE_SIZE, then 'T' = int and 0 <= i < children_.size().
-  //
-  // TODO: implement a loop unroller (or use LLVM's) so we can use GetConstant() in loops
-  template<typename T> static T GetConstant(
-      const FunctionContext& ctx, ExprConstant c, int i = -1);
-
   static const char* LLVM_CLASS_NAME;
-
-  // Prefix of Expr::GetConstant() symbols, regardless of template specialization
-  static const char* GET_CONSTANT_SYMBOL_PREFIX;
 
  protected:
   friend class AggFnEvaluator;
-  friend class CastExpr;
-  friend class ComputeFunctions;
   friend class DecimalFunctions;
-  friend class DecimalLliteral;
   friend class DecimalOperators;
   friend class MathFunctions;
   friend class StringFunctions;
@@ -293,10 +264,9 @@ class Expr {
   friend class UtilityFunctions;
   friend class CaseExpr;
   friend class InPredicate;
-  friend class FunctionCall;
   friend class ScalarFnCall;
 
-  Expr(const ColumnType& type, bool is_slotref = false);
+  Expr(const ColumnType& type, bool is_constant, bool is_slotref);
   Expr(const TExprNode& node, bool is_slotref = false);
 
   /// Initializes this expr instance for execution. This does not include initializing
@@ -327,13 +297,19 @@ class Expr {
       FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
 
   /// Cache entry for the library implementing this function.
-  LibCache::LibCacheEntry* cache_entry_;
+  LibCacheEntry* cache_entry_;
 
   /// Function description.
   TFunction fn_;
 
+  /// True if this expr should be treated as a constant expression. True if either:
+  /// * This expr was sent from the frontend and Expr.isConstant() was true.
+  /// * This expr is a constant literal created in the backend.
+  const bool is_constant_;
+
   /// recognize if this node is a slotref in order to speed up GetValue()
   const bool is_slotref_;
+
   /// analysis is done, types are fixed at this point
   const ColumnType type_;
   std::vector<Expr*> children_;
@@ -346,10 +322,6 @@ class Expr {
 
   /// Cached codegened compute function. Exprs should set this in GetCodegendComputeFn().
   llvm::Function* ir_compute_fn_;
-
-  /// If this expr is constant, this will store and cache the value generated by
-  /// GetConstVal().
-  boost::scoped_ptr<AnyVal> constant_val_;
 
   /// Helper function that calls ctx->Register(), sets fn_context_index_, and returns the
   /// registered FunctionContext.
@@ -370,24 +342,15 @@ class Expr {
   /// functions that use the IRBuilder. It doesn't provide any performance benefit over
   /// the interpreted path.
   /// TODO: this should be replaced with fancier xcompiling infrastructure
-  Status GetCodegendComputeFnWrapper(RuntimeState* state, llvm::Function** fn);
+  Status GetCodegendComputeFnWrapper(LlvmCodeGen* codegen, llvm::Function** fn);
 
   /// Returns the IR version of the static Get*Val() wrapper function corresponding to
   /// 'type'. This is used for calling interpreted Get*Val() functions from codegen'd
   /// functions (e.g. in ScalarFnCall() when codegen is disabled).
   llvm::Function* GetStaticGetValWrapper(ColumnType type, LlvmCodeGen* codegen);
 
-  /// Finds all calls to Expr::GetConstant() in 'fn' and replaces them with the requested
-  /// runtime constant. Returns the number of calls replaced. This should be used in
-  /// GetCodegendComputeFn().
-  int InlineConstants(LlvmCodeGen* codegen, llvm::Function* fn);
-
   /// Simple debug string that provides no expr subclass-specific information
-  std::string DebugString(const std::string& expr_name) const {
-    std::stringstream out;
-    out << expr_name << "(" << Expr::DebugString() << ")";
-    return out.str();
-  }
+  std::string DebugString(const std::string& expr_name) const;
 
  private:
   friend class ExprContext;
@@ -419,20 +382,16 @@ class Expr {
   /// These are used to call Get*Val() functions from generated functions, since I don't
   /// know how to call virtual functions directly. GetStaticGetValWrapper() returns the
   /// IR function of the appropriate wrapper function.
-  static BooleanVal GetBooleanVal(Expr* expr, ExprContext* context, TupleRow* row);
-  static TinyIntVal GetTinyIntVal(Expr* expr, ExprContext* context, TupleRow* row);
-  static SmallIntVal GetSmallIntVal(Expr* expr, ExprContext* context, TupleRow* row);
-  static IntVal GetIntVal(Expr* expr, ExprContext* context, TupleRow* row);
-  static BigIntVal GetBigIntVal(Expr* expr, ExprContext* context, TupleRow* row);
-  static FloatVal GetFloatVal(Expr* expr, ExprContext* context, TupleRow* row);
-  static DoubleVal GetDoubleVal(Expr* expr, ExprContext* context, TupleRow* row);
-  static StringVal GetStringVal(Expr* expr, ExprContext* context, TupleRow* row);
-  static TimestampVal GetTimestampVal(Expr* expr, ExprContext* context, TupleRow* row);
-  static DecimalVal GetDecimalVal(Expr* expr, ExprContext* context, TupleRow* row);
-
-  // Helper function for InlineConstants(). Returns the IR version of what GetConstant()
-  // would return.
-  llvm::Value* GetIrConstant(LlvmCodeGen* codegen, ExprConstant c, int i);
+  static BooleanVal GetBooleanVal(Expr* expr, ExprContext* context, const TupleRow* row);
+  static TinyIntVal GetTinyIntVal(Expr* expr, ExprContext* context, const TupleRow* row);
+  static SmallIntVal GetSmallIntVal(Expr* expr, ExprContext* context, const TupleRow* row);
+  static IntVal GetIntVal(Expr* expr, ExprContext* context, const TupleRow* row);
+  static BigIntVal GetBigIntVal(Expr* expr, ExprContext* context, const TupleRow* row);
+  static FloatVal GetFloatVal(Expr* expr, ExprContext* context, const TupleRow* row);
+  static DoubleVal GetDoubleVal(Expr* expr, ExprContext* context, const TupleRow* row);
+  static StringVal GetStringVal(Expr* expr, ExprContext* context, const TupleRow* row);
+  static TimestampVal GetTimestampVal(Expr* expr, ExprContext* context, const TupleRow* row);
+  static DecimalVal GetDecimalVal(Expr* expr, ExprContext* context, const TupleRow* row);
 };
 
 }

@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <iostream>
 #include <sstream>
@@ -32,6 +35,9 @@
 #include <thrift/transport/TBufferTransports.h>
 #pragma clang diagnostic pop
 
+#include "exec/parquet-common.h"
+#include "runtime/mem-pool.h"
+#include "util/codec.h"
 #include "util/rle-encoding.h"
 
 #include "common/names.h"
@@ -45,11 +51,10 @@ using namespace apache::thrift;
 using namespace parquet;
 using std::min;
 
-// Some code is replicated to make this more stand-alone.
-const uint8_t PARQUET_VERSION_NUMBER[] = {'P', 'A', 'R', '1'};
+using impala::PARQUET_VERSION_NUMBER;
 
-shared_ptr<TProtocol> CreateDeserializeProtocol(
-    shared_ptr<TMemoryBuffer> mem, bool compact) {
+boost::shared_ptr<TProtocol> CreateDeserializeProtocol(
+    boost::shared_ptr<TMemoryBuffer> mem, bool compact) {
   if (compact) {
     TCompactProtocolFactoryT<TMemoryBuffer> tproto_factory;
     return tproto_factory.getProtocol(mem);
@@ -66,8 +71,9 @@ template <class T>
 bool DeserializeThriftMsg(uint8_t* buf, uint32_t* len, bool compact,
     T* deserialized_msg) {
   // Deserialize msg bytes into c++ thrift msg using memory transport.
-  shared_ptr<TMemoryBuffer> tmem_transport(new TMemoryBuffer(buf, *len));
-  shared_ptr<TProtocol> tproto = CreateDeserializeProtocol(tmem_transport, compact);
+  boost::shared_ptr<TMemoryBuffer> tmem_transport(new TMemoryBuffer(buf, *len));
+  boost::shared_ptr<TProtocol> tproto =
+      CreateDeserializeProtocol(tmem_transport, compact);
   try {
     deserialized_msg->read(tproto.get());
   } catch (apache::thrift::protocol::TProtocolException& e) {
@@ -80,22 +86,9 @@ bool DeserializeThriftMsg(uint8_t* buf, uint32_t* len, bool compact,
 }
 
 string TypeMapping(Type::type t) {
-  switch (t) {
-    case Type::BOOLEAN:
-      return "BOOLEAN";
-    case Type::INT32:
-      return "INT32";
-    case Type::INT64:
-      return "INT64";
-    case Type::FLOAT:
-      return "FLOAT";
-    case Type::DOUBLE:
-      return "DOUBLE";
-    case Type::BYTE_ARRAY:
-      return "BYTE_ARRAY";
-    default:
-      return "UNKNOWN";
-  }
+  auto it = _Type_VALUES_TO_NAMES.find(t);
+  if (it != _Type_VALUES_TO_NAMES.end()) return it->second;
+  return "UNKNOWN";
 }
 
 void AppendSchema(const vector<SchemaElement>& schema, int level,
@@ -126,6 +119,69 @@ string GetSchema(const FileMetaData& md) {
   return ss.str();
 }
 
+// Inherit from RleDecoder to get access to repeat_count_, which is protected.
+class ParquetLevelReader : public impala::RleDecoder {
+ public:
+  ParquetLevelReader(uint8_t* buffer, int buffer_len, int bit_width) :
+    RleDecoder(buffer, buffer_len, bit_width) {}
+
+  uint32_t repeat_count() const { return repeat_count_; }
+};
+
+// Performs sanity checking on the contents of data pages, to ensure that:
+//   - Compressed pages can be uncompressed successfully.
+//   - The number of def levels matches num_values in the page header when using RLE.
+//     Note that this will not catch every instance of Impala writing the wrong number of
+//     def levels - with our RLE scheme it is not possible to determine how many values
+//     were actually written if the final run is a literal run, only if the final run is
+//     a repeated run (see util/rle-encoding.h for more details).
+// Returns the number of rows specified by the header.
+int CheckDataPage(const ColumnChunk& col, const PageHeader& header, const uint8_t* page) {
+  const uint8_t* data = page;
+  std::vector<uint8_t> decompressed_buffer;
+  if (col.meta_data.codec != parquet::CompressionCodec::UNCOMPRESSED) {
+    decompressed_buffer.resize(header.uncompressed_page_size);
+
+    boost::scoped_ptr<impala::Codec> decompressor;
+    impala::Codec::CreateDecompressor(NULL, false,
+        impala::PARQUET_TO_IMPALA_CODEC[col.meta_data.codec], &decompressor);
+
+    uint8_t* buffer_ptr = decompressed_buffer.data();
+    int uncompressed_page_size = header.uncompressed_page_size;
+    impala::Status s = decompressor->ProcessBlock32(true, header.compressed_page_size,
+        data, &uncompressed_page_size, &buffer_ptr);
+    if (!s.ok()) {
+      cerr << "Error: Decompression failed: " << s.GetDetail() << " \n";
+      exit(1);
+    }
+
+    data = decompressed_buffer.data();
+  }
+
+  if (header.data_page_header.definition_level_encoding == parquet::Encoding::RLE) {
+    // Parquet data pages always start with the encoded definition level data, and
+    // RLE sections in Parquet always start with a 4 byte length followed by the data.
+    int num_def_level_bytes = *reinterpret_cast<const int32_t*>(data);
+    ParquetLevelReader def_levels(const_cast<uint8_t*>(data) + sizeof(int32_t),
+        num_def_level_bytes, sizeof(uint8_t));
+    uint8_t level;
+    for (int i = 0; i < header.data_page_header.num_values; ++i) {
+      if (!def_levels.Get(&level)) {
+        cerr << "Error: Decoding of def levels failed.\n";
+        exit(1);
+      }
+
+      if (i + def_levels.repeat_count() + 1 > header.data_page_header.num_values) {
+        cerr << "Error: More def levels encoded (" << (i + def_levels.repeat_count() + 1)
+             << ") than num_values (" << header.data_page_header.num_values << ").\n";
+        exit(1);
+      }
+    }
+  }
+
+  return header.data_page_header.num_values;
+}
+
 // Simple utility to read parquet files on local disk.  This utility validates the
 // file is correctly formed and can output values from each data page.  The
 // entire file is buffered in memory so this is not suitable for very large files.
@@ -153,6 +209,7 @@ int main(int argc, char** argv) {
   uint8_t* buffer = reinterpret_cast<uint8_t*>(malloc(file_len));
   size_t bytes_read = fread(buffer, 1, file_len, file);
   assert(bytes_read == file_len);
+  (void)bytes_read;
 
   // Check file starts and ends with magic bytes
   assert(
@@ -180,15 +237,14 @@ int main(int argc, char** argv) {
   int total_page_header_size = 0;
   int total_compressed_data_size = 0;
   int total_uncompressed_data_size = 0;
-  vector<int> column_sizes;
-
-  // Buffer to decompress data into.  Reused across pages.
-  vector<char> decompression_buffer;
+  vector<int> column_byte_sizes;
+  vector<int> column_num_rows;
 
   for (int i = 0; i < file_metadata.row_groups.size(); ++i) {
     cerr << "Reading row group " << i << endl;
     RowGroup& rg = file_metadata.row_groups[i];
-    column_sizes.resize(rg.columns.size());
+    column_byte_sizes.resize(rg.columns.size());
+    column_num_rows.resize(rg.columns.size());
 
     for (int c = 0; c < rg.columns.size(); ++c) {
       cerr << "  Reading column " << c << endl;
@@ -213,16 +269,23 @@ int main(int argc, char** argv) {
         }
 
         data += header_size;
+        if (header.__isset.data_page_header) {
+          column_num_rows[c] += CheckDataPage(col, header, data);
+        }
+
         total_page_header_size += header_size;
-        column_sizes[c] += header.compressed_page_size;
+        column_byte_sizes[c] += header.compressed_page_size;
         total_compressed_data_size += header.compressed_page_size;
         total_uncompressed_data_size += header.uncompressed_page_size;
         data += header.compressed_page_size;
         ++pages_read;
       }
-      // Check that we ended exactly where we should have
+      // Check that we ended exactly where we should have.
       assert(data == col_end);
+      // Check that all cols have the same number of rows.
+      assert(column_num_rows[0] == column_num_rows[c]);
     }
+    num_rows += column_num_rows[0];
   }
   double compression_ratio =
       (double)total_uncompressed_data_size / total_compressed_data_size;
@@ -239,9 +302,9 @@ int main(int argc, char** argv) {
      << "(" << (total_compressed_data_size / (double)file_len) << ")" << endl;
   ss << "  Column uncompressed size: " << total_uncompressed_data_size
      << "(" << compression_ratio << ")" << endl;
-  for (int i = 0; i < column_sizes.size(); ++i) {
-    ss << "    " << "Col " << i << ": " << column_sizes[i]
-       << "(" << (column_sizes[i] / (double)file_len) << ")" << endl;
+  for (int i = 0; i < column_byte_sizes.size(); ++i) {
+    ss << "    " << "Col " << i << ": " << column_byte_sizes[i]
+       << "(" << (column_byte_sizes[i] / (double)file_len) << ")" << endl;
   }
   cerr << ss.str() << endl;
 

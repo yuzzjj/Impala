@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_RUNTIME_DATA_STREAM_RECVR_H
 #define IMPALA_RUNTIME_DATA_STREAM_RECVR_H
@@ -113,7 +116,7 @@ class DataStreamRecvr {
   /// Return true if the addition of a new batch of size 'batch_size' would exceed the
   /// total buffer limit.
   bool ExceedsLimit(int batch_size) {
-    return num_buffered_bytes_ + batch_size > total_buffer_limit_;
+    return num_buffered_bytes_.Load() + batch_size > total_buffer_limit_;
   }
 
   /// DataStreamMgr instance used to create this recvr. (Not owned)
@@ -136,7 +139,7 @@ class DataStreamRecvr {
   bool is_merging_;
 
   /// total number of bytes held across all sender queues.
-  AtomicInt<int> num_buffered_bytes_;
+  AtomicInt32 num_buffered_bytes_;
 
   /// Memtracker for batches in the sender queue(s).
   boost::scoped_ptr<MemTracker> mem_tracker_;

@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_RUNTIME_DATA_STREAM_MGR_H
@@ -19,7 +22,6 @@
 #include <list>
 #include <set>
 #include <boost/thread/mutex.hpp>
-#include <boost/shared_ptr.hpp>
 #include <boost/thread/condition_variable.hpp>
 #include <boost/unordered_map.hpp>
 #include <boost/unordered_set.hpp>
@@ -27,7 +29,7 @@
 #include "common/status.h"
 #include "common/object-pool.h"
 #include "runtime/descriptors.h"  // for PlanNodeId
-#include "runtime/mem-tracker.h"
+#include "util/metrics.h"
 #include "util/promise.h"
 #include "util/runtime-profile.h"
 #include "gen-cpp/Types_types.h"  // for TUniqueId
@@ -71,7 +73,7 @@ class DataStreamMgr {
   /// single stream.
   /// Ownership of the receiver is shared between this DataStream mgr instance and the
   /// caller.
-  boost::shared_ptr<DataStreamRecvr> CreateRecvr(
+  std::shared_ptr<DataStreamRecvr> CreateRecvr(
       RuntimeState* state, const RowDescriptor& row_desc,
       const TUniqueId& fragment_instance_id, PlanNodeId dest_node_id,
       int num_senders, int buffer_size, RuntimeProfile* profile,
@@ -114,7 +116,7 @@ class DataStreamMgr {
   IntCounter* num_senders_timedout_;
 
   /// protects all fields below
-  SpinLock lock_;
+  boost::mutex lock_;
 
   /// map from hash value of fragment instance id/node id pair to stream receivers;
   /// Ownership of the stream revcr is shared between this instance and the caller of
@@ -122,7 +124,7 @@ class DataStreamMgr {
   /// we don't want to create a map<pair<TUniqueId, PlanNodeId>, DataStreamRecvr*>,
   /// because that requires a bunch of copying of ids for lookup
   typedef boost::unordered_multimap<uint32_t,
-      boost::shared_ptr<DataStreamRecvr> > RecvrMap;
+      std::shared_ptr<DataStreamRecvr>> RecvrMap;
   RecvrMap receiver_map_;
 
   /// (Fragment instance id, Plan node id) pair that uniquely identifies a stream.
@@ -155,17 +157,26 @@ class DataStreamMgr {
   /// Return the receiver for given fragment_instance_id/node_id, or NULL if not found. If
   /// 'acquire_lock' is false, assumes lock_ is already being held and won't try to
   /// acquire it.
-  boost::shared_ptr<DataStreamRecvr> FindRecvr(const TUniqueId& fragment_instance_id,
+  std::shared_ptr<DataStreamRecvr> FindRecvr(const TUniqueId& fragment_instance_id,
       PlanNodeId node_id, bool acquire_lock = true);
 
-  /// Calls FindRecvr(), but if NULL is returned, wait for up to 60s for the receiver to
-  /// be registered.  Senders may initialise and start sending row batches before a
-  /// receiver is ready. To accommodate this, we allow senders to establish a rendezvous
-  /// between them and the receiver. When the receiver arrives, it triggers the
-  /// rendezvous, and all waiting senders can proceed. A sender that waits for too long
-  /// (60s by default) will eventually time out and abort.
-  boost::shared_ptr<DataStreamRecvr> FindRecvrOrWait(
-      const TUniqueId& fragment_instance_id, PlanNodeId node_id);
+  /// Calls FindRecvr(), but if NULL is returned, wait for up to
+  /// FLAGS_datastream_sender_timeout_ms for the receiver to be registered.  Senders may
+  /// initialise and start sending row batches before a receiver is ready. To accommodate
+  /// this, we allow senders to establish a rendezvous between them and the receiver. When
+  /// the receiver arrives, it triggers the rendezvous, and all waiting senders can
+  /// proceed. A sender that waits for too long (120s by default) will eventually time out
+  /// and abort. The output parameter 'already_unregistered' distinguishes between the two
+  /// cases in which this method returns NULL:
+  ///
+  /// 1. *already_unregistered == true: the receiver had previously arrived and was
+  /// already closed
+  ///
+  /// 2. *already_unregistered == false: the receiver has yet to arrive when this method
+  /// returns, and the timeout has expired
+  std::shared_ptr<DataStreamRecvr> FindRecvrOrWait(
+      const TUniqueId& fragment_instance_id, PlanNodeId node_id,
+      bool* already_unregistered);
 
   /// Remove receiver block for fragment_instance_id/node_id from the map.
   Status DeregisterRecvr(const TUniqueId& fragment_instance_id, PlanNodeId node_id);
@@ -173,7 +184,7 @@ class DataStreamMgr {
   inline uint32_t GetHashValue(const TUniqueId& fragment_instance_id, PlanNodeId node_id);
 
   /// The coordination primitive used to signal the arrival of a waited-for receiver
-  typedef Promise<boost::shared_ptr<DataStreamRecvr> > RendezvousPromise;
+  typedef Promise<std::shared_ptr<DataStreamRecvr>> RendezvousPromise;
 
   /// A reference-counted promise-wrapper used to coordinate between senders and
   /// receivers. The ref_count field tracks the number of senders waiting for the arrival
@@ -212,8 +223,9 @@ class DataStreamMgr {
   RendezvousMap pending_rendezvous_;
 
   /// Map from the time, in ms, that a stream should be evicted from closed_stream_cache
-  /// to its RecvrId. Used to evict old streams from cache efficiently.
-  typedef std::map<int64_t, RecvrId> ClosedStreamMap;
+  /// to its RecvrId. Used to evict old streams from cache efficiently. multimap in case
+  /// there are multiple streams with the same eviction time.
+  typedef std::multimap<int64_t, RecvrId> ClosedStreamMap;
   ClosedStreamMap closed_stream_expirations_;
 
   /// Cache of recently closed RecvrIds. Used to allow straggling senders to fail fast by

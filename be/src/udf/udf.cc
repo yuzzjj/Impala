@@ -1,19 +1,23 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "udf/udf.h"
 
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <assert.h>
@@ -28,7 +32,7 @@
 // on libhdfs.
 #include "udf/udf-internal.h"
 
-#if IMPALA_UDF_SDK_BUILD
+#if defined(IMPALA_UDF_SDK_BUILD) && IMPALA_UDF_SDK_BUILD
 // For the SDK build, we are building the .lib that the developers would use to
 // write UDFs. They want to link against this to run their UDFs in a test environment.
 // Pulling in free-pool is very undesirable since it pulls in many other libraries.
@@ -79,7 +83,12 @@ class RuntimeState {
     assert(false);
   }
 
-  bool abort_on_error() {
+  bool abort_on_error() const {
+    assert(false);
+    return false;
+  }
+
+  bool decimal_v2() const {
     assert(false);
     return false;
   }
@@ -90,12 +99,13 @@ class RuntimeState {
   }
 
   const std::string connected_user() const { return ""; }
-  const std::string effective_user() const { return ""; }
+  const std::string GetEffectiveUser() const { return ""; }
 };
 
 }
 
 #else
+#include "exprs/anyval-util.h"
 #include "runtime/free-pool.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/runtime-state.h"
@@ -106,11 +116,18 @@ class RuntimeState {
 
 using namespace impala;
 using namespace impala_udf;
+using std::pair;
 
+const int FunctionContextImpl::VARARGS_BUFFER_ALIGNMENT;
 const char* FunctionContextImpl::LLVM_FUNCTIONCONTEXT_NAME =
     "class.impala_udf::FunctionContext";
+const char* FunctionContextImpl::GET_CONST_FN_ATTR_SYMBOL =
+    "_ZN6impala19FunctionContextImpl14GetConstFnAttrENS0_11ConstFnAttrEi";
 
 static const int MAX_WARNINGS = 1000;
+
+static_assert(__BYTE_ORDER == __LITTLE_ENDIAN,
+    "DecimalVal memory layout assumes little-endianness");
 
 FunctionContext* FunctionContextImpl::CreateContext(RuntimeState* state, MemPool* pool,
     const FunctionContext::TypeDesc& return_type,
@@ -135,14 +152,11 @@ FunctionContext* FunctionContextImpl::CreateContext(RuntimeState* state, MemPool
   ctx->impl_->intermediate_type_ = intermediate_type;
   ctx->impl_->return_type_ = return_type;
   ctx->impl_->arg_types_ = arg_types;
-  // UDFs may manipulate DecimalVal arguments via SIMD instructions such as 'movaps'
-  // that require 16-byte memory alignment.
-  ctx->impl_->varargs_buffer_ =
-      reinterpret_cast<uint8_t*>(aligned_malloc(varargs_buffer_size, 16));
+  ctx->impl_->varargs_buffer_ = reinterpret_cast<uint8_t*>(
+      aligned_malloc(varargs_buffer_size, VARARGS_BUFFER_ALIGNMENT));
   ctx->impl_->varargs_buffer_size_ = varargs_buffer_size;
   ctx->impl_->debug_ = debug;
-  VLOG_ROW << "Created FunctionContext: " << ctx
-           << " with pool " << ctx->impl_->pool_;
+  VLOG_ROW << "Created FunctionContext: " << ctx << " with pool " << ctx->impl_->pool_;
   return ctx;
 }
 
@@ -191,7 +205,8 @@ void FunctionContextImpl::Close() {
   stringstream error_ss;
   if (!debug_) {
     if (pool_->net_allocations() > 0) {
-      error_ss << "Memory leaked via FunctionContext::Allocate()";
+      error_ss << "Memory leaked via FunctionContext::Allocate() "
+               << "or FunctionContext::AllocateLocal()";
     } else if (pool_->net_allocations() < 0) {
       error_ss << "FunctionContext::Free() called on buffer that was already freed or "
                   "was not allocated.";
@@ -243,12 +258,12 @@ const char* FunctionContext::user() const {
 
 const char* FunctionContext::effective_user() const {
   if (impl_->state_ == NULL) return NULL;
-  return impl_->state_->effective_user().c_str();
+  return impl_->state_->GetEffectiveUser().c_str();
 }
 
 FunctionContext::UniqueId FunctionContext::query_id() const {
   UniqueId id;
-#if IMPALA_UDF_SDK_BUILD
+#if defined(IMPALA_UDF_SDK_BUILD) && IMPALA_UDF_SDK_BUILD
   id.hi = id.lo = 0;
 #else
   id.hi = impl_->state_->query_id().hi;
@@ -267,26 +282,30 @@ const char* FunctionContext::error_msg() const {
 }
 
 inline bool FunctionContextImpl::CheckAllocResult(const char* fn_name,
-    uint8_t* buf, int byte_size) {
+    uint8_t* buf, int64_t byte_size) {
   if (UNLIKELY(buf == NULL)) {
     stringstream ss;
     ss << string(fn_name) << "() failed to allocate " << byte_size << " bytes.";
     context_->SetError(ss.str().c_str());
     return false;
   }
+  CheckMemLimit(fn_name, byte_size);
+  return true;
+}
+
+inline void FunctionContextImpl::CheckMemLimit(const char* fn_name,
+    int64_t byte_size) {
 #ifndef IMPALA_UDF_SDK_BUILD
   MemTracker* mem_tracker = pool_->mem_tracker();
-  if (mem_tracker->LimitExceeded()) {
+  if (mem_tracker->AnyLimitExceeded()) {
     ErrorMsg msg = ErrorMsg(TErrorCode::UDF_MEM_LIMIT_EXCEEDED, string(fn_name));
     state_->SetMemLimitExceeded(mem_tracker, byte_size, &msg);
   }
 #endif
-  return true;
 }
 
-uint8_t* FunctionContext::Allocate(int byte_size) {
+uint8_t* FunctionContext::Allocate(int byte_size) noexcept {
   assert(!impl_->closed_);
-  if (byte_size == 0) return NULL;
   uint8_t* buffer = impl_->pool_->Allocate(byte_size);
   if (UNLIKELY(!impl_->CheckAllocResult("FunctionContext::Allocate",
       buffer, byte_size))) {
@@ -302,7 +321,7 @@ uint8_t* FunctionContext::Allocate(int byte_size) {
   return buffer;
 }
 
-uint8_t* FunctionContext::Reallocate(uint8_t* ptr, int byte_size) {
+uint8_t* FunctionContext::Reallocate(uint8_t* ptr, int byte_size) noexcept {
   assert(!impl_->closed_);
   VLOG_ROW << "Reallocate: FunctionContext=" << this
            << " size=" << byte_size
@@ -321,7 +340,7 @@ uint8_t* FunctionContext::Reallocate(uint8_t* ptr, int byte_size) {
   return new_ptr;
 }
 
-void FunctionContext::Free(uint8_t* buffer) {
+void FunctionContext::Free(uint8_t* buffer) noexcept {
   assert(!impl_->closed_);
   if (buffer == NULL) return;
   VLOG_ROW << "Free: FunctionContext=" << this << " "
@@ -346,6 +365,7 @@ void FunctionContext::TrackAllocation(int64_t bytes) {
   assert(!impl_->closed_);
   impl_->external_bytes_tracked_ += bytes;
   impl_->pool_->mem_tracker()->Consume(bytes);
+  impl_->CheckMemLimit("FunctionContext::TrackAllocation", bytes);
 }
 
 void FunctionContext::Free(int64_t bytes) {
@@ -416,9 +436,8 @@ void FunctionContext::SetFunctionState(FunctionStateScope scope, void* ptr) {
   }
 }
 
-uint8_t* FunctionContextImpl::AllocateLocal(int byte_size) {
+uint8_t* FunctionContextImpl::AllocateLocal(int64_t byte_size) noexcept {
   assert(!closed_);
-  if (byte_size == 0) return NULL;
   uint8_t* buffer = pool_->Allocate(byte_size);
   if (UNLIKELY(!CheckAllocResult("FunctionContextImpl::AllocateLocal",
       buffer, byte_size))) {
@@ -431,7 +450,30 @@ uint8_t* FunctionContextImpl::AllocateLocal(int byte_size) {
   return buffer;
 }
 
-void FunctionContextImpl::FreeLocalAllocations() {
+uint8_t* FunctionContextImpl::ReallocateLocal(uint8_t* ptr, int64_t byte_size) noexcept {
+  assert(!closed_);
+  uint8_t* new_ptr  = pool_->Reallocate(ptr, byte_size);
+  if (UNLIKELY(!CheckAllocResult("FunctionContextImpl::ReallocateLocal",
+      new_ptr, byte_size))) {
+    return NULL;
+  }
+  if (new_ptr != ptr) {
+    auto v = std::find(local_allocations_.rbegin(), local_allocations_.rend(), ptr);
+    assert(v != local_allocations_.rend());
+    // Avoid perf issue; move to end of local allocations on any reallocation and
+    // always start the search from there.
+    if (v != local_allocations_.rbegin()) {
+      *v = *local_allocations_.rbegin();
+    }
+    *local_allocations_.rbegin() = new_ptr;
+  }
+  VLOG_ROW << "Reallocate Local: FunctionContext=" << context_
+           << " ptr=" << reinterpret_cast<void*>(ptr) << " size=" << byte_size
+           << " result=" << reinterpret_cast<void*>(new_ptr);
+  return new_ptr;
+}
+
+void FunctionContextImpl::FreeLocalAllocations() noexcept {
   assert(!closed_);
   if (VLOG_ROW_IS_ON) {
     stringstream ss;
@@ -448,18 +490,21 @@ void FunctionContextImpl::FreeLocalAllocations() {
   local_allocations_.clear();
 }
 
-void FunctionContextImpl::SetConstantArgs(const vector<AnyVal*>& constant_args) {
+void FunctionContextImpl::SetConstantArgs(vector<AnyVal*>&& constant_args) {
   constant_args_ = constant_args;
+}
+
+void FunctionContextImpl::SetNonConstantArgs(
+    vector<pair<Expr*, AnyVal*>>&& non_constant_args) {
+  non_constant_args_ = non_constant_args;
 }
 
 // Note: this function crashes LLVM's JIT in expr-test if it's xcompiled. Do not move to
 // expr-ir.cc. This could probably use further investigation.
-StringVal::StringVal(FunctionContext* context, int len)
-  : len(len), ptr(NULL) {
+StringVal::StringVal(FunctionContext* context, int len) noexcept : len(len), ptr(NULL) {
   if (UNLIKELY(len > StringVal::MAX_LENGTH)) {
-    std::cout << "MAX_LENGTH, Trying to allocate " << len;
     context->SetError("String length larger than allowed limit of "
-        "1 GB character data.");
+                      "1 GB character data.");
     len = 0;
     is_null = true;
   } else {
@@ -474,7 +519,7 @@ StringVal::StringVal(FunctionContext* context, int len)
   }
 }
 
-StringVal StringVal::CopyFrom(FunctionContext* ctx, const uint8_t* buf, size_t len) {
+StringVal StringVal::CopyFrom(FunctionContext* ctx, const uint8_t* buf, size_t len) noexcept {
   StringVal result(ctx, len);
   if (LIKELY(!result.is_null)) {
     memcpy(result.ptr, buf, len);
@@ -482,8 +527,74 @@ StringVal StringVal::CopyFrom(FunctionContext* ctx, const uint8_t* buf, size_t l
   return result;
 }
 
+bool StringVal::Resize(FunctionContext* ctx, int new_len) noexcept {
+  if (UNLIKELY(new_len > StringVal::MAX_LENGTH)) {
+    ctx->SetError("String length larger than allowed limit of 1 GB character data.");
+    len = 0;
+    is_null = true;
+    return false;
+  }
+  auto* new_ptr = ctx->impl()->ReallocateLocal(ptr, new_len);
+  if (new_ptr != nullptr) {
+    ptr = new_ptr;
+    len = new_len;
+    return true;
+  }
+  return false;
+}
+
 // TODO: why doesn't libudasample.so build if this in udf-ir.cc?
 const FunctionContext::TypeDesc* FunctionContext::GetArgType(int arg_idx) const {
   if (arg_idx < 0 || arg_idx >= impl_->arg_types_.size()) return NULL;
   return &impl_->arg_types_[arg_idx];
+}
+
+static int GetTypeByteSize(const FunctionContext::TypeDesc& type) {
+#if defined(IMPALA_UDF_SDK_BUILD) && IMPALA_UDF_SDK_BUILD
+  return 0;
+#else
+  return AnyValUtil::TypeDescToColumnType(type).GetByteSize();
+#endif
+}
+
+int FunctionContextImpl::GetConstFnAttr(FunctionContextImpl::ConstFnAttr t, int i) {
+  return GetConstFnAttr(state_, return_type_, arg_types_, t, i);
+}
+
+int FunctionContextImpl::GetConstFnAttr(const RuntimeState* state,
+    const FunctionContext::TypeDesc& return_type,
+    const vector<FunctionContext::TypeDesc>& arg_types,
+    ConstFnAttr t, int i) {
+  switch (t) {
+    case RETURN_TYPE_SIZE:
+      assert(i == -1);
+      return GetTypeByteSize(return_type);
+    case RETURN_TYPE_PRECISION:
+      assert(i == -1);
+      assert(return_type.type == FunctionContext::TYPE_DECIMAL);
+      return return_type.precision;
+    case RETURN_TYPE_SCALE:
+      assert(i == -1);
+      assert(return_type.type == FunctionContext::TYPE_DECIMAL);
+      return return_type.scale;
+    case ARG_TYPE_SIZE:
+      assert(i >= 0);
+      assert(i < arg_types.size());
+      return GetTypeByteSize(arg_types[i]);
+    case ARG_TYPE_PRECISION:
+      assert(i >= 0);
+      assert(i < arg_types.size());
+      assert(arg_types[i].type == FunctionContext::TYPE_DECIMAL);
+      return arg_types[i].precision;
+    case ARG_TYPE_SCALE:
+      assert(i >= 0);
+      assert(i < arg_types.size());
+      assert(arg_types[i].type == FunctionContext::TYPE_DECIMAL);
+      return arg_types[i].scale;
+    case DECIMAL_V2:
+      return state->decimal_v2();
+    default:
+      assert(false);
+      return -1;
+  }
 }

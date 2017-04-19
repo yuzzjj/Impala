@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXPRS_AGGREGATE_FUNCTIONS_H
@@ -37,6 +40,10 @@ class AggregateFunctions {
   /// Initializes dst to 0.
   template <typename T>
   static void InitZero(FunctionContext*, T* dst);
+
+  // Sets dst's value to src. Handles deallocation if src and dst are StringVals.
+  template <typename T>
+  static void UpdateVal(FunctionContext*, const T& src, T* dst);
 
   /// StringVal GetValue() function that returns a copy of src
   static StringVal StringValGetValue(FunctionContext* ctx, const StringVal& src);
@@ -147,7 +154,7 @@ class AggregateFunctions {
   static void ReservoirSampleMerge(FunctionContext*, const StringVal& src,
       StringVal* dst);
   template <typename T>
-  static const StringVal ReservoirSampleSerialize(FunctionContext*,
+  static StringVal ReservoirSampleSerialize(FunctionContext*,
       const StringVal& src);
 
   /// Returns 20,000 unsorted samples as a list of comma-separated values.
@@ -171,8 +178,11 @@ class AggregateFunctions {
   /// 1) Hyperloglog: The analysis of a near-optimal cardinality estimation
   /// algorithm (2007)
   /// 2) HyperLogLog in Practice (paper from google with some improvements)
-  static const int HLL_PRECISION;
-  static const int HLL_LEN;
+
+  /// This precision is the default precision from the paper. It doesn't seem to matter
+  /// very much when between 6 and 12.
+  static constexpr int HLL_PRECISION = 10;
+  static constexpr int HLL_LEN = 1 << HLL_PRECISION;
   static void HllInit(FunctionContext*, StringVal* slot);
   template <typename T>
   static void HllUpdate(FunctionContext*, const T& src, StringVal* dst);
@@ -232,11 +242,21 @@ class AggregateFunctions {
 
   /// Implements LAST_VALUE.
   template <typename T>
-  static void LastValUpdate(FunctionContext*, const T& src, T* dst);
-  template <typename T>
   static void LastValRemove(FunctionContext*, const T& src, T* dst);
 
-  /// Implements FIRST_VALUE.
+  // Implements LAST_VALUE_IGNORE_NULLS
+  template <typename T>
+  static void LastValIgnoreNullsInit(FunctionContext*, StringVal* dst);
+  template <typename T>
+  static void LastValIgnoreNullsUpdate(FunctionContext*, const T& src, StringVal* dst);
+  template <typename T>
+  static void LastValIgnoreNullsRemove(FunctionContext*, const T& src, StringVal* dst);
+  template <typename T>
+  static T LastValIgnoreNullsGetValue(FunctionContext* ctx, const StringVal& src);
+  template <typename T>
+  static T LastValIgnoreNullsFinalize(FunctionContext* ctx, const StringVal& src);
+
+  /// Implements FIRST_VALUE. Requires a start bound of UNBOUNDED PRECEDING.
   template <typename T>
   static void FirstValUpdate(FunctionContext*, const T& src, T* dst);
   /// Implements FIRST_VALUE for some windows that require rewrites during planning.
@@ -245,6 +265,9 @@ class AggregateFunctions {
   template <typename T>
   static void FirstValRewriteUpdate(FunctionContext*, const T& src, const BigIntVal&,
       T* dst);
+  /// Implements FIRST_VALUE_IGNORE_NULLS. Requires a start bound of UNBOUNDED PRECEDING.
+  template <typename T>
+  static void FirstValIgnoreNullsUpdate(FunctionContext*, const T& src, T* dst);
 
   /// OffsetFn*() implement LAG and LEAD. Init() sets the default value (the last
   /// constant parameter) as dst.

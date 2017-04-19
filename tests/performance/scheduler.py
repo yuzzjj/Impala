@@ -1,29 +1,32 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # The WorkloadExecutor class encapsulates the execution of a workload. A workload is
 # defined as a set of queries for a given  data set, scale factor and a specific test
 # vector. It treats a workload an the unit of parallelism.
 
 import logging
-import os
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from copy import deepcopy
 from random import shuffle
 from sys import exit
 from threading import Lock, Thread, Event
+import threading
 
 logging.basicConfig(level=logging.INFO, format='%(name)s %(threadName)s: %(message)s')
 LOG = logging.getLogger('scheduler')
@@ -123,6 +126,9 @@ class Scheduler(object):
           workload_time_sec += query_executor.result.time_taken
       if self.query_iterations == 1:
         LOG.info("Workload iteration %d finished in %s seconds" % (j+1, workload_time_sec))
+      cursor = getattr(threading.current_thread(), 'cursor', None)
+      if cursor is not None:
+        cursor.close()
 
   def run(self):
     """Run the query pipelines concurrently"""

@@ -1,20 +1,23 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "statestore/statestore.h"
 
-#include <boost/foreach.hpp>
+#include <boost/lexical_cast.hpp>
 #include <boost/thread.hpp>
 #include <thrift/Thrift.h>
 #include <gutil/strings/substitute.h>
@@ -24,6 +27,7 @@
 #include "statestore/failure-detector.h"
 #include "rpc/thrift-util.h"
 #include "util/debug-util.h"
+#include "util/logging-support.h"
 #include "util/time.h"
 #include "util/uid-util.h"
 #include "util/webserver.h"
@@ -178,7 +182,7 @@ Statestore::Subscriber::Subscriber(const SubscriberId& subscriber_id,
     : subscriber_id_(subscriber_id),
       registration_id_(registration_id),
       network_address_(network_address) {
-  BOOST_FOREACH(const TTopicRegistration& topic, subscribed_topics) {
+  for (const TTopicRegistration& topic: subscribed_topics) {
     TopicState topic_state;
     topic_state.is_transient = topic.is_transient;
     topic_state.last_version = TOPIC_INITIAL_VERSION;
@@ -196,7 +200,7 @@ void Statestore::Subscriber::AddTransientUpdate(const TopicId& topic_id,
   }
 }
 
-const Statestore::TopicEntry::Version Statestore::Subscriber::LastTopicVersionProcessed(
+Statestore::TopicEntry::Version Statestore::Subscriber::LastTopicVersionProcessed(
     const TopicId& topic_id) const {
   Topics::const_iterator itr = subscribed_topics_.find(topic_id);
   return itr == subscribed_topics_.end() ?
@@ -259,6 +263,8 @@ void Statestore::RegisterWebpages(Webserver* webserver) {
       bind<void>(&Statestore::SubscribersHandler, this, _1, _2);
   webserver->RegisterUrlCallback("/subscribers", "statestore_subscribers.tmpl",
       subscribers_callback);
+
+  RegisterLogLevelCallbacks(webserver, false);
 }
 
 void Statestore::TopicsHandler(const Webserver::ArgumentMap& args,
@@ -268,7 +274,7 @@ void Statestore::TopicsHandler(const Webserver::ArgumentMap& args,
 
   Value topics(kArrayType);
 
-  BOOST_FOREACH(const TopicMap::value_type& topic, topics_) {
+  for (const TopicMap::value_type& topic: topics_) {
     Value topic_json(kObjectType);
 
     Value topic_id(topic.second.id().c_str(), document->GetAllocator());
@@ -308,7 +314,7 @@ void Statestore::SubscribersHandler(const Webserver::ArgumentMap& args,
     Document* document) {
   lock_guard<mutex> l(subscribers_lock_);
   Value subscribers(kArrayType);
-  BOOST_FOREACH(const SubscriberMap::value_type& subscriber, subscribers_) {
+  for (const SubscriberMap::value_type& subscriber: subscribers_) {
     Value sub_json(kObjectType);
 
     Value subscriber_id(subscriber.second->id().c_str(), document->GetAllocator());
@@ -360,7 +366,7 @@ Status Statestore::RegisterSubscriber(const SubscriberId& subscriber_id,
   // by the worker threads its topics are guaranteed to exist.
   {
     lock_guard<mutex> l(topic_lock_);
-    BOOST_FOREACH(const TTopicRegistration& topic, topic_registrations) {
+    for (const TTopicRegistration& topic: topic_registrations) {
       TopicMap::iterator topic_it = topics_.find(topic.topic_name);
       if (topic_it == topics_.end()) {
         LOG(INFO) << "Creating new topic: ''" << topic.topic_name
@@ -449,7 +455,7 @@ Status Statestore::SendTopicUpdate(Subscriber* subscriber, bool* update_skipped)
   // Thirdly: perform any / all updates returned by the subscriber
   {
     lock_guard<mutex> l(topic_lock_);
-    BOOST_FOREACH(const TTopicDelta& update, response.topic_updates) {
+    for (const TTopicDelta& update: response.topic_updates) {
       TopicMap::iterator topic_it = topics_.find(update.topic_name);
       if (topic_it == topics_.end()) {
         VLOG(1) << "Received update for unexpected topic:" << update.topic_name;
@@ -471,12 +477,12 @@ Status Statestore::SendTopicUpdate(Subscriber* subscriber, bool* update_skipped)
       }
 
       Topic* topic = &topic_it->second;
-      BOOST_FOREACH(const TTopicItem& item, update.topic_entries) {
+      for (const TTopicItem& item: update.topic_entries) {
         TopicEntry::Version version = topic->Put(item.key, item.value);
         subscriber->AddTransientUpdate(update.topic_name, item.key, version);
       }
 
-      BOOST_FOREACH(const string& key, update.topic_deletions) {
+      for (const string& key: update.topic_deletions) {
         TopicEntry::Version version =
             topic->Put(key, Statestore::TopicEntry::NULL_VALUE);
         subscriber->AddTransientUpdate(update.topic_name, key, version);
@@ -491,8 +497,8 @@ void Statestore::GatherTopicUpdates(const Subscriber& subscriber,
     TUpdateStateRequest* update_state_request) {
   {
     lock_guard<mutex> l(topic_lock_);
-    BOOST_FOREACH(const Subscriber::Topics::value_type& subscribed_topic,
-        subscriber.subscribed_topics()) {
+    for (const Subscriber::Topics::value_type& subscribed_topic:
+         subscriber.subscribed_topics()) {
       TopicMap::const_iterator topic_it = topics_.find(subscribed_topic.first);
       DCHECK(topic_it != topics_.end());
 
@@ -552,19 +558,18 @@ void Statestore::GatherTopicUpdates(const Subscriber& subscriber,
   // topic_lock_.
   lock_guard<mutex> l(subscribers_lock_);
   typedef map<TopicId, TTopicDelta> TopicDeltaMap;
-  BOOST_FOREACH(TopicDeltaMap::value_type& topic_delta,
-      update_state_request->topic_deltas) {
+  for (TopicDeltaMap::value_type& topic_delta: update_state_request->topic_deltas) {
     topic_delta.second.__set_min_subscriber_topic_version(
         GetMinSubscriberTopicVersion(topic_delta.first));
   }
 }
 
-const Statestore::TopicEntry::Version Statestore::GetMinSubscriberTopicVersion(
+Statestore::TopicEntry::Version Statestore::GetMinSubscriberTopicVersion(
     const TopicId& topic_id, SubscriberId* subscriber_id) {
   TopicEntry::Version min_topic_version = numeric_limits<int64_t>::max();
   bool found = false;
   // Find the minimum version processed for this topic across all topic subscribers.
-  BOOST_FOREACH(const SubscriberMap::value_type& subscriber, subscribers_) {
+  for (const SubscriberMap::value_type& subscriber: subscribers_) {
     if (subscriber.second->subscribed_topics().find(topic_id) !=
         subscriber.second->subscribed_topics().end()) {
       found = true;
@@ -620,25 +625,23 @@ void Statestore::DoSubscriberUpdate(bool is_heartbeat, int thread_id,
       SleepForMs(diff_ms);
       diff_ms = update_deadline - UnixMillis();
     }
-    diff_ms = abs(diff_ms);
+    diff_ms = std::abs(diff_ms);
     VLOG(3) << "Sending " << hb_type << " message to: " << update.second
             << " (deadline accuracy: " << diff_ms << "ms)";
 
-    if (diff_ms > DEADLINE_MISS_THRESHOLD_MS) {
-      // TODO: This should be a healthcheck in a monitored metric in CM, which would
-      // require a 'rate' metric type.
-      const string& msg = Substitute("Missed subscriber ($0) $1 deadline by $2ms, "
-          "consider increasing --$3 (currently $4)", update.second, hb_type, diff_ms,
-          is_heartbeat ? "statestore_heartbeat_frequency_ms" :
-              "statestore_update_frequency_ms",
-          is_heartbeat ? FLAGS_statestore_heartbeat_frequency_ms :
-              FLAGS_statestore_update_frequency_ms);
-      if (is_heartbeat) {
-        LOG(WARNING) << msg;
-      } else {
-        VLOG_QUERY << msg;
-      }
+    if (diff_ms > DEADLINE_MISS_THRESHOLD_MS && is_heartbeat) {
+      const string& msg = Substitute(
+          "Missed subscriber ($0) $1 deadline by $2ms, "
+          "consider increasing --statestore_heartbeat_frequency_ms (currently $3) on "
+          "this Statestore, and --statestore_subscriber_timeout_seconds "
+          "on subscribers (Impala daemons and the Catalog Server)",
+          update.second, hb_type, diff_ms, FLAGS_statestore_heartbeat_frequency_ms);
+      LOG(WARNING) << msg;
     }
+    // Don't warn for topic updates - they can be slow and still correct. Recommending an
+    // increase in update period will just confuse (as will increasing the thread pool
+    // size) because it's hard for users to pick a good value, they may still see these
+    // messages and it won't be a correctness problem.
   } else {
     // The first update is scheduled immediately and has a deadline of 0. There's no need
     // to wait.
@@ -656,24 +659,22 @@ void Statestore::DoSubscriberUpdate(bool is_heartbeat, int thread_id,
   Status status;
   if (is_heartbeat) {
     status = SendHeartbeat(subscriber.get());
-    if (status.code() == TErrorCode::RPC_TIMEOUT) {
-      // Rewrite status to make it more useful, while preserving the stack
-      status.SetErrorMsg(ErrorMsg(TErrorCode::RPC_TIMEOUT, Substitute(
-          "Subscriber $0 ($1) timed-out during heartbeat RPC. Timeout is $2s.",
-          subscriber->id(), lexical_cast<string>(subscriber->network_address()),
-          FLAGS_statestore_heartbeat_tcp_timeout_seconds)));
+    if (status.code() == TErrorCode::RPC_RECV_TIMEOUT) {
+      // Add details to status to make it more useful, while preserving the stack
+      status.AddDetail(Substitute(
+          "Subscriber $0 timed-out during heartbeat RPC. Timeout is $1s.",
+          subscriber->id(), FLAGS_statestore_heartbeat_tcp_timeout_seconds));
     }
 
     deadline_ms = UnixMillis() + FLAGS_statestore_heartbeat_frequency_ms;
   } else {
     bool update_skipped;
     status = SendTopicUpdate(subscriber.get(), &update_skipped);
-    if (status.code() == TErrorCode::RPC_TIMEOUT) {
-      // Rewrite status to make it more useful, while preserving the stack
-      status.SetErrorMsg(ErrorMsg(TErrorCode::RPC_TIMEOUT, Substitute(
-          "Subscriber $0 ($1) timed-out during topic-update RPC. Timeout is $2s.",
-          subscriber->id(), lexical_cast<string>(subscriber->network_address()),
-          FLAGS_statestore_update_tcp_timeout_seconds)));
+    if (status.code() == TErrorCode::RPC_RECV_TIMEOUT) {
+      // Add details to status to make it more useful, while preserving the stack
+      status.AddDetail(Substitute(
+          "Subscriber $0 timed-out during topic-update RPC. Timeout is $1s.",
+          subscriber->id(), FLAGS_statestore_update_tcp_timeout_seconds));
     }
     // If the subscriber responded that it skipped the last update sent, we assume that
     // it was busy doing something else, and back off slightly before sending another.
@@ -734,8 +735,8 @@ void Statestore::UnregisterSubscriber(Subscriber* subscriber) {
 
   // Delete all transient entries
   lock_guard<mutex> topic_lock(topic_lock_);
-  BOOST_FOREACH(Statestore::Subscriber::TransientEntryMap::value_type entry,
-      subscriber->transient_entries()) {
+  for (Statestore::Subscriber::TransientEntryMap::value_type entry:
+       subscriber->transient_entries()) {
     Statestore::TopicMap::iterator topic_it = topics_.find(entry.first.first);
     DCHECK(topic_it != topics_.end());
     topic_it->second.DeleteIfVersionsMatch(entry.second, // version

@@ -1,23 +1,30 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+import pprint
+import pytest
 import shlex
 from subprocess import call
-from tests.common.test_vector import *
+
 from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
-from tests.common.impala_test_suite import *
+from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.skip import SkipIfS3, SkipIfIsilon, SkipIfLocal
-from tests.util.filesystem_utils import WAREHOUSE
+from tests.common.test_dimensions import create_uncompressed_text_dimension
+from tests.util.test_file_parser import QueryTestSectionReader
 
 # The purpose of view compatibility testing is to check whether views created in Hive
 # can be queried in Impala and vice versa. A test typically consists of
@@ -42,7 +49,6 @@ from tests.util.filesystem_utils import WAREHOUSE
 @SkipIfIsilon.hive
 @SkipIfLocal.hive
 class TestViewCompatibility(ImpalaTestSuite):
-  TEST_DB_NAME = "view_compat_test_db"
   VALID_SECTION_NAMES = ["CREATE_VIEW", "CREATE_VIEW_RESULTS",\
                         "QUERY_HIVE_VIEW_RESULTS", "QUERY_IMPALA_VIEW_RESULTS"]
 
@@ -58,23 +64,16 @@ class TestViewCompatibility(ImpalaTestSuite):
       pytest.skip("Should only run in exhaustive due to long execution time.")
 
     # don't use any exec options, running exactly once is fine
-    cls.TestMatrix.clear_dimension('exec_option')
+    cls.ImpalaTestMatrix.clear_dimension('exec_option')
     # There is no reason to run these tests using all dimensions.
-    cls.TestMatrix.add_dimension(create_uncompressed_text_dimension(cls.get_workload()))
+    cls.ImpalaTestMatrix.add_dimension(
+        create_uncompressed_text_dimension(cls.get_workload()))
 
-  def setup_method(self, method):
-    # cleanup and create a fresh test database
-    self.cleanup_db(self.TEST_DB_NAME)
-    self.execute_query("create database %s location '%s/%s'" % (self.TEST_DB_NAME,
-      WAREHOUSE, self.TEST_DB_NAME))
+  def test_view_compatibility(self, vector, unique_database):
+    self._run_view_compat_test_case('QueryTest/views-compatibility', vector,
+      unique_database)
 
-  def teardown_method(self, method):
-    self.cleanup_db(self.TEST_DB_NAME)
-
-  def test_view_compatibility(self, vector):
-    self._run_view_compat_test_case('QueryTest/views-compatibility', vector)
-
-  def _run_view_compat_test_case(self, test_file_name, vector):
+  def _run_view_compat_test_case(self, test_file_name, vector, test_db_name):
     """
     Runs a view-compatibility test file, containing the following sections:
 
@@ -93,7 +92,7 @@ class TestViewCompatibility(ImpalaTestSuite):
 
     for test_section in sections:
       # validate the test
-      test_case = ViewCompatTestCase(test_section, test_file_name, self.TEST_DB_NAME)
+      test_case = ViewCompatTestCase(test_section, test_file_name, test_db_name)
 
       # create views in Hive and Impala checking against the expected results
       self._exec_in_hive(test_case.get_create_view_sql('HIVE'),\

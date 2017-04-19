@@ -1,19 +1,22 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 namespace cpp impala
-namespace java com.cloudera.impala.thrift
+namespace java org.apache.impala.thrift
 
 include "Types.thrift"
 include "ImpalaInternalService.thrift"
@@ -144,14 +147,14 @@ struct TDescribeDbParams {
 // given TDescribeOutputStyle.
 // NOTE: This struct should only be used for intra-process communication.
 struct TDescribeTableParams {
-  1: required string db
-  2: required string table_name
-
   // Controls the output style for this describe command.
-  3: required TDescribeOutputStyle output_style
+  1: required TDescribeOutputStyle output_style
 
-  // Struct type with fields to display for the MINIMAL output style.
-  4: optional Types.TColumnType result_struct
+  // Set when describing a table.
+  2: optional CatalogObjects.TTableName table_name
+
+  // Set when describing a path to a nested collection.
+  3: optional Types.TColumnType result_struct
 }
 
 // Results of a call to describeDb() and describeTable()
@@ -174,9 +177,17 @@ struct TShowDbsParams {
   1: optional string show_pattern
 }
 
-// Parameters for SHOW TABLE/COLUMN STATS commands
+// Used by SHOW STATS and SHOW PARTITIONS to control what information is returned.
+enum TShowStatsOp {
+  TABLE_STATS,
+  COLUMN_STATS,
+  PARTITIONS,
+  RANGE_PARTITIONS
+}
+
+// Parameters for SHOW TABLE/COLUMN STATS and SHOW PARTITIONS commands
 struct TShowStatsParams {
-  1: required bool is_show_col_stats
+  1: TShowStatsOp op
   2: CatalogObjects.TTableName table_name
 }
 
@@ -206,9 +217,9 @@ struct TShowTablesParams {
 struct TShowFilesParams {
   1: required CatalogObjects.TTableName table_name
 
-  // An optional partition spec. Set if this operation should apply to a specific
-  // partition rather than the base table.
-  2: optional list<CatalogObjects.TPartitionKeyValue> partition_spec
+  // An optional partition set. Set if this operation should apply to a list of
+  // partitions rather than the base table.
+  2: optional list<list<CatalogObjects.TPartitionKeyValue>> partition_set
 }
 
 // Parameters for SHOW [CURRENT] ROLES and SHOW ROLE GRANT GROUP <groupName> commands
@@ -337,55 +348,55 @@ struct TLoadDataResp {
   1: required Data.TResultRow load_summary
 }
 
+// Execution parameters for a single plan; component of TQueryExecRequest
+struct TPlanExecInfo {
+  // fragments[i] may consume the output of fragments[j > i];
+  // fragments[0] is the root fragment and also the coordinator fragment, if
+  // it is unpartitioned.
+  1: required list<Planner.TPlanFragment> fragments
+
+  // A map from scan node ids to a list of scan range locations.
+  // The node ids refer to scan nodes in fragments[].plan
+  2: optional map<Types.TPlanNodeId, list<Planner.TScanRangeLocationList>>
+      per_node_scan_ranges
+}
+
 // Result of call to ImpalaPlanService/JniFrontend.CreateQueryRequest()
 struct TQueryExecRequest {
   // global descriptor tbl for all fragments
   1: optional Descriptors.TDescriptorTable desc_tbl
 
-  // fragments[i] may consume the output of fragments[j > i];
-  // fragments[0] is the root fragment and also the coordinator fragment, if
-  // it is unpartitioned.
-  2: required list<Planner.TPlanFragment> fragments
-
-  // Specifies the destination fragment of the output of each fragment.
-  // parent_fragment_idx.size() == fragments.size() - 1 and
-  // fragments[i] sends its output to fragments[dest_fragment_idx[i-1]]
-  3: optional list<i32> dest_fragment_idx
-
-  // A map from scan node ids to a list of scan range locations.
-  // The node ids refer to scan nodes in fragments[].plan_tree
-  4: optional map<Types.TPlanNodeId, list<Planner.TScanRangeLocations>>
-      per_node_scan_ranges
+  // exec info for all plans; the first one materializes the query result
+  2: optional list<TPlanExecInfo> plan_exec_info
 
   // Metadata of the query result set (only for select)
-  5: optional Results.TResultSetMetadata result_set_metadata
+  3: optional Results.TResultSetMetadata result_set_metadata
 
   // Set if the query needs finalization after it executes
-  6: optional TFinalizeParams finalize_params
+  4: optional TFinalizeParams finalize_params
 
-  7: required ImpalaInternalService.TQueryCtx query_ctx
+  5: required ImpalaInternalService.TQueryCtx query_ctx
 
   // The same as the output of 'explain <query>'
-  8: optional string query_plan
+  6: optional string query_plan
 
   // The statement type governs when the coordinator can judge a query to be finished.
   // DML queries are complete after Wait(), SELECTs may not be. Generally matches
   // the stmt_type of the parent TExecRequest, but in some cases (such as CREATE TABLE
   // AS SELECT), these may differ.
-  9: required Types.TStmtType stmt_type
+  7: required Types.TStmtType stmt_type
 
   // Estimated per-host peak memory consumption in bytes. Used for resource management.
-  10: optional i64 per_host_mem_req
+  8: optional i64 per_host_mem_estimate
 
-  // Estimated per-host CPU requirements in YARN virtual cores.
-  // Used for resource management.
-  11: optional i16 per_host_vcores
+  // Minimum buffer reservation required per host in bytes.
+  9: optional i64 per_host_min_reservation;
 
   // List of replica hosts.  Used by the host_idx field of TScanRangeLocation.
-  12: required list<Types.TNetworkAddress> host_list
+  10: required list<Types.TNetworkAddress> host_list
 
   // Column lineage graph
-  13: optional LineageGraph.TLineageGraph lineage_graph
+  11: optional LineageGraph.TLineageGraph lineage_graph
 }
 
 enum TCatalogOpType {
@@ -702,6 +713,51 @@ struct TGetJvmMetricsResponse {
   1: required list<TJvmMemoryPool> memory_pools
 }
 
+// Contains information about a JVM thread
+struct TJvmThreadInfo {
+  // Summary of a JVM thread. Includes stacktraces, locked monitors
+  // and synchronizers.
+  1: required string summary
+
+  // The total CPU time for this thread in nanoseconds
+  2: required i64 cpu_time_in_ns
+
+  // The CPU time that this thread has executed in user mode in nanoseconds
+  3: required i64 user_time_in_ns
+
+  // The number of times this thread blocked to enter or reenter a monitor
+  4: required i64 blocked_count
+
+  // Approximate accumulated elapsed time (in milliseconds) that this thread has blocked
+  // to enter or reenter a monitor
+  5: required i64 blocked_time_in_ms
+
+  // True if this thread is executing native code via the Java Native Interface (JNI)
+  6: required bool is_in_native
+}
+
+// Request to get information about JVM threads
+struct TGetJvmThreadsInfoRequest {
+  // If set, return complete info about JVM threads. Otherwise, return only
+  // the total number of live JVM threads.
+  1: required bool get_complete_info
+}
+
+struct TGetJvmThreadsInfoResponse {
+  // The current number of live threads including both daemon and non-daemon threads
+  1: required i32 total_thread_count
+
+  // The current number of live daemon threads
+  2: required i32 daemon_thread_count
+
+  // The peak live thread count since the Java virtual machine started
+  3: required i32 peak_thread_count
+
+  // Information about JVM threads. It is not included when
+  // TGetJvmThreadsInfoRequest.get_complete_info is false.
+  4: optional list<TJvmThreadInfo> threads
+}
+
 struct TGetHadoopConfigRequest {
   // The value of the <name> in the config <property>
   1: required string name
@@ -716,7 +772,9 @@ struct TGetAllHadoopConfigsResponse {
   1: optional map<string, string> configs;
 }
 
-// BE startup options
-struct TStartupOptions {
-  1: optional bool compute_lineage
+// For creating a test descriptor table. The tuples and their memory layout are computed
+// in the FE.
+struct TBuildTestDescriptorTableParams {
+  // Every entry describes the slot types of one tuple.
+  1: required list<list<Types.TColumnType>> slot_types
 }

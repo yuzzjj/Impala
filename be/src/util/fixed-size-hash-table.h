@@ -1,16 +1,19 @@
-// Copyright 2015 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UTIL_FAST_HASH_TABLE_H
@@ -46,8 +49,8 @@ class FixedSizeHashTable {
     DCHECK_GT(min_capacity, 0);
     // Capacity cannot be greater than largest uint32_t power of two.
     capacity_ = static_cast<uint32_t>(std::min(static_cast<int64_t>(1) << 31,
-        BitUtil::NextPowerOfTwo(min_capacity)));
-    DCHECK_EQ(capacity_, BitUtil::NextPowerOfTwo(capacity_));
+        BitUtil::RoundUpToPowerOfTwo(min_capacity)));
+    DCHECK_EQ(capacity_, BitUtil::RoundUpToPowerOfTwo(capacity_));
     if (tbl_ != NULL) free(tbl_);
     int64_t tbl_byte_size = capacity_ * sizeof(Entry);
     tbl_ = reinterpret_cast<Entry*>(malloc(tbl_byte_size));

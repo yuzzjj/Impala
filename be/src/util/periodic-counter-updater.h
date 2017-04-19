@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UTIL_PERIODIC_COUNTER_UPDATER_H
@@ -40,9 +43,6 @@ class PeriodicCounterUpdater {
     RATE_COUNTER = 0,
     SAMPLING_COUNTER,
   };
-
-  /// Tears down the update thread.
-  ~PeriodicCounterUpdater();
 
   /// Registers a periodic counter to be updated by the update thread.
   /// Either sample_fn or dst_counter must be non-NULL.  When the periodic counter
@@ -96,11 +96,13 @@ class PeriodicCounterUpdater {
     /// TODO: customize bucketing
   };
 
+  // Starts the counter update thread. We only have a single static object, so this
+  // is executed automatically when the process starts up.
   PeriodicCounterUpdater();
 
   /// Loop for periodic counter update thread.  This thread wakes up once in a while
   /// and updates all the added rate counters and sampling counters.
-  void UpdateLoop();
+  [[noreturn]] void UpdateLoop();
 
   /// Thread performing asynchronous updates.
   boost::scoped_ptr<boost::thread> update_thread_;
@@ -135,9 +137,6 @@ class PeriodicCounterUpdater {
   /// Set of time series counters that need to be updated
   typedef boost::unordered_set<RuntimeProfile::TimeSeriesCounter*> TimeSeriesCounters;
   TimeSeriesCounters time_series_counters_;
-
-  /// If 1, tear down the update thread.
-  AtomicInt<uint32_t> done_;
 
   /// Singleton object that keeps track of all rate counters and the thread
   /// for updating them.

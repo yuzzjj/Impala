@@ -1,23 +1,29 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exprs/expr-context.h"
 
 #include <sstream>
 
+#include "common/object-pool.h"
 #include "exprs/expr.h"
+#include "runtime/decimal-value.inline.h"
 #include "runtime/mem-pool.h"
+#include "runtime/raw-value.inline.h"
 #include "runtime/runtime-state.h"
 #include "udf/udf-internal.h"
 
@@ -65,9 +71,9 @@ Status ExprContext::Open(RuntimeState* state) {
 }
 
 void ExprContext::Close(RuntimeState* state) {
-  DCHECK(!closed_);
+  if (closed_) return;
   FunctionContext::FunctionStateScope scope =
-      is_clone_? FunctionContext::THREAD_LOCAL : FunctionContext::FRAGMENT_LOCAL;
+      is_clone_ ? FunctionContext::THREAD_LOCAL : FunctionContext::FRAGMENT_LOCAL;
   root_->Close(state, this, scope);
 
   for (int i = 0; i < fn_contexts_.size(); ++i) {
@@ -108,14 +114,33 @@ Status ExprContext::Clone(RuntimeState* state, ExprContext** new_ctx) {
   return root_->Open(state, *new_ctx, FunctionContext::THREAD_LOCAL);
 }
 
-void ExprContext::FreeLocalAllocations() {
-  FreeLocalAllocations(fn_contexts_);
+bool ExprContext::HasLocalAllocations(const vector<ExprContext*>& ctxs) {
+  for (int i = 0; i < ctxs.size(); ++i) {
+    if (ctxs[i]->HasLocalAllocations()) return true;
+  }
+  return false;
+}
+
+bool ExprContext::HasLocalAllocations() {
+  return HasLocalAllocations(fn_contexts_);
+}
+
+bool ExprContext::HasLocalAllocations(const std::vector<FunctionContext*>& fn_ctxs) {
+  for (int i = 0; i < fn_ctxs.size(); ++i) {
+    if (fn_ctxs[i]->impl()->closed()) continue;
+    if (fn_ctxs[i]->impl()->HasLocalAllocations()) return true;
+  }
+  return false;
 }
 
 void ExprContext::FreeLocalAllocations(const vector<ExprContext*>& ctxs) {
   for (int i = 0; i < ctxs.size(); ++i) {
     ctxs[i]->FreeLocalAllocations();
   }
+}
+
+void ExprContext::FreeLocalAllocations() {
+  FreeLocalAllocations(fn_contexts_);
 }
 
 void ExprContext::FreeLocalAllocations(const vector<FunctionContext*>& fn_ctxs) {
@@ -125,13 +150,9 @@ void ExprContext::FreeLocalAllocations(const vector<FunctionContext*>& fn_ctxs) 
   }
 }
 
-void ExprContext::GetValue(TupleRow* row, bool as_ascii, TColumnValue* col_val) {
-  void* value = GetValue(row);
-  if (as_ascii) {
-    RawValue::PrintValue(value, root_->type_, root_->output_scale_, &col_val->string_val);
-    col_val->__isset.string_val = true;
-    return;
-  }
+void ExprContext::EvaluateWithoutRow(TColumnValue* col_val) {
+  DCHECK_EQ(0, root_->GetSlotIds());
+  void* value = GetValue(NULL);
   if (value == NULL) return;
 
   StringValue* string_val = NULL;
@@ -181,29 +202,33 @@ void ExprContext::GetValue(TupleRow* row, bool as_ascii, TColumnValue* col_val) 
     case TYPE_VARCHAR:
       string_val = reinterpret_cast<StringValue*>(value);
       tmp.assign(static_cast<char*>(string_val->ptr), string_val->len);
-      col_val->string_val.swap(tmp);
-      col_val->__isset.string_val = true;
+      col_val->binary_val.swap(tmp);
+      col_val->__isset.binary_val = true;
       break;
     case TYPE_CHAR:
       tmp.assign(StringValue::CharSlotToPtr(value, root_->type_), root_->type_.len);
-      col_val->string_val.swap(tmp);
-      col_val->__isset.string_val = true;
+      col_val->binary_val.swap(tmp);
+      col_val->__isset.binary_val = true;
       break;
-    case TYPE_TIMESTAMP:
+    case TYPE_TIMESTAMP: {
+      uint8_t* uint8_val = reinterpret_cast<uint8_t*>(value);
+      col_val->binary_val.assign(uint8_val, uint8_val + root_->type_.GetSlotSize());
+      col_val->__isset.binary_val = true;
       RawValue::PrintValue(
           value, root_->type_, root_->output_scale_, &col_val->string_val);
       col_val->__isset.string_val = true;
       break;
+    }
     default:
       DCHECK(false) << "bad GetValue() type: " << root_->type_.DebugString();
   }
 }
 
-void* ExprContext::GetValue(TupleRow* row) {
+void* ExprContext::GetValue(const TupleRow* row) {
   return GetValue(root_, row);
 }
 
-void* ExprContext::GetValue(Expr* e, TupleRow* row) {
+void* ExprContext::GetValue(Expr* e, const TupleRow* row) {
   switch (e->type_.type) {
     case TYPE_BOOLEAN: {
       impala_udf::BooleanVal v = e->GetBooleanVal(this, row);
@@ -304,7 +329,7 @@ void* ExprContext::GetValue(Expr* e, TupleRow* row) {
   }
 }
 
-void ExprContext::PrintValue(TupleRow* row, string* str) {
+void ExprContext::PrintValue(const TupleRow* row, string* str) {
   RawValue::PrintValue(GetValue(row), root_->type(), root_->output_scale_, str);
 }
 void ExprContext::PrintValue(void* value, string* str) {
@@ -313,7 +338,7 @@ void ExprContext::PrintValue(void* value, string* str) {
 void ExprContext::PrintValue(void* value, stringstream* stream) {
   RawValue::PrintValue(value, root_->type(), root_->output_scale_, stream);
 }
-void ExprContext::PrintValue(TupleRow* row, stringstream* stream) {
+void ExprContext::PrintValue(const TupleRow* row, stringstream* stream) {
   RawValue::PrintValue(GetValue(row), root_->type(), root_->output_scale_, stream);
 }
 

@@ -1,0 +1,11 @@
+-rpc_bind_addresses=0.0.0.0:${KUDU_TS_RPC_PORT}
+-webserver_port=${KUDU_TS_WEBUI_PORT}
+-fs_wal_dir=${NODE_DIR}/var/lib/kudu/ts/wal
+-fs_data_dirs=${NODE_DIR}/var/lib/kudu/ts/data
+-log_dir=${NODE_DIR}/var/log/kudu/ts
+
+# fsync is disabled for additional speed. Sometimes operations are slow on EC2/GCE test
+# machines. Some data loss could occur if the system crashes before the OS has a chance
+# to flush data to disk but that is acceptable for development purposes.
+-unlock_unsafe_flags
+-never_fsync

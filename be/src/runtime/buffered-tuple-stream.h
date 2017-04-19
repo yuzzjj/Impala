@@ -1,16 +1,19 @@
-// Copyright 2013 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_RUNTIME_BUFFERED_TUPLE_STREAM_H
 #define IMPALA_RUNTIME_BUFFERED_TUPLE_STREAM_H
@@ -20,13 +23,13 @@
 
 #include "common/status.h"
 #include "runtime/buffered-block-mgr.h"
+#include "runtime/row-batch.h"
 
 namespace impala {
 
 class BufferedBlockMgr;
 class RuntimeProfile;
 class RuntimeState;
-class RowBatch;
 class RowDescriptor;
 class SlotDescriptor;
 class TupleRow;
@@ -125,7 +128,7 @@ class TupleRow;
 /// Memory lifetime of rows read from stream:
 /// If the stream is pinned, it is valid to access any tuples returned via
 /// GetNext() or GetRows() until the stream is unpinned. If the stream is unpinned, and
-/// the batch returned from GetNext() has the need_to_return flag set, any tuple memory
+/// the batch returned from GetNext() has the needs_deep_copy flag set, any tuple memory
 /// returned so far from the stream may be freed on the next call to GetNext().
 ///
 /// Manual construction of rows with AllocateRow():
@@ -177,11 +180,11 @@ class BufferedTupleStream {
 
     uint64_t block() const {
       return (data & BLOCK_MASK);
-    };
+    }
 
     uint64_t offset() const {
       return (data & OFFSET_MASK) >> OFFSET_SHIFT;
-    };
+    }
 
     uint64_t idx() const {
       return (data & IDX_MASK) >> IDX_SHIFT;
@@ -225,18 +228,27 @@ class BufferedTupleStream {
   /// 'node_id' is only used for error reporting.
   Status Init(int node_id, RuntimeProfile* profile, bool pinned);
 
+  /// Prepares the stream for writing by attempting to allocate a write block.
+  /// Called after Init() and before the first AddRow() call.
+  /// 'got_buffer': set to true if the first write block was successfully pinned, or
+  ///     false if the block could not be pinned and no error was encountered. Undefined
+  ///     if an error status is returned.
+  Status PrepareForWrite(bool* got_buffer);
+
   /// Must be called for streams using small buffers to switch to IO-sized buffers.
   /// If it fails to get a buffer (i.e. the switch fails) it resets the use_small_buffers_
   /// back to false.
-  /// TODO: this does not seem like the best mechanism.
+  /// TODO: IMPALA-3200: remove this when small buffers are removed.
   Status SwitchToIoBuffers(bool* got_buffer);
 
-  /// Adds a single row to the stream. Returns false and sets *status if an error
-  /// occurred. BufferedTupleStream will do a deep copy of the memory in the row.
-  /// After AddRow returns false, it should not be called again, unless
-  /// using_small_buffers_ is true, in which case it is valid to call SwitchToIoBuffers()
-  /// then AddRow() again.
-  bool AddRow(TupleRow* row, Status* status);
+  /// Adds a single row to the stream. Returns true if the append succeeded, returns false
+  /// and sets 'status' to OK if appending failed but can be retried or returns false and
+  /// sets 'status' to an error if an error occurred.
+  /// BufferedTupleStream will do a deep copy of the memory in the row. After AddRow()
+  /// returns an error, it should not be called again. If appending failed without an
+  /// error and the stream is using small buffers, it is valid to call
+  /// SwitchToIoBuffers() then AddRow() again.
+  bool AddRow(TupleRow* row, Status* status) noexcept;
 
   /// Allocates space to store a row of with fixed length 'fixed_size' and variable
   /// length data 'varlen_size'. If successful, returns the pointer where fixed length
@@ -256,10 +268,9 @@ class BufferedTupleStream {
   /// begin reading. Otherwise this must be called after the last AddRow() and
   /// before GetNext().
   /// delete_on_read: Blocks are deleted after they are read.
-  /// If got_buffer is NULL, this function will fail (with a bad status) if no buffer
-  /// is available. If got_buffer is non-null, this function will not fail on OOM and
-  /// *got_buffer is true if a buffer was pinned.
-  Status PrepareForRead(bool delete_on_read, bool* got_buffer = NULL);
+  /// got_buffer: set to true if the first read block was successfully pinned, or
+  ///     false if the block could not be pinned and no error was encountered.
+  Status PrepareForRead(bool delete_on_read, bool* got_buffer);
 
   /// Pins all blocks in this stream and switches to pinned mode.
   /// If there is not enough memory, *pinned is set to false and the stream is unmodified.
@@ -267,9 +278,20 @@ class BufferedTupleStream {
   /// block_mgr_client_ to pin the stream.
   Status PinStream(bool already_reserved, bool* pinned);
 
-  /// Unpins stream. If all is true, all blocks are unpinned, otherwise all blocks
-  /// except the write_block_ and read_block_ are unpinned.
-  Status UnpinStream(bool all = false);
+  /// Modes for UnpinStream().
+  enum UnpinMode {
+    /// All blocks in the stream are unpinned and the read/write positions in the stream
+    /// are reset. No more rows can be written to the stream after this. The stream can
+    /// be re-read from the beginning by calling PrepareForRead().
+    UNPIN_ALL,
+    /// All blocks are unpinned aside from the current read and write blocks (if any),
+    /// which is left in the same state. The unpinned stream can continue being read
+    /// or written from the current read or write positions.
+    UNPIN_ALL_EXCEPT_CURRENT,
+  };
+
+  /// Unpins stream with the given 'mode' as described above.
+  Status UnpinStream(UnpinMode mode);
 
   /// Get the next batch of output rows. Memory is still owned by the BufferedTupleStream
   /// and must be copied out by the caller.
@@ -283,8 +305,11 @@ class BufferedTupleStream {
   /// *got_rows is false if the stream could not be pinned.
   Status GetRows(boost::scoped_ptr<RowBatch>* batch, bool* got_rows);
 
-  /// Must be called once at the end to cleanup all resources. Idempotent.
-  void Close();
+  /// Must be called once at the end to cleanup all resources. If 'batch' is non-NULL,
+  /// attaches any pinned blocks to the batch and deletes unpinned blocks. Otherwise
+  /// deletes all blocks. Does nothing if the stream was already closed. The 'flush'
+  /// mode is forwarded to RowBatch::AddBlock() when attaching blocks.
+  void Close(RowBatch* batch, RowBatch::FlushMode flush);
 
   /// Number of rows in the stream.
   int64_t num_rows() const { return num_rows_; }
@@ -299,6 +324,7 @@ class BufferedTupleStream {
   /// If ignore_current is true, the write_block_ memory is not included.
   int64_t bytes_in_mem(bool ignore_current) const;
 
+  bool is_closed() const { return closed_; }
   bool is_pinned() const { return pinned_; }
   int blocks_pinned() const { return num_pinned_; }
   int blocks_unpinned() const { return blocks_.size() - num_pinned_ - num_small_blocks_; }
@@ -315,29 +341,16 @@ class BufferedTupleStream {
   std::string DebugString() const;
 
  private:
-  friend class MultiNullableTupleStreamTest_TestComputeRowSize_Test;
   friend class ArrayTupleStreamTest_TestArrayDeepCopy_Test;
   friend class ArrayTupleStreamTest_TestComputeRowSize_Test;
-
-  /// If true, this stream is still using small buffers.
-  bool use_small_buffers_;
-
-  /// If true, blocks are deleted after they are read.
-  bool delete_on_read_;
-
-  /// If true, read and write operations may be interleaved. Otherwise all calls
-  /// to AddRow() must occur before calling PrepareForRead() and subsequent calls to
-  /// GetNext().
-  const bool read_write_;
+  friend class MultiNullableTupleStreamTest_TestComputeRowSize_Test;
+  friend class SimpleTupleStreamTest_TestGetRowsOverflow_Test;
 
   /// Runtime state instance used to check for cancellation. Not owned.
   RuntimeState* const state_;
 
   /// Description of rows stored in the stream.
   const RowDescriptor& desc_;
-
-  /// Whether any tuple in the rows is nullable.
-  const bool has_nullable_tuple_;
 
   /// Sum of the fixed length portion of all the tuples in desc_.
   int fixed_tuple_row_size_;
@@ -359,11 +372,11 @@ class BufferedTupleStream {
 
   /// Vectors of all the strings slots that have their varlen data stored in stream
   /// grouped by tuple_idx.
-  std::vector<std::pair<int, std::vector<SlotDescriptor*> > > inlined_string_slots_;
+  std::vector<std::pair<int, std::vector<SlotDescriptor*>>> inlined_string_slots_;
 
   /// Vectors of all the collection slots that have their varlen data stored in the
   /// stream, grouped by tuple_idx.
-  std::vector<std::pair<int, std::vector<SlotDescriptor*> > > inlined_coll_slots_;
+  std::vector<std::pair<int, std::vector<SlotDescriptor*>>> inlined_coll_slots_;
 
   /// Block manager and client used to allocate, pin and release blocks. Not owned.
   BufferedBlockMgr* block_mgr_;
@@ -421,10 +434,29 @@ class BufferedTupleStream {
   /// The total number of small blocks in blocks_;
   int num_small_blocks_;
 
-  bool closed_; // Used for debugging.
-
   /// Number of rows stored in the stream.
   int64_t num_rows_;
+
+  /// Counters added by this object to the parent runtime profile.
+  RuntimeProfile::Counter* pin_timer_;
+  RuntimeProfile::Counter* unpin_timer_;
+  RuntimeProfile::Counter* get_new_block_timer_;
+
+  /// If true, read and write operations may be interleaved. Otherwise all calls
+  /// to AddRow() must occur before calling PrepareForRead() and subsequent calls to
+  /// GetNext().
+  const bool read_write_;
+
+  /// Whether any tuple in the rows is nullable.
+  const bool has_nullable_tuple_;
+
+  /// If true, this stream is still using small buffers.
+  bool use_small_buffers_;
+
+  /// If true, blocks are deleted after they are read.
+  bool delete_on_read_;
+
+  bool closed_; // Used for debugging.
 
   /// If true, this stream has been explicitly pinned by the caller. This changes the
   /// memory management of the stream. The blocks are not unpinned until the caller calls
@@ -432,16 +464,15 @@ class BufferedTupleStream {
   /// (both are if read_write_ is true).
   bool pinned_;
 
-  /// Counters added by this object to the parent runtime profile.
-  RuntimeProfile::Counter* pin_timer_;
-  RuntimeProfile::Counter* unpin_timer_;
-  RuntimeProfile::Counter* get_new_block_timer_;
+  /// The slow path for AddRow() that is called if there is not sufficient space in
+  /// the current block.
+  bool AddRowSlow(TupleRow* row, Status* status) noexcept;
 
   /// Copies 'row' into write_block_. Returns false if there is not enough space in
   /// 'write_block_'. After returning false, write_ptr_ may be left pointing to the
   /// partially-written row, and no more data can be written to write_block_.
   template <bool HAS_NULLABLE_TUPLE>
-  bool DeepCopyInternal(TupleRow* row);
+  bool DeepCopyInternal(TupleRow* row) noexcept;
 
   /// Helper function to copy strings in string_slots from tuple into write_block_.
   /// Updates write_ptr_ to the end of the string data added. Returns false if the data
@@ -459,7 +490,7 @@ class BufferedTupleStream {
       const std::vector<SlotDescriptor*>& collection_slots);
 
   /// Wrapper of the templated DeepCopyInternal() function.
-  bool DeepCopy(TupleRow* row);
+  bool DeepCopy(TupleRow* row) noexcept;
 
   /// Gets a new block of 'block_len' bytes from the block_mgr_, updating write_block_,
   /// write_tuple_idx_, write_ptr_ and write_end_ptr_. 'null_indicators_size' is the
@@ -467,12 +498,13 @@ class BufferedTupleStream {
   /// *got_block is set to true if a block was successfully acquired. Null indicators
   /// (if any) will also be reserved and initialized. If there are no blocks available,
   /// *got_block is set to false and write_block_ is unchanged.
-  Status NewWriteBlock(int64_t block_len, int64_t null_indicators_size, bool* got_block);
+  Status NewWriteBlock(
+      int64_t block_len, int64_t null_indicators_size, bool* got_block) noexcept;
 
   /// A wrapper around NewWriteBlock(). 'row_size' is the size of the tuple row to be
   /// appended to this block. This function determines the block size required in order
   /// to fit the row and null indicators.
-  Status NewWriteBlockForRow(int64_t row_size, bool* got_block);
+  Status NewWriteBlockForRow(int64_t row_size, bool* got_block) noexcept;
 
   /// Reads the next block from the block_mgr_. This blocks if necessary.
   /// Updates read_block_, read_ptr_, read_tuple_idx_ and read_end_ptr_.
@@ -481,7 +513,7 @@ class BufferedTupleStream {
   /// Returns the total additional bytes that this row will consume in write_block_ if
   /// appended to the block. This includes the fixed length part of the row and the
   /// data for inlined_string_slots_ and inlined_coll_slots_.
-  int64_t ComputeRowSize(TupleRow* row) const;
+  int64_t ComputeRowSize(TupleRow* row) const noexcept;
 
   /// Unpins block if it is an IO-sized block and updates tracking stats.
   Status UnpinBlock(BufferedBlockMgr::Block* block);

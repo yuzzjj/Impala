@@ -1,30 +1,33 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_EXEC_NODE_H
 #define IMPALA_EXEC_EXEC_NODE_H
 
-#include <vector>
 #include <sstream>
+#include <vector>
 
 #include "common/status.h"
 #include "exprs/expr-context.h"
-#include "runtime/descriptors.h"  // for RowDescriptor
-#include "util/runtime-profile.h"
-#include "util/blocking-queue.h"
 #include "gen-cpp/PlanNodes_types.h"
+#include "runtime/descriptors.h" // for RowDescriptor
+#include "util/blocking-queue.h"
+#include "util/runtime-profile.h"
 
 namespace impala {
 
@@ -55,23 +58,28 @@ class ExecNode {
   /// Initializes this object from the thrift tnode desc. The subclass should
   /// do any initialization that can fail in Init() rather than the ctor.
   /// If overridden in subclass, must first call superclass's Init().
-  virtual Status Init(const TPlanNode& tnode, RuntimeState* state);
+  virtual Status Init(const TPlanNode& tnode, RuntimeState* state) WARN_UNUSED_RESULT;
 
   /// Sets up internal structures, etc., without doing any actual work.
   /// Must be called prior to Open(). Will only be called once in this
   /// node's lifetime.
-  /// All code generation (adding functions to the LlvmCodeGen object) must happen
-  /// in Prepare().  Retrieving the jit compiled function pointer must happen in
-  /// Open().
   /// If overridden in subclass, must first call superclass's Prepare().
-  virtual Status Prepare(RuntimeState* state);
+  virtual Status Prepare(RuntimeState* state) WARN_UNUSED_RESULT;
+
+  /// Recursively calls Codegen() on all children.
+  /// Expected to be overriden in subclass to generate LLVM IR functions and register
+  /// them with the LlvmCodeGen object. The function pointers of the compiled IR functions
+  /// will be set up in PlanFragmentExecutor::Open(). If overridden in subclass, must also
+  /// call superclass's Codegen() before or after the code generation for this exec node.
+  /// Will only be called once in the node's lifetime.
+  virtual void Codegen(RuntimeState* state);
 
   /// Performs any preparatory work prior to calling GetNext().
   /// Caller must not be holding any io buffers. This will cause deadlock.
   /// If overridden in subclass, must first call superclass's Open().
   /// Open() is called after Prepare() or Reset(), i.e., possibly multiple times
   /// throughout the lifetime of this node.
-  virtual Status Open(RuntimeState* state);
+  virtual Status Open(RuntimeState* state) WARN_UNUSED_RESULT;
 
   /// Retrieves rows and returns them via row_batch. Sets eos to true
   /// if subsequent calls will not retrieve any more rows.
@@ -86,7 +94,8 @@ class ExecNode {
   /// row_batch's tuple_data_pool.
   /// Caller must not be holding any io buffers. This will cause deadlock.
   /// TODO: AggregationNode and HashJoinNode cannot be "re-opened" yet.
-  virtual Status GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos) = 0;
+  virtual Status GetNext(
+      RuntimeState* state, RowBatch* row_batch, bool* eos) WARN_UNUSED_RESULT = 0;
 
   /// Resets the stream of row batches to be retrieved by subsequent GetNext() calls.
   /// Clears all internal state, returning this node to the state it was in after calling
@@ -101,7 +110,7 @@ class ExecNode {
   /// implementation calls Reset() on children.
   /// Note that this function may be called many times (proportional to the input data),
   /// so should be fast.
-  virtual Status Reset(RuntimeState* state);
+  virtual Status Reset(RuntimeState* state) WARN_UNUSED_RESULT;
 
   /// Close() will get called for every exec node, regardless of what else is called and
   /// the status of these calls (i.e. Prepare() may never have been called, or
@@ -122,11 +131,11 @@ class ExecNode {
   /// traversal. All nodes are placed in state->obj_pool() and have Init() called on them.
   /// Returns error if 'plan' is corrupted, otherwise success.
   static Status CreateTree(RuntimeState* state, const TPlan& plan,
-      const DescriptorTbl& descs, ExecNode** root);
+      const DescriptorTbl& descs, ExecNode** root) WARN_UNUSED_RESULT;
 
   /// Set debug action for node with given id in 'tree'
-  static void SetDebugOptions(int node_id, TExecNodePhase::type phase,
-                              TDebugAction::type action, ExecNode* tree);
+  static void SetDebugOptions(
+      int node_id, TExecNodePhase::type phase, TDebugAction::type action, ExecNode* tree);
 
   /// Collect all nodes of given 'node_type' that are part of this subtree, and return in
   /// 'nodes'.
@@ -142,9 +151,9 @@ class ExecNode {
 
   /// Codegen EvalConjuncts(). Returns a non-OK status if the function couldn't be
   /// codegen'd. The codegen'd version uses inlined, codegen'd GetBooleanVal() functions.
-  static Status CodegenEvalConjuncts(
-      RuntimeState* state, const std::vector<ExprContext*>& conjunct_ctxs,
-      llvm::Function** fn, const char* name = "EvalConjuncts");
+  static Status CodegenEvalConjuncts(LlvmCodeGen* codegen,
+      const std::vector<ExprContext*>& conjunct_ctxs, llvm::Function** fn,
+      const char* name = "EvalConjuncts") WARN_UNUSED_RESULT;
 
   /// Returns a string representation in DFS order of the plan rooted at this.
   std::string DebugString() const;
@@ -176,6 +185,13 @@ class ExecNode {
   MemTracker* mem_tracker() { return mem_tracker_.get(); }
   MemTracker* expr_mem_tracker() { return expr_mem_tracker_.get(); }
 
+  /// Return true if codegen was disabled by the planner for this ExecNode. Does not
+  /// check to see if codegen was enabled for the enclosing fragment.
+  bool IsNodeCodegenDisabled() const;
+
+  /// Add codegen disabled message if codegen is disabled for this ExecNode.
+  void AddCodegenDisabledMessage(RuntimeState* state);
+
   /// Extract node id from p->name().
   static int GetNodeIdFromProfile(RuntimeProfile* p);
 
@@ -201,6 +217,13 @@ class ExecNode {
 
     /// Adds a batch to the queue. This is blocking if the queue is full.
     void AddBatch(RowBatch* batch);
+
+    /// Adds a batch to the queue. If the queue is full, this blocks until space becomes
+    /// available or 'timeout_micros' has elapsed.
+    /// Returns true if the element was added to the queue, false if it wasn't. If this
+    /// method returns false, the queue didn't take ownership of the batch and it must be
+    /// managed externally.
+    bool AddBatchWithTimeout(RowBatch* batch, int64_t timeout_micros) WARN_UNUSED_RESULT;
 
     /// Gets a row batch from the queue. Returns NULL if there are no more.
     /// This function blocks.
@@ -248,12 +271,6 @@ class ExecNode {
   /// MemTracker that should be used for ExprContexts.
   boost::scoped_ptr<MemTracker> expr_mem_tracker_;
 
-  /// Execution options that are determined at runtime.  This is added to the
-  /// runtime profile at Close().  Examples for options logged here would be
-  /// "Codegen Enabled"
-  boost::mutex exec_options_lock_;
-  std::string runtime_exec_options_;
-
   bool is_closed() const { return is_closed_; }
 
   /// Pointer to the containing SubplanNode or NULL if not inside a subplan.
@@ -264,13 +281,17 @@ class ExecNode {
   /// Valid to call in or after Prepare().
   bool IsInSubplan() const { return containing_subplan_ != NULL; }
 
+  /// If true, codegen should be disabled for this exec node.
+  const bool disable_codegen_;
+
   /// Create a single exec node derived from thrift node; place exec node in 'pool'.
   static Status CreateNode(ObjectPool* pool, const TPlanNode& tnode,
-      const DescriptorTbl& descs, ExecNode** node, RuntimeState* state);
+      const DescriptorTbl& descs, ExecNode** node,
+      RuntimeState* state) WARN_UNUSED_RESULT;
 
   static Status CreateTreeHelper(RuntimeState* state,
       const std::vector<TPlanNode>& tnodes, const DescriptorTbl& descs, ExecNode* parent,
-      int* node_idx, ExecNode** root);
+      int* node_idx, ExecNode** root) WARN_UNUSED_RESULT;
 
   virtual bool IsScanNode() const { return false; }
 
@@ -278,23 +299,8 @@ class ExecNode {
 
   /// Executes debug_action_ if phase matches debug_phase_.
   /// 'phase' must not be INVALID.
-  Status ExecDebugAction(TExecNodePhase::type phase, RuntimeState* state);
-
-  /// Appends option to 'runtime_exec_options_'
-  void AddRuntimeExecOption(const std::string& option);
-
-  /// Helper wrapper around AddRuntimeExecOption() for adding "Codegen Enabled" or
-  /// "Codegen Disabled" exec options. If specified, 'extra_info' is appended to the exec
-  /// option, and 'extra_label' is prepended to the exec option.
-  void AddCodegenExecOption(bool codegen_enabled, const string& extra_info = "",
-      const string& extra_label = "");
-
-  /// Helper wrapper that takes a status optionally describing why codegen was
-  /// disabled. 'codegen_status' can be OK.
-  void AddCodegenExecOption(bool codegen_enabled, const Status& codegen_status,
-      const string& extra_label = "") {
-    AddCodegenExecOption(codegen_enabled, codegen_status.GetDetail(), extra_label);
-  }
+  Status ExecDebugAction(
+      TExecNodePhase::type phase, RuntimeState* state) WARN_UNUSED_RESULT;
 
   /// Frees any local allocations made by expr_ctxs_to_free_ and returns the result of
   /// state->CheckQueryState(). Nodes should call this periodically, e.g. once per input
@@ -303,7 +309,7 @@ class ExecNode {
   /// Nodes may override this to add extra periodic cleanup, e.g. freeing other local
   /// allocations. ExecNodes overriding this function should return
   /// ExecNode::QueryMaintenance().
-  virtual Status QueryMaintenance(RuntimeState* state);
+  virtual Status QueryMaintenance(RuntimeState* state) WARN_UNUSED_RESULT;
 
   /// Add an ExprContext to have its local allocations freed by QueryMaintenance().
   /// Exprs that are evaluated in the main execution thread should be added. Exprs

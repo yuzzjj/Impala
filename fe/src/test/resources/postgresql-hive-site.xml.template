@@ -69,12 +69,6 @@
   <value>org.postgresql.Driver</value>
 </property>
 
-<!--  Enforce the execution of Metastore SQL via Datanucleus to work around HIVE-5264. -->
-<property>
-  <name>hive.metastore.try.direct.sql</name>
-  <value>false</value>
-</property>
-
 <property>
   <name>datanucleus.fixedDatastore</name>
   <value>false</value>
@@ -99,7 +93,7 @@
 <property>
   <!--  Location of Hive per-query log files of the form: hive_job_log_<hive_query_id>.txt -->
   <name>hive.querylog.location</name>
-  <value>${IMPALA_TEST_CLUSTER_LOG_DIR}/hive</value>
+  <value>${IMPALA_CLUSTER_LOGS_DIR}/hive</value>
 </property>
 
 <!--property>
@@ -173,7 +167,7 @@
 </property>
 -->
 
-<!-- Start CDH-17946 -->
+<!-- Start IMPALA-4125 -->
 <property>
   <name>hbase.security.authentication</name>
   <value>kerberos</value>
@@ -193,7 +187,7 @@
   <name>hbase.zookeeper.quorum</name>
   <value>localhost</value>
 </property>
-<!-- END CDH-17946 -->
+<!-- END IMPALA-4125 -->
 
 <property>
   <name>hbase.coprocessor.region.classes</name>

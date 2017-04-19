@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_RUNTIME_STRING_VALUE_INLINE_H
@@ -44,7 +47,9 @@ static inline int StringCompare(const char* s1, int n1, const char* s2, int n2, 
           SSEUtil::CHARS_PER_128_BIT_REGISTER, xmm1,
           SSEUtil::CHARS_PER_128_BIT_REGISTER);
       if (chars_match != SSEUtil::CHARS_PER_128_BIT_REGISTER) {
-        return s1[chars_match] - s2[chars_match];
+        // Match strncmp() behavior, which interprets characters as unsigned char.
+        return static_cast<unsigned char>(s1[chars_match]) -
+            static_cast<unsigned char>(s2[chars_match]);
       }
       len -= SSEUtil::CHARS_PER_128_BIT_REGISTER;
       s1 += SSEUtil::CHARS_PER_128_BIT_REGISTER;
@@ -75,6 +80,50 @@ inline int StringValue::Compare(const StringValue& other) const {
 inline bool StringValue::Eq(const StringValue& other) const {
   if (this->len != other.len) return false;
   return StringCompare(this->ptr, this->len, other.ptr, other.len, this->len) == 0;
+}
+
+inline bool StringValue::operator==(const StringValue& other) const {
+  return Eq(other);
+}
+
+inline bool StringValue::Ne(const StringValue& other) const {
+  return !Eq(other);
+}
+
+inline bool StringValue::operator!=(const StringValue& other) const {
+  return Ne(other);
+}
+
+inline bool StringValue::Le(const StringValue& other) const {
+  return Compare(other) <= 0;
+}
+
+inline bool StringValue::operator<=(const StringValue& other) const {
+  return Le(other);
+}
+
+inline bool StringValue::Ge(const StringValue& other) const {
+  return Compare(other) >= 0;
+}
+
+inline bool StringValue::operator>=(const StringValue& other) const {
+  return Ge(other);
+}
+
+inline bool StringValue::Lt(const StringValue& other) const {
+  return Compare(other) < 0;
+}
+
+inline bool StringValue::operator<(const StringValue& other) const {
+  return Lt(other);
+}
+
+inline bool StringValue::Gt(const StringValue& other) const {
+  return Compare(other) > 0;
+}
+
+inline bool StringValue::operator>(const StringValue& other) const {
+  return Gt(other);
 }
 
 inline StringValue StringValue::Substring(int start_pos) const {

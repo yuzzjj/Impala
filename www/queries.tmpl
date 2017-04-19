@@ -1,17 +1,20 @@
 <!--
-Copyright 2012- Cloudera Inc.
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
 
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
 -->
 {{> www/common-header.tmpl }}
 <h2>Queries</h2>
@@ -19,7 +22,7 @@ limitations under the License.
 archived in memory. The size of that archive is controlled with the
 <samp>--query_log_size</samp> command line parameter.</p>
 
-<h3>{{num_in_flight_queries}} queries in flight</h3>
+<h3>{{num_executing_queries}} queries in flight</h3>
 
 <table class='table table-hover table-border'>
   <tr>
@@ -33,10 +36,13 @@ archived in memory. The size of that archive is controlled with the
     <th>State</th>
     <th>Last Event</th>
     <th># rows fetched</th>
+    <th>Resource Pool</th>
     <th>Details</th>
     <th>Action</th>
   </tr>
+{{! filter to get just executing queries from in_flight_queries}}
 {{#in_flight_queries}}
+{{?executing}}
   <tr>
     <td>{{effective_user}}</td>
     <td>{{default_db}}</td>
@@ -48,9 +54,56 @@ archived in memory. The size of that archive is controlled with the
     <td><samp>{{state}}</samp></td>
     <td><samp>{{last_event}}</samp></td>
     <td>{{rows_fetched}}</td>
+    <td>{{resource_pool}}</td>
     <td><a href='/query_plan?query_id={{query_id}}'>Details</a></td>
     <td><a href='/cancel_query?query_id={{query_id}}'>Cancel</a></td>
   </tr>
+{{/executing}}
+{{/in_flight_queries}}
+</table>
+
+<h3>
+  {{num_waiting_queries}} waiting to be closed
+  <sup><a href='#' data-toggle="tooltip" title="{{waiting-tooltip}}">[?]</a></sup>
+</h3>
+
+<table class='table table-hover table-border'>
+  <tr>
+    <th>User</th>
+    <th>Default Db</th>
+    <th>Statement</th>
+    <th>Query Type</th>
+    <th>Start Time</th>
+    <th>Waiting Time</th>
+    <th>Duration</th>
+    <th>Scan Progress</th>
+    <th>State</th>
+    <th>Last Event</th>
+    <th># rows fetched</th>
+    <th>Resource Pool</th>
+    <th>Details</th>
+    <th>Action</th>
+  </tr>
+{{! filter to get just waiting queries from in_flight_queries}}
+{{#in_flight_queries}}
+{{?waiting}}
+  <tr>
+    <td>{{effective_user}}</td>
+    <td>{{default_db}}</td>
+    <td><samp>{{stmt}}</samp></td>
+    <td><samp>{{stmt_type}}</samp></td>
+    <td>{{start_time}}</td>
+    <td>{{waiting_time}}</td>
+    <td>{{duration}}</td>
+    <td>{{progress}}</td>
+    <td><samp>{{state}}</samp></td>
+    <td><samp>{{last_event}}</samp></td>
+    <td>{{rows_fetched}}</td>
+    <td>{{resource_pool}}</td>
+    <td><a href='/query_plan?query_id={{query_id}}'>Details</a></td>
+    <td><a href='/cancel_query?query_id={{query_id}}'>Close</a></td>
+  </tr>
+{{/waiting}}
 {{/in_flight_queries}}
 </table>
 
@@ -68,6 +121,7 @@ archived in memory. The size of that archive is controlled with the
     <th>Scan Progress</th>
     <th>State</th>
     <th># rows fetched</th>
+    <th>Resource Pool</th>
     <th>Details</th>
   </tr>
 {{#completed_queries}}
@@ -82,6 +136,7 @@ archived in memory. The size of that archive is controlled with the
     <td>{{progress}}</td>
     <td><samp>{{state}}</samp></td>
     <td>{{rows_fetched}}</td>
+    <td>{{resource_pool}}</td>
     <td><a href='/query_plan?query_id={{query_id}}'>Details</a></td>
   </tr>
 {{/completed_queries}}

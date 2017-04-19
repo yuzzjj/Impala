@@ -1,17 +1,32 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
-# Validates limit on scan nodes
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-import logging
-import os
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Validates limit on scan nodes
+
 import pytest
-from copy import copy
-from subprocess import call
-from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
-from tests.common.impala_test_suite import *
-from tests.common.test_vector import *
+import re
+import time
+from subprocess import check_call
+
 from tests.common.impala_cluster import ImpalaCluster
-from tests.common.test_dimensions import create_exec_option_dimension
+from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.skip import SkipIfS3, SkipIfIsilon, SkipIfLocal
+from tests.common.test_dimensions import create_single_exec_option_dimension
+from tests.util.filesystem_utils import get_fs_path
 from tests.util.shell_util import exec_process
 
 # End to end test that hdfs caching is working.
@@ -26,9 +41,9 @@ class TestHdfsCaching(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestHdfsCaching, cls).add_test_dimensions()
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('exec_option')['batch_size'] == 0)
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('table_format').file_format == "text")
 
   # The tpch nation table is cached as part of data loading. We'll issue a query
@@ -87,6 +102,67 @@ class TestHdfsCaching(ImpalaTestSuite):
       result = self.execute_query(query_string)
       assert(len(result.data) == 2)
 
+# A separate class has been created for "test_hdfs_caching_fallback_path" to make it
+# run as a part of exhaustive tests which require the workload to be 'functional-query'.
+# TODO: Move this to TestHdfsCaching once we make exhaustive tests run for other workloads
+@SkipIfS3.caching
+@SkipIfIsilon.caching
+@SkipIfLocal.caching
+class TestHdfsCachingFallbackPath(ImpalaTestSuite):
+  @classmethod
+  def get_workload(self):
+    return 'functional-query'
+
+  @SkipIfS3.hdfs_encryption
+  @SkipIfIsilon.hdfs_encryption
+  @SkipIfLocal.hdfs_encryption
+  def test_hdfs_caching_fallback_path(self, vector, unique_database, testid_checksum):
+    """ This tests the code path of the query execution where the hdfs cache read fails
+    and the execution falls back to the normal read path. To reproduce this situation we
+    rely on IMPALA-3679, where zcrs are not supported with encryption zones. This makes
+    sure ReadFromCache() fails and falls back to ReadRange() to read the scan range."""
+
+    if self.exploration_strategy() != 'exhaustive' or\
+        vector.get_value('table_format').file_format != 'text':
+      pytest.skip()
+
+    # Create a new encryption zone and copy the tpch.nation table data into it.
+    encrypted_table_dir = get_fs_path("/test-warehouse/" + testid_checksum)
+    create_query_sql = "CREATE EXTERNAL TABLE %s.cached_nation like tpch.nation "\
+        "LOCATION '%s'" % (unique_database, encrypted_table_dir)
+    check_call(["hdfs", "dfs", "-mkdir", encrypted_table_dir], shell=False)
+    check_call(["hdfs", "crypto", "-createZone", "-keyName", "testKey1", "-path",\
+        encrypted_table_dir], shell=False)
+    check_call(["hdfs", "dfs", "-cp", get_fs_path("/test-warehouse/tpch.nation/*.tbl"),\
+        encrypted_table_dir], shell=False)
+    # Reduce the scan range size to force the query to have multiple scan ranges.
+    exec_options = vector.get_value('exec_option')
+    exec_options['max_scan_range_length'] = 1024
+    try:
+      self.execute_query_expect_success(self.client, create_query_sql)
+      # Cache the table data
+      self.execute_query_expect_success(self.client, "ALTER TABLE %s.cached_nation set "
+         "cached in 'testPool'" % unique_database)
+      # Wait till the whole path is cached. We set a deadline of 20 seconds for the path
+      # to be cached to make sure this doesn't loop forever in case of caching errors.
+      caching_deadline = time.time() + 20
+      while not is_path_fully_cached(encrypted_table_dir):
+        if time.time() > caching_deadline:
+          pytest.fail("Timed out caching path: " + encrypted_table_dir)
+        time.sleep(2)
+      self.execute_query_expect_success(self.client, "invalidate metadata "
+          "%s.cached_nation" % unique_database);
+      result = self.execute_query_expect_success(self.client, "select count(*) from "
+          "%s.cached_nation" % unique_database, exec_options)
+      assert(len(result.data) == 1)
+      assert(result.data[0] == '25')
+    except Exception as e:
+      pytest.fail("Failure in test_hdfs_caching_fallback_path: " + str(e))
+    finally:
+      check_call(["hdfs", "dfs", "-rm", "-r", "-f", "-skipTrash", encrypted_table_dir],\
+          shell=False)
+
+
 @SkipIfS3.caching
 @SkipIfIsilon.caching
 @SkipIfLocal.caching
@@ -98,9 +174,9 @@ class TestHdfsCachingDdl(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestHdfsCachingDdl, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(create_single_exec_option_dimension())
+    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
 
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('table_format').file_format == 'text' and \
         v.get_value('table_format').compression_codec == 'none')
 
@@ -113,7 +189,6 @@ class TestHdfsCachingDdl(ImpalaTestSuite):
 
   @pytest.mark.execute_serially
   def test_caching_ddl(self, vector):
-
     # Get the number of cache requests before starting the test
     num_entries_pre = get_num_cache_requests()
     self.run_test_case('QueryTest/hdfs-caching', vector)
@@ -128,7 +203,26 @@ class TestHdfsCachingDdl(ImpalaTestSuite):
     self.client.execute("drop table cachedb.cached_tbl_local")
 
     # Dropping the tables should cleanup cache entries leaving us with the same
-    # total number of entries
+    # total number of entries.
+    assert num_entries_pre == get_num_cache_requests()
+
+  @pytest.mark.execute_serially
+  def test_caching_ddl_drop_database(self, vector):
+    """IMPALA-2518: DROP DATABASE CASCADE should properly drop all impacted cache
+        directives"""
+    num_entries_pre = get_num_cache_requests()
+    # Populates the `cachedb` database with some cached tables and partitions
+    self.client.execute("use cachedb")
+    self.client.execute("create table cached_tbl_nopart (i int) cached in 'testPool'")
+    self.client.execute("insert into cached_tbl_nopart select 1")
+    self.client.execute("create table cached_tbl_part (i int) partitioned by (j int) \
+                         cached in 'testPool'")
+    self.client.execute("insert into cached_tbl_part (i,j) select 1, 2")
+    # We expect the number of cached entities to grow
+    assert num_entries_pre < get_num_cache_requests()
+    self.client.execute("use default")
+    self.client.execute("drop database cachedb cascade")
+    # We want to see the number of cached entities return to the original count
     assert num_entries_pre == get_num_cache_requests()
 
   @pytest.mark.execute_serially
@@ -180,6 +274,16 @@ def drop_cache_directives_for_path(path):
   assert rc == 0, \
       "Error removing cache directive for path %s (%s, %s)" % (path, stdout, stderr)
 
+def is_path_fully_cached(path):
+  """Returns true if all the bytes of the path are cached, false otherwise"""
+  rc, stdout, stderr = exec_process("hdfs cacheadmin -listDirectives -stats -path %s" % path)
+  assert rc == 0
+  caching_stats = stdout.strip("\n").split("\n")[-1].split()
+  # Compare BYTES_NEEDED and BYTES_CACHED, the output format is as follows
+  # "ID POOL REPL EXPIRY PATH BYTES_NEEDED BYTES_CACHED FILES_NEEDED FILES_CACHED"
+  return len(caching_stats) > 0 and caching_stats[5] == caching_stats[6]
+
+
 def get_cache_directive_for_path(path):
   rc, stdout, stderr = exec_process("hdfs cacheadmin -listDirectives -path %s" % path)
   assert rc == 0
@@ -195,7 +299,24 @@ def change_cache_directive_repl_for_path(path, repl):
       "Error modifying cache directive for path %s (%s, %s)" % (path, stdout, stderr)
 
 def get_num_cache_requests():
-  """Returns the number of outstanding cache requests"""
-  rc, stdout, stderr = exec_process("hdfs cacheadmin -listDirectives -stats")
-  assert rc == 0, 'Error executing hdfs cacheadmin: %s %s' % (stdout, stderr)
-  return len(stdout.split('\n'))
+  """Returns the number of outstanding cache requests. Due to race conditions in the
+    way cache requests are added/dropped/reported (see IMPALA-3040), this function tries
+    to return a stable result by making several attempts to stabilize it within a
+    reasonable timeout."""
+  def get_num_cache_requests_util():
+    rc, stdout, stderr = exec_process("hdfs cacheadmin -listDirectives -stats")
+    assert rc == 0, 'Error executing hdfs cacheadmin: %s %s' % (stdout, stderr)
+    return len(stdout.split('\n'))
+
+  wait_time_in_sec = 5
+  num_stabilization_attempts = 0
+  max_num_stabilization_attempts = 10
+  new_requests = None
+  num_requests = None
+  while num_stabilization_attempts < max_num_stabilization_attempts:
+    new_requests = get_num_cache_requests_util()
+    if new_requests == num_requests: break
+    num_requests = new_requests
+    num_stabilization_attempts = num_stabilization_attempts + 1
+    time.sleep(wait_time_in_sec)
+  return num_requests

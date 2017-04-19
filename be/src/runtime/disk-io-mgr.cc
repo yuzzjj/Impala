@@ -1,25 +1,34 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "runtime/disk-io-mgr.h"
 #include "runtime/disk-io-mgr-internal.h"
-#include "util/hdfs-util.h"
 
-#include <gutil/strings/substitute.h>
 #include <boost/algorithm/string.hpp>
 
+#include "gutil/bits.h"
+#include "gutil/strings/substitute.h"
+#include "util/hdfs-util.h"
+#include "util/time.h"
+
 DECLARE_bool(disable_mem_pools);
+#ifndef NDEBUG
+DECLARE_int32(stress_scratch_write_delay_ms);
+#endif
 
 #include "common/names.h"
 
@@ -73,6 +82,8 @@ static const int LOW_MEMORY = 64 * 1024 * 1024;
 
 const int DiskIoMgr::DEFAULT_QUEUE_CAPACITY = 2;
 
+AtomicInt32 DiskIoMgr::next_disk_id_;
+
 namespace detail {
 // Indicates if file handle caching should be used
 static inline bool is_file_handle_caching_enabled() {
@@ -102,33 +113,34 @@ DiskIoMgr::HdfsCachedFileHandle::~HdfsCachedFileHandle() {
   hdfs_file_ = NULL;
 }
 
-// This class provides a cache of RequestContext objects.  RequestContexts are recycled.
-// This is good for locality as well as lock contention.  The cache has the property that
-// regardless of how many clients get added/removed, the memory locations for
-// existing clients do not change (not the case with std::vector) minimizing the locks we
-// have to take across all readers.
+// This class provides a cache of DiskIoRequestContext objects.  DiskIoRequestContexts
+// are recycled. This is good for locality as well as lock contention.  The cache has
+// the property that regardless of how many clients get added/removed, the memory
+// locations for existing clients do not change (not the case with std::vector)
+// minimizing the locks we have to take across all readers.
 // All functions on this object are thread safe
 class DiskIoMgr::RequestContextCache {
  public:
   RequestContextCache(DiskIoMgr* io_mgr) : io_mgr_(io_mgr) {}
 
   // Returns a context to the cache.  This object can now be reused.
-  void ReturnContext(RequestContext* reader) {
-    DCHECK(reader->state_ != RequestContext::Inactive);
-    reader->state_ = RequestContext::Inactive;
+  void ReturnContext(DiskIoRequestContext* reader) {
+    DCHECK(reader->state_ != DiskIoRequestContext::Inactive);
+    reader->state_ = DiskIoRequestContext::Inactive;
     lock_guard<mutex> l(lock_);
     inactive_contexts_.push_back(reader);
   }
 
-  // Returns a new RequestContext object.  Allocates a new object if necessary.
-  RequestContext* GetNewContext() {
+  // Returns a new DiskIoRequestContext object.  Allocates a new object if necessary.
+  DiskIoRequestContext* GetNewContext() {
     lock_guard<mutex> l(lock_);
     if (!inactive_contexts_.empty()) {
-      RequestContext* reader = inactive_contexts_.front();
+      DiskIoRequestContext* reader = inactive_contexts_.front();
       inactive_contexts_.pop_front();
       return reader;
     } else {
-      RequestContext* reader = new RequestContext(io_mgr_, io_mgr_->num_total_disks());
+      DiskIoRequestContext* reader =
+          new DiskIoRequestContext(io_mgr_, io_mgr_->num_total_disks());
       all_contexts_.push_back(reader);
       return reader;
     }
@@ -136,7 +148,7 @@ class DiskIoMgr::RequestContextCache {
 
   // This object has the same lifetime as the disk IoMgr.
   ~RequestContextCache() {
-    for (list<RequestContext*>::iterator it = all_contexts_.begin();
+    for (list<DiskIoRequestContext*>::iterator it = all_contexts_.begin();
         it != all_contexts_.end(); ++it) {
       delete *it;
     }
@@ -145,9 +157,9 @@ class DiskIoMgr::RequestContextCache {
   // Validates that all readers are cleaned up and in the inactive state.  No locks
   // are taken since this is only called from the disk IoMgr destructor.
   bool ValidateAllInactive() {
-    for (list<RequestContext*>::iterator it = all_contexts_.begin();
+    for (list<DiskIoRequestContext*>::iterator it = all_contexts_.begin();
         it != all_contexts_.end(); ++it) {
-      if ((*it)->state_ != RequestContext::Inactive) {
+      if ((*it)->state_ != DiskIoRequestContext::Inactive) {
         return false;
       }
     }
@@ -164,16 +176,16 @@ class DiskIoMgr::RequestContextCache {
   mutex lock_;
 
   // List of all request contexts created.  Used for debugging
-  list<RequestContext*> all_contexts_;
+  list<DiskIoRequestContext*> all_contexts_;
 
   // List of inactive readers.  These objects can be used for a new reader.
-  list<RequestContext*> inactive_contexts_;
+  list<DiskIoRequestContext*> inactive_contexts_;
 };
 
 string DiskIoMgr::RequestContextCache::DebugString() {
   lock_guard<mutex> l(lock_);
   stringstream ss;
-  for (list<RequestContext*>::iterator it = all_contexts_.begin();
+  for (list<DiskIoRequestContext*>::iterator it = all_contexts_.begin();
       it != all_contexts_.end(); ++it) {
     unique_lock<mutex> lock((*it)->lock_);
     ss << (*it)->DebugString() << endl;
@@ -191,7 +203,7 @@ string DiskIoMgr::DebugString() {
     ss << "  " << (void*) disk_queues_[i] << ":" ;
     if (!disk_queues_[i]->request_contexts.empty()) {
       ss << " Readers: ";
-      BOOST_FOREACH(RequestContext* req_context, disk_queues_[i]->request_contexts) {
+      for (DiskIoRequestContext* req_context: disk_queues_[i]->request_contexts) {
         ss << (void*)req_context;
       }
     }
@@ -200,25 +212,52 @@ string DiskIoMgr::DebugString() {
   return ss.str();
 }
 
-DiskIoMgr::BufferDescriptor::BufferDescriptor(DiskIoMgr* io_mgr) :
-  io_mgr_(io_mgr), reader_(NULL), buffer_(NULL) {
+DiskIoMgr::BufferDescriptor::BufferDescriptor(DiskIoMgr* io_mgr) : io_mgr_(io_mgr) {
+  Reset();
 }
 
-void DiskIoMgr::BufferDescriptor::Reset(RequestContext* reader,
-      ScanRange* range, char* buffer, int64_t buffer_len) {
+void DiskIoMgr::BufferDescriptor::Reset() {
+  DCHECK(io_mgr_ != NULL);
+  reader_ = NULL;
+  scan_range_ = NULL;
+  mem_tracker_ = NULL;
+  buffer_ = NULL;
+  buffer_len_ = 0;
+  len_ = 0;
+  eosr_ = false;
+  status_ = Status::OK();
+  scan_range_offset_ = 0;
+}
+
+void DiskIoMgr::BufferDescriptor::Reset(DiskIoRequestContext* reader, ScanRange* range,
+    uint8_t* buffer, int64_t buffer_len, MemTracker* mem_tracker) {
   DCHECK(io_mgr_ != NULL);
   DCHECK(buffer_ == NULL);
   DCHECK(range != NULL);
   DCHECK(buffer != NULL);
   DCHECK_GE(buffer_len, 0);
+  DCHECK_NE(range->external_buffer_tag_ == ScanRange::ExternalBufferTag::NO_BUFFER,
+      mem_tracker == NULL);
   reader_ = reader;
   scan_range_ = range;
+  mem_tracker_ = mem_tracker;
   buffer_ = buffer;
   buffer_len_ = buffer_len;
   len_ = 0;
   eosr_ = false;
   status_ = Status::OK();
-  mem_tracker_ = NULL;
+  scan_range_offset_ = 0;
+}
+
+void DiskIoMgr::BufferDescriptor::TransferOwnership(MemTracker* dst) {
+  DCHECK(dst != NULL);
+  DCHECK(!is_client_buffer());
+  // Memory of cached buffers is not tracked against a tracker.
+  if (is_cached()) return;
+  DCHECK(mem_tracker_ != NULL);
+  dst->Consume(buffer_len_);
+  mem_tracker_->Release(buffer_len_);
+  mem_tracker_ = dst;
 }
 
 void DiskIoMgr::BufferDescriptor::Return() {
@@ -226,22 +265,17 @@ void DiskIoMgr::BufferDescriptor::Return() {
   io_mgr_->ReturnBuffer(this);
 }
 
-void DiskIoMgr::BufferDescriptor::SetMemTracker(MemTracker* tracker) {
-  // Cached buffers don't count towards mem usage.
-  if (scan_range_->cached_buffer_ != NULL) return;
-  if (mem_tracker_ == tracker) return;
-  if (mem_tracker_ != NULL) mem_tracker_->Release(buffer_len_);
-  mem_tracker_ = tracker;
-  if (mem_tracker_ != NULL) mem_tracker_->Consume(buffer_len_);
+DiskIoMgr::WriteRange::WriteRange(
+    const string& file, int64_t file_offset, int disk_id, WriteDoneCallback callback)
+  : RequestRange(RequestType::WRITE), callback_(callback) {
+  SetRange(file, file_offset, disk_id);
 }
 
-DiskIoMgr::WriteRange::WriteRange(const string& file, int64_t file_offset, int disk_id,
-    WriteDoneCallback callback) {
+void DiskIoMgr::WriteRange::SetRange(
+    const std::string& file, int64_t file_offset, int disk_id) {
   file_ = file;
   offset_ = file_offset;
   disk_id_ = disk_id;
-  callback_ = callback;
-  request_type_ = RequestType::WRITE;
 }
 
 void DiskIoMgr::WriteRange::SetData(const uint8_t* buffer, int64_t len) {
@@ -270,7 +304,7 @@ DiskIoMgr::DiskIoMgr() :
         FileSystemUtil::MaxNumFileHandles()),
         &HdfsCachedFileHandle::Release) {
   int64_t max_buffer_size_scaled = BitUtil::Ceil(max_buffer_size_, min_buffer_size_);
-  free_buffers_.resize(BitUtil::Log2(max_buffer_size_scaled) + 1);
+  free_buffers_.resize(Bits::Log2Ceiling64(max_buffer_size_scaled) + 1);
   int num_local_disks = FLAGS_num_disks == 0 ? DiskInfo::num_disks() : FLAGS_num_disks;
   disk_queues_.resize(num_local_disks + REMOTE_NUM_DISKS);
   CheckSseSupport();
@@ -288,7 +322,7 @@ DiskIoMgr::DiskIoMgr(int num_local_disks, int threads_per_disk, int min_buffer_s
     file_handle_cache_(min(FLAGS_max_cached_file_handles,
             FileSystemUtil::MaxNumFileHandles()), &HdfsCachedFileHandle::Release) {
   int64_t max_buffer_size_scaled = BitUtil::Ceil(max_buffer_size_, min_buffer_size_);
-  free_buffers_.resize(BitUtil::Log2(max_buffer_size_scaled) + 1);
+  free_buffers_.resize(Bits::Log2Ceiling64(max_buffer_size_scaled) + 1);
   if (num_local_disks == 0) num_local_disks = DiskInfo::num_disks();
   disk_queues_.resize(num_local_disks + REMOTE_NUM_DISKS);
   CheckSseSupport();
@@ -312,7 +346,7 @@ DiskIoMgr::~DiskIoMgr() {
   for (int i = 0; i < disk_queues_.size(); ++i) {
     if (disk_queues_[i] == NULL) continue;
     int disk_id = disk_queues_[i]->disk_id;
-    for (list<RequestContext*>::iterator it = disk_queues_[i]->request_contexts.begin();
+    for (list<DiskIoRequestContext*>::iterator it = disk_queues_[i]->request_contexts.begin();
         it != disk_queues_[i]->request_contexts.end(); ++it) {
       DCHECK_EQ((*it)->disk_states_[disk_id].num_threads_in_op(), 0);
       DCHECK((*it)->disk_states_[disk_id].done());
@@ -323,29 +357,29 @@ DiskIoMgr::~DiskIoMgr() {
   DCHECK(request_context_cache_.get() == NULL ||
       request_context_cache_->ValidateAllInactive())
       << endl << DebugString();
-  DCHECK_EQ(num_buffers_in_readers_, 0);
+  DCHECK_EQ(num_buffers_in_readers_.Load(), 0);
 
   // Delete all allocated buffers
   int num_free_buffers = 0;
   for (int idx = 0; idx < free_buffers_.size(); ++idx) {
     num_free_buffers += free_buffers_[idx].size();
   }
-  DCHECK_EQ(num_allocated_buffers_, num_free_buffers);
+  DCHECK_EQ(num_allocated_buffers_.Load(), num_free_buffers);
   GcIoBuffers();
 
   for (int i = 0; i < disk_queues_.size(); ++i) {
     delete disk_queues_[i];
   }
 
+  if (free_buffer_mem_tracker_ != NULL) free_buffer_mem_tracker_->UnregisterFromParent();
+
   if (cached_read_options_ != NULL) hadoopRzOptionsFree(cached_read_options_);
 }
 
 Status DiskIoMgr::Init(MemTracker* process_mem_tracker) {
   DCHECK(process_mem_tracker != NULL);
-  process_mem_tracker_ = process_mem_tracker;
-  // If we hit the process limit, see if we can reclaim some memory by removing
-  // previously allocated (but unused) io buffers.
-  process_mem_tracker->AddGcFunction(bind(&DiskIoMgr::GcIoBuffers, this));
+  free_buffer_mem_tracker_.reset(
+      new MemTracker(-1, "Free Disk IO Buffers", process_mem_tracker, false));
 
   for (int i = 0; i < disk_queues_.size(); ++i) {
     disk_queues_[i] = new DiskQueue(i);
@@ -382,22 +416,21 @@ Status DiskIoMgr::Init(MemTracker* process_mem_tracker) {
   return Status::OK();
 }
 
-Status DiskIoMgr::RegisterContext(RequestContext** request_context,
+void DiskIoMgr::RegisterContext(DiskIoRequestContext** request_context,
     MemTracker* mem_tracker) {
   DCHECK(request_context_cache_.get() != NULL) << "Must call Init() first.";
   *request_context = request_context_cache_->GetNewContext();
   (*request_context)->Reset(mem_tracker);
-  return Status::OK();
 }
 
-void DiskIoMgr::UnregisterContext(RequestContext* reader) {
+void DiskIoMgr::UnregisterContext(DiskIoRequestContext* reader) {
   // Blocking cancel (waiting for disks completion).
   CancelContext(reader, true);
 
   // All the disks are done with clean, validate nothing is leaking.
   unique_lock<mutex> reader_lock(reader->lock_);
-  DCHECK_EQ(reader->num_buffers_in_reader_, 0) << endl << reader->DebugString();
-  DCHECK_EQ(reader->num_used_buffers_, 0) << endl << reader->DebugString();
+  DCHECK_EQ(reader->num_buffers_in_reader_.Load(), 0) << endl << reader->DebugString();
+  DCHECK_EQ(reader->num_used_buffers_.Load(), 0) << endl << reader->DebugString();
 
   DCHECK(reader->Validate()) << endl << reader->DebugString();
   request_context_cache_->ReturnContext(reader);
@@ -423,7 +456,7 @@ void DiskIoMgr::UnregisterContext(RequestContext* reader) {
 // outstanding reference to the context decrements the number of disk queues the context
 // is on.
 // If wait_for_disks_completion is true, wait for the number of active disks to become 0.
-void DiskIoMgr::CancelContext(RequestContext* context, bool wait_for_disks_completion) {
+void DiskIoMgr::CancelContext(DiskIoRequestContext* context, bool wait_for_disks_completion) {
   context->Cancel(Status::CANCELLED);
 
   if (wait_for_disks_completion) {
@@ -435,55 +468,51 @@ void DiskIoMgr::CancelContext(RequestContext* context, bool wait_for_disks_compl
   }
 }
 
-void DiskIoMgr::set_read_timer(RequestContext* r, RuntimeProfile::Counter* c) {
+void DiskIoMgr::set_read_timer(DiskIoRequestContext* r, RuntimeProfile::Counter* c) {
   r->read_timer_ = c;
 }
 
-void DiskIoMgr::set_bytes_read_counter(RequestContext* r, RuntimeProfile::Counter* c) {
+void DiskIoMgr::set_bytes_read_counter(DiskIoRequestContext* r, RuntimeProfile::Counter* c) {
   r->bytes_read_counter_ = c;
 }
 
-void DiskIoMgr::set_active_read_thread_counter(RequestContext* r,
+void DiskIoMgr::set_active_read_thread_counter(DiskIoRequestContext* r,
     RuntimeProfile::Counter* c) {
   r->active_read_thread_counter_ = c;
 }
 
-void DiskIoMgr::set_disks_access_bitmap(RequestContext* r,
+void DiskIoMgr::set_disks_access_bitmap(DiskIoRequestContext* r,
     RuntimeProfile::Counter* c) {
   r->disks_accessed_bitmap_ = c;
 }
 
-int64_t DiskIoMgr::queue_size(RequestContext* reader) const {
-  return reader->num_ready_buffers_;
+int64_t DiskIoMgr::queue_size(DiskIoRequestContext* reader) const {
+  return reader->num_ready_buffers_.Load();
 }
 
-Status DiskIoMgr::context_status(RequestContext* context) const {
+Status DiskIoMgr::context_status(DiskIoRequestContext* context) const {
   unique_lock<mutex> lock(context->lock_);
   return context->status_;
 }
 
-int DiskIoMgr::num_unstarted_ranges(RequestContext* reader) const {
-  return reader->num_unstarted_scan_ranges_;
+int64_t DiskIoMgr::bytes_read_local(DiskIoRequestContext* reader) const {
+  return reader->bytes_read_local_.Load();
 }
 
-int64_t DiskIoMgr::bytes_read_local(RequestContext* reader) const {
-  return reader->bytes_read_local_;
+int64_t DiskIoMgr::bytes_read_short_circuit(DiskIoRequestContext* reader) const {
+  return reader->bytes_read_short_circuit_.Load();
 }
 
-int64_t DiskIoMgr::bytes_read_short_circuit(RequestContext* reader) const {
-  return reader->bytes_read_short_circuit_;
+int64_t DiskIoMgr::bytes_read_dn_cache(DiskIoRequestContext* reader) const {
+  return reader->bytes_read_dn_cache_.Load();
 }
 
-int64_t DiskIoMgr::bytes_read_dn_cache(RequestContext* reader) const {
-  return reader->bytes_read_dn_cache_;
+int DiskIoMgr::num_remote_ranges(DiskIoRequestContext* reader) const {
+  return reader->num_remote_ranges_.Load();
 }
 
-int DiskIoMgr::num_remote_ranges(RequestContext* reader) const {
-  return reader->num_remote_ranges_;
-}
-
-int64_t DiskIoMgr::unexpected_remote_bytes(RequestContext* reader) const {
-  return reader->unexpected_remote_bytes_;
+int64_t DiskIoMgr::unexpected_remote_bytes(DiskIoRequestContext* reader) const {
+  return reader->unexpected_remote_bytes_.Load();
 }
 
 int64_t DiskIoMgr::GetReadThroughput() {
@@ -493,15 +522,18 @@ int64_t DiskIoMgr::GetReadThroughput() {
 Status DiskIoMgr::ValidateScanRange(ScanRange* range) {
   int disk_id = range->disk_id_;
   if (disk_id < 0 || disk_id >= disk_queues_.size()) {
-    stringstream ss;
-    ss << "Invalid scan range.  Bad disk id: " << disk_id;
-    DCHECK(false) << ss.str();
-    return Status(ss.str());
+    return Status(Substitute("Invalid scan range.  Bad disk id: $0", disk_id));
+  }
+  if (range->offset_ < 0) {
+    return Status(Substitute("Invalid scan range. Negative offset $0", range->offset_));
+  }
+  if (range->len_ < 0) {
+    return Status(Substitute("Invalid scan range. Negative length $0", range->len_));
   }
   return Status::OK();
 }
 
-Status DiskIoMgr::AddScanRanges(RequestContext* reader,
+Status DiskIoMgr::AddScanRanges(DiskIoRequestContext* reader,
     const vector<ScanRange*>& ranges, bool schedule_immediately) {
   if (ranges.empty()) return Status::OK();
 
@@ -515,7 +547,7 @@ Status DiskIoMgr::AddScanRanges(RequestContext* reader,
   unique_lock<mutex> reader_lock(reader->lock_);
   DCHECK(reader->Validate()) << endl << reader->DebugString();
 
-  if (reader->state_ == RequestContext::Cancelled) {
+  if (reader->state_ == DiskIoRequestContext::Cancelled) {
     DCHECK(!reader->status_.ok());
     return reader->status_;
   }
@@ -544,10 +576,15 @@ Status DiskIoMgr::AddScanRanges(RequestContext* reader,
   return Status::OK();
 }
 
+Status DiskIoMgr::AddScanRange(
+    DiskIoRequestContext* reader, ScanRange* range, bool schedule_immediately) {
+  return AddScanRanges(reader, vector<ScanRange*>({range}), schedule_immediately);
+}
+
 // This function returns the next scan range the reader should work on, checking
 // for eos and error cases. If there isn't already a cached scan range or a scan
 // range prepared by the disk threads, the caller waits on the disk threads.
-Status DiskIoMgr::GetNextRange(RequestContext* reader, ScanRange** range) {
+Status DiskIoMgr::GetNextRange(DiskIoRequestContext* reader, ScanRange** range) {
   DCHECK(reader != NULL);
   DCHECK(range != NULL);
   *range = NULL;
@@ -557,13 +594,13 @@ Status DiskIoMgr::GetNextRange(RequestContext* reader, ScanRange** range) {
   DCHECK(reader->Validate()) << endl << reader->DebugString();
 
   while (true) {
-    if (reader->state_ == RequestContext::Cancelled) {
+    if (reader->state_ == DiskIoRequestContext::Cancelled) {
       DCHECK(!reader->status_.ok());
       status = reader->status_;
       break;
     }
 
-    if (reader->num_unstarted_scan_ranges_ == 0 &&
+    if (reader->num_unstarted_scan_ranges_.Load() == 0 &&
         reader->ready_to_start_ranges_.empty() && reader->cached_ranges_.empty()) {
       // All ranges are done, just return.
       break;
@@ -601,15 +638,17 @@ Status DiskIoMgr::GetNextRange(RequestContext* reader, ScanRange** range) {
   return status;
 }
 
-Status DiskIoMgr::Read(RequestContext* reader,
+Status DiskIoMgr::Read(DiskIoRequestContext* reader,
     ScanRange* range, BufferDescriptor** buffer) {
   DCHECK(range != NULL);
   DCHECK(buffer != NULL);
   *buffer = NULL;
 
-  if (range->len() > max_buffer_size_) {
-    return Status(Substitute("Cannot perform sync read larger than $0. Request was $1",
-                             max_buffer_size_, range->len()));
+  if (range->len() > max_buffer_size_
+      && range->external_buffer_tag_ != ScanRange::ExternalBufferTag::CLIENT_BUFFER) {
+    return Status(Substitute("Internal error: cannot perform sync read of '$0' bytes "
+                   "that is larger than the max read buffer size '$1'.",
+            range->len(), max_buffer_size_));
   }
 
   vector<DiskIoMgr::ScanRange*> ranges;
@@ -625,15 +664,14 @@ void DiskIoMgr::ReturnBuffer(BufferDescriptor* buffer_desc) {
   DCHECK(buffer_desc != NULL);
   if (!buffer_desc->status_.ok()) DCHECK(buffer_desc->buffer_ == NULL);
 
-  RequestContext* reader = buffer_desc->reader_;
+  DiskIoRequestContext* reader = buffer_desc->reader_;
   if (buffer_desc->buffer_ != NULL) {
-    if (buffer_desc->scan_range_->cached_buffer_ == NULL) {
-      // Not a cached buffer. Return the io buffer and update mem tracking.
-      ReturnFreeBuffer(buffer_desc);
+    if (!buffer_desc->is_cached() && !buffer_desc->is_client_buffer()) {
+      // Buffers the were not allocated by DiskIoMgr don't need to be freed.
+      FreeBufferMemory(buffer_desc);
     }
-    buffer_desc->buffer_ = NULL;
-    --num_buffers_in_readers_;
-    --reader->num_buffers_in_reader_;
+    num_buffers_in_readers_.Add(-1);
+    reader->num_buffers_in_reader_.Add(-1);
   } else {
     // A NULL buffer means there was an error in which case there is no buffer
     // to return.
@@ -650,14 +688,15 @@ void DiskIoMgr::ReturnBuffer(BufferDescriptor* buffer_desc) {
 
 void DiskIoMgr::ReturnBufferDesc(BufferDescriptor* desc) {
   DCHECK(desc != NULL);
+  desc->Reset();
   unique_lock<mutex> lock(free_buffers_lock_);
   DCHECK(find(free_buffer_descs_.begin(), free_buffer_descs_.end(), desc)
          == free_buffer_descs_.end());
   free_buffer_descs_.push_back(desc);
 }
 
-DiskIoMgr::BufferDescriptor* DiskIoMgr::GetBufferDesc(
-    RequestContext* reader, ScanRange* range, char* buffer, int64_t buffer_size) {
+DiskIoMgr::BufferDescriptor* DiskIoMgr::GetBufferDesc(DiskIoRequestContext* reader,
+    MemTracker* mem_tracker, ScanRange* range, uint8_t* buffer, int64_t buffer_size) {
   BufferDescriptor* buffer_desc;
   {
     unique_lock<mutex> lock(free_buffers_lock_);
@@ -668,61 +707,75 @@ DiskIoMgr::BufferDescriptor* DiskIoMgr::GetBufferDesc(
       free_buffer_descs_.pop_front();
     }
   }
-  buffer_desc->Reset(reader, range, buffer, buffer_size);
-  buffer_desc->SetMemTracker(reader->mem_tracker_);
+  buffer_desc->Reset(reader, range, buffer, buffer_size, mem_tracker);
   return buffer_desc;
 }
 
-char* DiskIoMgr::GetFreeBuffer(int64_t* buffer_size) {
-  DCHECK_LE(*buffer_size, max_buffer_size_);
-  DCHECK_GT(*buffer_size, 0);
-  *buffer_size = min(static_cast<int64_t>(max_buffer_size_), *buffer_size);
-  int idx = free_buffers_idx(*buffer_size);
+DiskIoMgr::BufferDescriptor* DiskIoMgr::GetFreeBuffer(DiskIoRequestContext* reader,
+    ScanRange* range, int64_t buffer_size) {
+  DCHECK_LE(buffer_size, max_buffer_size_);
+  DCHECK_GT(buffer_size, 0);
+  buffer_size = min(static_cast<int64_t>(max_buffer_size_), buffer_size);
+  int idx = free_buffers_idx(buffer_size);
   // Quantize buffer size to nearest power of 2 greater than the specified buffer size and
   // convert to bytes
-  *buffer_size = (1 << idx) * min_buffer_size_;
+  buffer_size = (1LL << idx) * min_buffer_size_;
 
-  unique_lock<mutex> lock(free_buffers_lock_);
-  char* buffer = NULL;
-  if (free_buffers_[idx].empty()) {
-    ++num_allocated_buffers_;
-    if (ImpaladMetrics::IO_MGR_NUM_BUFFERS != NULL) {
-      ImpaladMetrics::IO_MGR_NUM_BUFFERS->Increment(1L);
+  // Track memory against the reader. This is checked the next time we start
+  // a read for the next reader in DiskIoMgr::GetNextScanRange().
+  DCHECK(reader->mem_tracker_ != NULL);
+  reader->mem_tracker_->Consume(buffer_size);
+
+  uint8_t* buffer = NULL;
+  {
+    unique_lock<mutex> lock(free_buffers_lock_);
+    if (free_buffers_[idx].empty()) {
+      num_allocated_buffers_.Add(1);
+      if (ImpaladMetrics::IO_MGR_NUM_BUFFERS != NULL) {
+        ImpaladMetrics::IO_MGR_NUM_BUFFERS->Increment(1L);
+      }
+      if (ImpaladMetrics::IO_MGR_TOTAL_BYTES != NULL) {
+        ImpaladMetrics::IO_MGR_TOTAL_BYTES->Increment(buffer_size);
+      }
+      // We already tracked this memory against the reader's MemTracker.
+      buffer = new uint8_t[buffer_size];
+    } else {
+      if (ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS != NULL) {
+        ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS->Increment(-1L);
+      }
+      buffer = free_buffers_[idx].front();
+      free_buffers_[idx].pop_front();
+      free_buffer_mem_tracker_->Release(buffer_size);
     }
-    if (ImpaladMetrics::IO_MGR_TOTAL_BYTES != NULL) {
-      ImpaladMetrics::IO_MGR_TOTAL_BYTES->Increment(*buffer_size);
-    }
-    // Update the process mem usage.  This is checked the next time we start
-    // a read for the next reader (DiskIoMgr::GetNextScanRange)
-    process_mem_tracker_->Consume(*buffer_size);
-    buffer = new char[*buffer_size];
-  } else {
-    if (ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS != NULL) {
-      ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS->Increment(-1L);
-    }
-    buffer = free_buffers_[idx].front();
-    free_buffers_[idx].pop_front();
   }
+
+  // Validate more invariants.
+  DCHECK(range != NULL);
+  DCHECK(reader != NULL);
   DCHECK(buffer != NULL);
-  return buffer;
+  return GetBufferDesc(reader, reader->mem_tracker_, range, buffer, buffer_size);
 }
 
-void DiskIoMgr::GcIoBuffers() {
+void DiskIoMgr::GcIoBuffers(int64_t bytes_to_free) {
   unique_lock<mutex> lock(free_buffers_lock_);
   int buffers_freed = 0;
   int bytes_freed = 0;
+  // Free small-to-large to avoid retaining many small buffers and fragmenting memory.
   for (int idx = 0; idx < free_buffers_.size(); ++idx) {
-    for (list<char*>::iterator iter = free_buffers_[idx].begin();
-         iter != free_buffers_[idx].end(); ++iter) {
-      int64_t buffer_size = (1 << idx) * min_buffer_size_;
-      process_mem_tracker_->Release(buffer_size);
-      --num_allocated_buffers_;
-      delete[] *iter;
+    std::list<uint8_t*>* free_buffers = &free_buffers_[idx];
+    while (
+        !free_buffers->empty() && (bytes_to_free == -1 || bytes_freed <= bytes_to_free)) {
+      uint8_t* buffer = free_buffers->front();
+      free_buffers->pop_front();
+      int64_t buffer_size = (1LL << idx) * min_buffer_size_;
+      delete[] buffer;
+      free_buffer_mem_tracker_->Release(buffer_size);
+      num_allocated_buffers_.Add(-1);
 
       ++buffers_freed;
       bytes_freed += buffer_size;
     }
-    free_buffers_[idx].clear();
+    if (bytes_to_free != -1 && bytes_freed >= bytes_to_free) break;
   }
 
   if (ImpaladMetrics::IO_MGR_NUM_BUFFERS != NULL) {
@@ -732,39 +785,49 @@ void DiskIoMgr::GcIoBuffers() {
     ImpaladMetrics::IO_MGR_TOTAL_BYTES->Increment(-bytes_freed);
   }
   if (ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS != NULL) {
-    ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS->set_value(0);
+    ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS->Increment(-buffers_freed);
   }
 }
 
-void DiskIoMgr::ReturnFreeBuffer(BufferDescriptor* desc) {
-  ReturnFreeBuffer(desc->buffer_, desc->buffer_len_);
-  desc->SetMemTracker(NULL);
-  desc->buffer_ = NULL;
-}
-
-void DiskIoMgr::ReturnFreeBuffer(char* buffer, int64_t buffer_size) {
-  DCHECK(buffer != NULL);
+void DiskIoMgr::FreeBufferMemory(BufferDescriptor* desc) {
+  DCHECK(!desc->is_cached());
+  DCHECK(!desc->is_client_buffer());
+  uint8_t* buffer = desc->buffer_;
+  int64_t buffer_size = desc->buffer_len_;
   int idx = free_buffers_idx(buffer_size);
-  DCHECK_EQ(BitUtil::Ceil(buffer_size, min_buffer_size_) & ~(1 << idx), 0)
+  DCHECK_EQ(BitUtil::Ceil(buffer_size, min_buffer_size_) & ~(1LL << idx), 0)
       << "buffer_size_ / min_buffer_size_ should be power of 2, got buffer_size = "
       << buffer_size << ", min_buffer_size_ = " << min_buffer_size_;
-  unique_lock<mutex> lock(free_buffers_lock_);
-  if (!FLAGS_disable_mem_pools && free_buffers_[idx].size() < FLAGS_max_free_io_buffers) {
-    free_buffers_[idx].push_back(buffer);
-    if (ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS != NULL) {
-      ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS->Increment(1L);
-    }
-  } else {
-    process_mem_tracker_->Release(buffer_size);
-    --num_allocated_buffers_;
-    delete[] buffer;
-    if (ImpaladMetrics::IO_MGR_NUM_BUFFERS != NULL) {
-      ImpaladMetrics::IO_MGR_NUM_BUFFERS->Increment(-1L);
-    }
-    if (ImpaladMetrics::IO_MGR_TOTAL_BYTES != NULL) {
-      ImpaladMetrics::IO_MGR_TOTAL_BYTES->Increment(-buffer_size);
+
+  {
+    unique_lock<mutex> lock(free_buffers_lock_);
+    if (!FLAGS_disable_mem_pools &&
+        free_buffers_[idx].size() < FLAGS_max_free_io_buffers) {
+      free_buffers_[idx].push_back(buffer);
+      if (ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS != NULL) {
+        ImpaladMetrics::IO_MGR_NUM_UNUSED_BUFFERS->Increment(1L);
+      }
+      // This consume call needs to be protected by 'free_buffers_lock_' to avoid a race
+      // with a Release() call for the same buffer that could make consumption negative.
+      // Note: we can't use TryConsume(), which can indirectly call GcIoBuffers().
+      // TODO: after IMPALA-3200 is completed, we should be able to leverage the buffer
+      // pool's free lists, and remove these free lists.
+      free_buffer_mem_tracker_->Consume(buffer_size);
+    } else {
+      num_allocated_buffers_.Add(-1);
+      delete[] buffer;
+      if (ImpaladMetrics::IO_MGR_NUM_BUFFERS != NULL) {
+        ImpaladMetrics::IO_MGR_NUM_BUFFERS->Increment(-1L);
+      }
+      if (ImpaladMetrics::IO_MGR_TOTAL_BYTES != NULL) {
+        ImpaladMetrics::IO_MGR_TOTAL_BYTES->Increment(-buffer_size);
+      }
     }
   }
+
+  // We transferred the buffer ownership from the BufferDescriptor to the DiskIoMgr.
+  desc->mem_tracker_->Release(buffer_size);
+  desc->buffer_ = NULL;
 }
 
 // This function gets the next RequestRange to work on for this disk. It checks for
@@ -773,18 +836,18 @@ void DiskIoMgr::ReturnFreeBuffer(char* buffer, int64_t buffer_size) {
 // b) Adds an unstarted write range to in_flight_ranges_. The write range is processed
 //    immediately if there are no preceding scan ranges in in_flight_ranges_
 // It blocks until work is available or the thread is shut down.
-// Work is available if there is a RequestContext with
+// Work is available if there is a DiskIoRequestContext with
 //  - A ScanRange with a buffer available, or
 //  - A WriteRange in unstarted_write_ranges_.
 bool DiskIoMgr::GetNextRequestRange(DiskQueue* disk_queue, RequestRange** range,
-    RequestContext** request_context) {
+    DiskIoRequestContext** request_context) {
   int disk_id = disk_queue->disk_id;
   *range = NULL;
 
   // This loops returns either with work to do or when the disk IoMgr shuts down.
   while (true) {
     *request_context = NULL;
-    RequestContext::PerDiskState* request_disk_state = NULL;
+    DiskIoRequestContext::PerDiskState* request_disk_state = NULL;
     {
       unique_lock<mutex> disk_lock(disk_queue->lock);
 
@@ -813,14 +876,16 @@ bool DiskIoMgr::GetNextRequestRange(DiskQueue* disk_queue, RequestRange** range,
     // same reader here (the reader is removed from the queue).  There can be
     // other disk threads operating on this reader in other functions though.
 
-    // We just picked a reader, check the mem limits.
-    // TODO: we can do a lot better here.  The reader can likely make progress
-    // with fewer io buffers.
-    bool process_limit_exceeded = process_mem_tracker_->LimitExceeded();
-    bool reader_limit_exceeded = (*request_context)->mem_tracker_ != NULL
-        ? (*request_context)->mem_tracker_->AnyLimitExceeded() : false;
-
-    if (process_limit_exceeded || reader_limit_exceeded) {
+    // We just picked a reader. Before we may allocate a buffer on its behalf, check that
+    // it has not exceeded any memory limits (e.g. the query or process limit).
+    // TODO: once IMPALA-3200 is fixed, we should be able to remove the free lists and
+    // move these memory limit checks to GetFreeBuffer().
+    // Note that calling AnyLimitExceeded() can result in a call to GcIoBuffers().
+    // TODO: IMPALA-3209: we should not force a reader over its memory limit by
+    // pushing more buffers to it. Most readers can make progress and operate within
+    // a fixed memory limit.
+    if ((*request_context)->mem_tracker_ != NULL
+        && (*request_context)->mem_tracker_->AnyLimitExceeded()) {
       (*request_context)->Cancel(Status::MemLimitExceeded());
     }
 
@@ -829,12 +894,12 @@ bool DiskIoMgr::GetNextRequestRange(DiskQueue* disk_queue, RequestRange** range,
         << (*request_context)->DebugString();
 
     // Check if reader has been cancelled
-    if ((*request_context)->state_ == RequestContext::Cancelled) {
+    if ((*request_context)->state_ == DiskIoRequestContext::Cancelled) {
       request_disk_state->DecrementRequestThreadAndCheckDone(*request_context);
       continue;
     }
 
-    DCHECK_EQ((*request_context)->state_, RequestContext::Active)
+    DCHECK_EQ((*request_context)->state_, DiskIoRequestContext::Active)
         << (*request_context)->DebugString();
 
     if (request_disk_state->next_scan_range_to_start() == NULL &&
@@ -843,11 +908,11 @@ bool DiskIoMgr::GetNextRequestRange(DiskQueue* disk_queue, RequestRange** range,
       // read next. Populate that.  We want to have one range waiting to minimize
       // wait time in GetNextRange.
       ScanRange* new_range = request_disk_state->unstarted_scan_ranges()->Dequeue();
-      --(*request_context)->num_unstarted_scan_ranges_;
+      (*request_context)->num_unstarted_scan_ranges_.Add(-1);
       (*request_context)->ready_to_start_ranges_.Enqueue(new_range);
       request_disk_state->set_next_scan_range_to_start(new_range);
 
-      if ((*request_context)->num_unstarted_scan_ranges_ == 0) {
+      if ((*request_context)->num_unstarted_scan_ranges_.Load() == 0) {
         // All the ranges have been started, notify everyone blocked on GetNextRange.
         // Only one of them will get work so make sure to return NULL to the other
         // caller threads.
@@ -891,8 +956,11 @@ bool DiskIoMgr::GetNextRequestRange(DiskQueue* disk_queue, RequestRange** range,
   return false;
 }
 
-void DiskIoMgr::HandleWriteFinished(RequestContext* writer, WriteRange* write_range,
-    const Status& write_status) {
+void DiskIoMgr::HandleWriteFinished(
+    DiskIoRequestContext* writer, WriteRange* write_range, const Status& write_status) {
+  // Copy disk_id before running callback: the callback may modify write_range.
+  int disk_id = write_range->disk_id_;
+
   // Execute the callback before decrementing the thread count. Otherwise CancelContext()
   // that waits for the disk ref count to be 0 will return, creating a race, e.g.
   // between BufferedBlockMgr::WriteComplete() and BufferedBlockMgr::~BufferedBlockMgr().
@@ -902,8 +970,8 @@ void DiskIoMgr::HandleWriteFinished(RequestContext* writer, WriteRange* write_ra
   {
     unique_lock<mutex> writer_lock(writer->lock_);
     DCHECK(writer->Validate()) << endl << writer->DebugString();
-    RequestContext::PerDiskState& state = writer->disk_states_[write_range->disk_id_];
-    if (writer->state_ == RequestContext::Cancelled) {
+    DiskIoRequestContext::PerDiskState& state = writer->disk_states_[disk_id];
+    if (writer->state_ == DiskIoRequestContext::Cancelled) {
       state.DecrementRequestThreadAndCheckDone(writer);
     } else {
       state.DecrementRequestThread();
@@ -912,19 +980,19 @@ void DiskIoMgr::HandleWriteFinished(RequestContext* writer, WriteRange* write_ra
   }
 }
 
-void DiskIoMgr::HandleReadFinished(DiskQueue* disk_queue, RequestContext* reader,
+void DiskIoMgr::HandleReadFinished(DiskQueue* disk_queue, DiskIoRequestContext* reader,
     BufferDescriptor* buffer) {
   unique_lock<mutex> reader_lock(reader->lock_);
 
-  RequestContext::PerDiskState& state = reader->disk_states_[disk_queue->disk_id];
+  DiskIoRequestContext::PerDiskState& state = reader->disk_states_[disk_queue->disk_id];
   DCHECK(reader->Validate()) << endl << reader->DebugString();
   DCHECK_GT(state.num_threads_in_op(), 0);
   DCHECK(buffer->buffer_ != NULL);
 
-  if (reader->state_ == RequestContext::Cancelled) {
+  if (reader->state_ == DiskIoRequestContext::Cancelled) {
     state.DecrementRequestThreadAndCheckDone(reader);
     DCHECK(reader->Validate()) << endl << reader->DebugString();
-    ReturnFreeBuffer(buffer);
+    if (!buffer->is_client_buffer()) FreeBufferMemory(buffer);
     buffer->buffer_ = NULL;
     buffer->scan_range_->Cancel(reader->status_);
     // Enqueue the buffer to use the scan range's buffer cleanup path.
@@ -932,7 +1000,7 @@ void DiskIoMgr::HandleReadFinished(DiskQueue* disk_queue, RequestContext* reader
     return;
   }
 
-  DCHECK_EQ(reader->state_, RequestContext::Active);
+  DCHECK_EQ(reader->state_, DiskIoRequestContext::Active);
   DCHECK(buffer->buffer_ != NULL);
 
   // Update the reader's scan ranges.  There are a three cases here:
@@ -941,7 +1009,8 @@ void DiskIoMgr::HandleReadFinished(DiskQueue* disk_queue, RequestContext* reader
   //  3. Middle of scan range
   if (!buffer->status_.ok()) {
     // Error case
-    ReturnFreeBuffer(buffer);
+    if (!buffer->is_client_buffer()) FreeBufferMemory(buffer);
+    buffer->buffer_ = NULL;
     buffer->eosr_ = true;
     --state.num_remaining_ranges();
     buffer->scan_range_->Cancel(buffer->status_);
@@ -953,11 +1022,12 @@ void DiskIoMgr::HandleReadFinished(DiskQueue* disk_queue, RequestContext* reader
   // Store the state we need before calling EnqueueBuffer().
   bool eosr = buffer->eosr_;
   ScanRange* scan_range = buffer->scan_range_;
-  bool queue_full = buffer->scan_range_->EnqueueBuffer(buffer);
+  bool is_cached = buffer->is_cached();
+  bool queue_full = scan_range->EnqueueBuffer(buffer);
   if (eosr) {
     // For cached buffers, we can't close the range until the cached buffer is returned.
     // Close() is called from DiskIoMgr::ReturnBuffer().
-    if (scan_range->cached_buffer_ == NULL) scan_range->Close();
+    if (!is_cached) scan_range->Close();
   } else {
     if (queue_full) {
       reader->blocked_ranges_.Enqueue(scan_range);
@@ -981,7 +1051,7 @@ void DiskIoMgr::WorkLoop(DiskQueue* disk_queue) {
   //   3. Perform the read or write as specified.
   // Cancellation checking needs to happen in both steps 1 and 3.
   while (true) {
-    RequestContext* worker_context = NULL;;
+    DiskIoRequestContext* worker_context = NULL;;
     RequestRange* range = NULL;
 
     if (!GetNextRequestRange(disk_queue, &range, &worker_context)) {
@@ -1002,60 +1072,21 @@ void DiskIoMgr::WorkLoop(DiskQueue* disk_queue) {
 
 // This function reads the specified scan range associated with the
 // specified reader context and disk queue.
-void DiskIoMgr::ReadRange(DiskQueue* disk_queue, RequestContext* reader,
+void DiskIoMgr::ReadRange(DiskQueue* disk_queue, DiskIoRequestContext* reader,
     ScanRange* range) {
-  char* buffer = NULL;
   int64_t bytes_remaining = range->len_ - range->bytes_read_;
   DCHECK_GT(bytes_remaining, 0);
-  int64_t buffer_size = ::min(bytes_remaining, static_cast<int64_t>(max_buffer_size_));
-  bool enough_memory = true;
-  if (reader->mem_tracker_ != NULL) {
-    enough_memory = reader->mem_tracker_->SpareCapacity() > LOW_MEMORY;
-    if (!enough_memory) {
-      // Low memory, GC and try again.
-      GcIoBuffers();
-      enough_memory = reader->mem_tracker_->SpareCapacity() > LOW_MEMORY;
-    }
+  BufferDescriptor* buffer_desc = NULL;
+  if (range->external_buffer_tag_ == ScanRange::ExternalBufferTag::CLIENT_BUFFER) {
+    buffer_desc = GetBufferDesc(
+        reader, NULL, range, range->client_buffer_.data, range->client_buffer_.len);
+  } else {
+    // Need to allocate a buffer to read into.
+    int64_t buffer_size = ::min(bytes_remaining, static_cast<int64_t>(max_buffer_size_));
+    buffer_desc = TryAllocateNextBufferForRange(disk_queue, reader, range, buffer_size);
+    if (buffer_desc == NULL) return;
   }
-
-  if (!enough_memory) {
-    RequestContext::PerDiskState& state = reader->disk_states_[disk_queue->disk_id];
-    unique_lock<mutex> reader_lock(reader->lock_);
-
-    // Just grabbed the reader lock, check for cancellation.
-    if (reader->state_ == RequestContext::Cancelled) {
-      DCHECK(reader->Validate()) << endl << reader->DebugString();
-      state.DecrementRequestThreadAndCheckDone(reader);
-      range->Cancel(reader->status_);
-      DCHECK(reader->Validate()) << endl << reader->DebugString();
-      return;
-    }
-
-    if (!range->ready_buffers_.empty()) {
-      // We have memory pressure and this range doesn't need another buffer
-      // (it already has one queued). Skip this range and pick it up later.
-      range->blocked_on_queue_ = true;
-      reader->blocked_ranges_.Enqueue(range);
-      state.DecrementRequestThread();
-      return;
-    } else {
-      // We need to get a buffer anyway since there are none queued. The query
-      // is likely to fail due to mem limits but there's nothing we can do about that
-      // now.
-    }
-  }
-
-  buffer = GetFreeBuffer(&buffer_size);
-  ++reader->num_used_buffers_;
-
-  // Validate more invariants.
-  DCHECK_GT(reader->num_used_buffers_, 0);
-  DCHECK(range != NULL);
-  DCHECK(reader != NULL);
-  DCHECK(buffer != NULL);
-
-  BufferDescriptor* buffer_desc = GetBufferDesc(reader, range, buffer, buffer_size);
-  DCHECK(buffer_desc != NULL);
+  reader->num_used_buffers_.Add(1);
 
   // No locks in this section.  Only working on local vars.  We don't want to hold a
   // lock across the read call.
@@ -1066,13 +1097,14 @@ void DiskIoMgr::ReadRange(DiskQueue* disk_queue, RequestContext* reader,
       reader->active_read_thread_counter_->Add(1L);
     }
     if (reader->disks_accessed_bitmap_) {
-      int64_t disk_bit = 1 << disk_queue->disk_id;
+      int64_t disk_bit = 1LL << disk_queue->disk_id;
       reader->disks_accessed_bitmap_->BitOr(disk_bit);
     }
     SCOPED_TIMER(&read_timer_);
     SCOPED_TIMER(reader->read_timer_);
 
-    buffer_desc->status_ = range->Read(buffer, &buffer_desc->len_, &buffer_desc->eosr_);
+    buffer_desc->status_ = range->Read(buffer_desc->buffer_, buffer_desc->buffer_len_,
+        &buffer_desc->len_, &buffer_desc->eosr_);
     buffer_desc->scan_range_offset_ = range->bytes_read_ - buffer_desc->len_;
 
     if (reader->bytes_read_counter_ != NULL) {
@@ -1089,14 +1121,67 @@ void DiskIoMgr::ReadRange(DiskQueue* disk_queue, RequestContext* reader,
   HandleReadFinished(disk_queue, reader, buffer_desc);
 }
 
-void DiskIoMgr::Write(RequestContext* writer_context, WriteRange* write_range) {
-  FILE* file_handle = fopen(write_range->file(), "rb+");
-  Status ret_status;
-  if (file_handle == NULL) {
+DiskIoMgr::BufferDescriptor* DiskIoMgr::TryAllocateNextBufferForRange(
+    DiskQueue* disk_queue, DiskIoRequestContext* reader, ScanRange* range,
+    int64_t buffer_size) {
+  DCHECK(reader->mem_tracker_ != NULL);
+  bool enough_memory = reader->mem_tracker_->SpareCapacity() > LOW_MEMORY;
+  if (!enough_memory) {
+    // Low memory, GC all the buffers and try again.
+    GcIoBuffers();
+    enough_memory = reader->mem_tracker_->SpareCapacity() > LOW_MEMORY;
+  }
+
+  if (!enough_memory) {
+    DiskIoRequestContext::PerDiskState& state = reader->disk_states_[disk_queue->disk_id];
+    unique_lock<mutex> reader_lock(reader->lock_);
+
+    // Just grabbed the reader lock, check for cancellation.
+    if (reader->state_ == DiskIoRequestContext::Cancelled) {
+      DCHECK(reader->Validate()) << endl << reader->DebugString();
+      state.DecrementRequestThreadAndCheckDone(reader);
+      range->Cancel(reader->status_);
+      DCHECK(reader->Validate()) << endl << reader->DebugString();
+      return NULL;
+    }
+
+    if (!range->ready_buffers_.empty()) {
+      // We have memory pressure and this range doesn't need another buffer
+      // (it already has one queued). Skip this range and pick it up later.
+      range->blocked_on_queue_ = true;
+      reader->blocked_ranges_.Enqueue(range);
+      state.DecrementRequestThread();
+      return NULL;
+    } else {
+      // We need to get a buffer anyway since there are none queued. The query
+      // is likely to fail due to mem limits but there's nothing we can do about that
+      // now.
+    }
+  }
+  BufferDescriptor* buffer_desc = GetFreeBuffer(reader, range, buffer_size);
+  DCHECK(buffer_desc != NULL);
+  return buffer_desc;
+}
+
+void DiskIoMgr::Write(DiskIoRequestContext* writer_context, WriteRange* write_range) {
+  Status ret_status = Status::OK();
+  FILE* file_handle = NULL;
+  // Raw open() syscall will create file if not present when passed these flags.
+  int fd = open(write_range->file(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+  if (fd < 0) {
     ret_status = Status(ErrorMsg(TErrorCode::RUNTIME_ERROR,
-        Substitute("fopen($0, \"rb+\") failed with errno=$1 description=$2",
-            write_range->file_, errno, GetStrErrMsg())));
+        Substitute("Opening '$0' for write failed with errno=$1 description=$2",
+                                     write_range->file_, errno, GetStrErrMsg())));
   } else {
+    file_handle = fdopen(fd, "wb");
+    if (file_handle == NULL) {
+      ret_status = Status(ErrorMsg(TErrorCode::RUNTIME_ERROR,
+          Substitute("fdopen($0, \"wb\") failed with errno=$1 description=$2", fd, errno,
+                                       GetStrErrMsg())));
+    }
+  }
+
+  if (file_handle != NULL) {
     ret_status = WriteRangeHelper(file_handle, write_range);
 
     int success = fclose(file_handle);
@@ -1118,6 +1203,11 @@ Status DiskIoMgr::WriteRangeHelper(FILE* file_handle, WriteRange* write_range) {
         write_range->file_, write_range->offset(), errno, GetStrErrMsg())));
   }
 
+#ifndef NDEBUG
+  if (FLAGS_stress_scratch_write_delay_ms > 0) {
+    SleepForMs(FLAGS_stress_scratch_write_delay_ms);
+  }
+#endif
   int64_t bytes_written = fwrite(write_range->data_, 1, write_range->len_, file_handle);
   if (bytes_written < write_range->len_) {
     return Status(ErrorMsg(TErrorCode::RUNTIME_ERROR,
@@ -1133,17 +1223,16 @@ Status DiskIoMgr::WriteRangeHelper(FILE* file_handle, WriteRange* write_range) {
 
 int DiskIoMgr::free_buffers_idx(int64_t buffer_size) {
   int64_t buffer_size_scaled = BitUtil::Ceil(buffer_size, min_buffer_size_);
-  int idx = BitUtil::Log2(buffer_size_scaled);
+  int idx = Bits::Log2Ceiling64(buffer_size_scaled);
   DCHECK_GE(idx, 0);
   DCHECK_LT(idx, free_buffers_.size());
   return idx;
 }
 
-Status DiskIoMgr::AddWriteRange(RequestContext* writer, WriteRange* write_range) {
-  DCHECK_LE(write_range->len(), max_buffer_size_);
+Status DiskIoMgr::AddWriteRange(DiskIoRequestContext* writer, WriteRange* write_range) {
   unique_lock<mutex> writer_lock(writer->lock_);
 
-  if (writer->state_ == RequestContext::Cancelled) {
+  if (writer->state_ == DiskIoRequestContext::Cancelled) {
     DCHECK(!writer->status_.ok());
     return writer->status_;
   }
@@ -1155,15 +1244,16 @@ Status DiskIoMgr::AddWriteRange(RequestContext* writer, WriteRange* write_range)
 int DiskIoMgr::AssignQueue(const char* file, int disk_id, bool expected_local) {
   // If it's a remote range, check for an appropriate remote disk queue.
   if (!expected_local) {
-    if (IsDfsPath(file) && FLAGS_num_remote_hdfs_io_threads > 0) return RemoteDfsDiskId();
+    if (IsHdfsPath(file) && FLAGS_num_remote_hdfs_io_threads > 0) {
+      return RemoteDfsDiskId();
+    }
     if (IsS3APath(file)) return RemoteS3DiskId();
   }
   // Assign to a local disk queue.
   DCHECK(!IsS3APath(file)); // S3 is always remote.
   if (disk_id == -1) {
-    // disk id is unknown, assign it a random one.
-    static int next_disk_id = 0;
-    disk_id = next_disk_id++;
+    // disk id is unknown, assign it an arbitrary one.
+    disk_id = next_disk_id_.Add(1);
   }
   // TODO: we need to parse the config for the number of dirs configured for this
   // data node.

@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_UTIL_THREAD_H
 #define IMPALA_UTIL_THREAD_H
@@ -28,7 +31,6 @@ namespace impala {
 
 class MetricGroup;
 class Webserver;
-class CgroupsMgr;
 
 /// Thin wrapper around boost::thread that can register itself with the singleton
 /// ThreadMgr (a private class implemented in thread.cc entirely, which tracks all live
@@ -101,6 +103,11 @@ class Thread {
   /// will be unregistered with the ThreadMgr and will not appear in the debug UI.
   void Join() const { thread_->join(); }
 
+  /// Detaches the underlying thread from this Thread object. It's illegal to call
+  /// Join() after calling Detach(). When the underlying thread finishes execution,
+  /// it unregisters itself from the ThreadMgr.
+  void Detach() const { thread_->detach(); }
+
   /// The thread ID assigned to this thread by the operating system. If the OS does not
   /// support retrieving the tid, returns Thread::INVALID_THREAD_ID.
   int64_t tid() const { return tid_; }
@@ -162,47 +169,29 @@ class ThreadGroup {
  public:
   ThreadGroup() {}
 
-  ThreadGroup(CgroupsMgr* cgroups_mgr, const std::string& cgroup)
-        : cgroups_mgr_(cgroups_mgr), cgroup_path_(cgroup) { }
-
   /// Adds a new Thread to this group. The ThreadGroup takes ownership of the Thread, and
   /// will destroy it when the ThreadGroup is destroyed.  Threads will linger until that
   /// point (even if terminated), however, so callers should be mindful of the cost of
   /// placing very many threads in this set.
-  /// If cgroup_path_ / cgroup_prefix_ are set, the thread will be added to the specified
-  /// cgroup and an error will be returned if that operation fails.
   Status AddThread(Thread* thread);
 
   /// Waits for all threads to finish. DO NOT call this from a thread inside this set;
   /// deadlock will predictably ensue.
   void JoinAll();
 
-  /// Assigns all current and future threads to the given cgroup managed by cgroups_mgr_.
-  /// Must be called after SetCgroupsMgr() if groups_mgr_ has not been set already.
-  /// Returns an error if any assignment was not possible, but does not undo previously
-  /// successful assignments.
-  Status SetCgroup(const std::string& cgroup);
-
-  void SetCgroupsMgr(CgroupsMgr* cgroups_mgr) { cgroups_mgr_ = cgroups_mgr; }
-
  private:
   /// All the threads grouped by this set.
   boost::ptr_vector<Thread> threads_;
-
-  /// Cgroups manager for assigning threads in this group to cgroups. Not owned.
-  CgroupsMgr* cgroups_mgr_;
-
-  /// If not empty, every thread added to this group will also be placed in the
-  /// cgroup_path_ managed by the cgroups_mgr_.
-  std::string cgroup_path_;
 };
 
 /// Initialises the threading subsystem. Must be called before a Thread is created.
 void InitThreading();
 
 /// Registers /threadz with the debug webserver, and creates thread-tracking metrics under
-/// the "thread-manager." prefix
-Status StartThreadInstrumentation(MetricGroup* metrics, Webserver* webserver);
+/// the "thread-manager." If 'include_jvm_threads' is true, shows information about
+/// live JVM threads in the web UI.
+Status StartThreadInstrumentation(MetricGroup* metrics, Webserver* webserver,
+    bool include_jvm_threads);
 }
 
 #endif

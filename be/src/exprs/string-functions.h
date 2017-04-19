@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXPRS_STRING_FUNCTIONS_H
@@ -50,6 +53,10 @@ class StringFunctions {
   static StringVal Lower(FunctionContext*, const StringVal& str);
   static StringVal Upper(FunctionContext*, const StringVal& str);
   static StringVal InitCap(FunctionContext*, const StringVal& str);
+  static void ReplacePrepare(FunctionContext*, FunctionContext::FunctionStateScope);
+  static void ReplaceClose(FunctionContext*, FunctionContext::FunctionStateScope);
+  static StringVal Replace(FunctionContext*, const StringVal& str,
+      const StringVal& pattern, const StringVal& replace);
   static StringVal Reverse(FunctionContext*, const StringVal& str);
   static StringVal Translate(FunctionContext*, const StringVal& str, const StringVal& src,
       const StringVal& dst);
@@ -57,7 +64,12 @@ class StringFunctions {
   static StringVal Ltrim(FunctionContext*, const StringVal& str);
   static StringVal Rtrim(FunctionContext*, const StringVal& str);
   static IntVal Ascii(FunctionContext*, const StringVal& str);
+  static IntVal Instr(FunctionContext*, const StringVal& str, const StringVal& substr,
+      const BigIntVal& start_position, const BigIntVal& occurrence);
+  static IntVal Instr(FunctionContext*, const StringVal& str, const StringVal& substr,
+      const BigIntVal& start_position);
   static IntVal Instr(FunctionContext*, const StringVal& str, const StringVal& substr);
+
   static IntVal Locate(FunctionContext*, const StringVal& substr, const StringVal& str);
   static IntVal LocatePos(FunctionContext*, const StringVal& substr, const StringVal& str,
       const BigIntVal& start_pos);
@@ -100,6 +112,9 @@ class StringFunctions {
   /// both ends of string 'str'.
   static StringVal BTrimString(FunctionContext* ctx, const StringVal& str,
     const StringVal& chars_to_trim);
+
+  static StringVal Base64Encode(FunctionContext* ctx, const StringVal& str);
+  static StringVal Base64Decode(FunctionContext* ctx, const StringVal& str);
 };
 }
 #endif

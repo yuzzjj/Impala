@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 // This file contains implementations for the JNI FeSupport interface.
 
@@ -23,41 +26,46 @@
 #include "common/logging.h"
 #include "common/status.h"
 #include "exec/catalog-op-executor.h"
-#include "exprs/expr.h"
 #include "exprs/expr-context.h"
+#include "exprs/expr.h"
+#include "gen-cpp/Data_types.h"
+#include "gen-cpp/Frontend_types.h"
+#include "rpc/jni-thrift-util.h"
+#include "rpc/thrift-server.h"
+#include "runtime/client-cache.h"
 #include "runtime/exec-env.h"
-#include "runtime/runtime-state.h"
 #include "runtime/hdfs-fs-cache.h"
 #include "runtime/lib-cache.h"
-#include "runtime/client-cache.h"
+#include "runtime/runtime-state.h"
 #include "service/impala-server.h"
 #include "util/cpu-info.h"
+#include "util/debug-util.h"
 #include "util/disk-info.h"
 #include "util/dynamic-util.h"
 #include "util/jni-util.h"
 #include "util/mem-info.h"
+#include "util/scope-exit-trigger.h"
 #include "util/symbols-util.h"
-#include "rpc/jni-thrift-util.h"
-#include "rpc/thrift-server.h"
-#include "util/debug-util.h"
-#include "gen-cpp/Data_types.h"
-#include "gen-cpp/Frontend_types.h"
 
 #include "common/names.h"
 
 using namespace impala;
 using namespace apache::thrift::server;
 
+static bool fe_support_disable_codegen = true;
+
 // Called from the FE when it explicitly loads libfesupport.so for tests.
 // This creates the minimal state necessary to service the other JNI calls.
 // This is not called when we first start up the BE.
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_cloudera_impala_service_FeSupport_NativeFeTestInit(
+Java_org_apache_impala_service_FeSupport_NativeFeTestInit(
     JNIEnv* env, jclass caller_class) {
   DCHECK(ExecEnv::GetInstance() == NULL) << "This should only be called once from the FE";
   char* name = const_cast<char*>("FeSupport");
-  InitCommonRuntime(1, &name, false, TestInfo::FE_TEST);
+  // Init the JVM to load the classes in JniUtil that are needed for returning
+  // exceptions to the FE.
+  InitCommonRuntime(1, &name, true, TestInfo::FE_TEST);
   LlvmCodeGen::InitializeLlvm(true);
   ExecEnv* exec_env = new ExecEnv(); // This also caches it from the process.
   exec_env->InitForFeTests();
@@ -66,82 +74,101 @@ Java_com_cloudera_impala_service_FeSupport_NativeFeTestInit(
 // Evaluates a batch of const exprs and returns the results in a serialized
 // TResultRow, where each TColumnValue in the TResultRow stores the result of
 // a predicate evaluation. It requires JniUtil::Init() to have been
-// called.
+// called. Throws a Java exception if an error or warning is encountered during
+// the expr evaluation.
 extern "C"
 JNIEXPORT jbyteArray JNICALL
-Java_com_cloudera_impala_service_FeSupport_NativeEvalConstExprs(
+Java_org_apache_impala_service_FeSupport_NativeEvalExprsWithoutRow(
     JNIEnv* env, jclass caller_class, jbyteArray thrift_expr_batch,
     jbyteArray thrift_query_ctx_bytes) {
+  Status status;
   jbyteArray result_bytes = NULL;
   TQueryCtx query_ctx;
   TExprBatch expr_batch;
   JniLocalFrame jni_frame;
   TResultRow expr_results;
+  vector<TColumnValue> results;
   ObjectPool obj_pool;
 
   DeserializeThriftMsg(env, thrift_expr_batch, &expr_batch);
   DeserializeThriftMsg(env, thrift_query_ctx_bytes, &query_ctx);
-  query_ctx.request.query_options.disable_codegen = true;
-  RuntimeState state(query_ctx);
-
-  THROW_IF_ERROR_RET(jni_frame.push(env), env, JniUtil::internal_exc_class(),
-                     result_bytes);
-  // Exprs can allocate memory so we need to set up the mem trackers before
-  // preparing/running the exprs.
-  state.InitMemTrackers(TUniqueId(), NULL, -1);
-
   vector<TExpr>& texprs = expr_batch.exprs;
-  // Prepare the exprs
+  // Disable codegen advisorily to avoid unnecessary latency. For testing purposes
+  // (expr-test.cc), fe_support_disable_codegen may be set to false.
+  query_ctx.disable_codegen_hint = fe_support_disable_codegen;
+  // Allow logging of at least one error, so we can detect and convert it into a
+  // Java exception.
+  query_ctx.client_request.query_options.max_errors = 1;
+
+  // Track memory against a dummy "fe-eval-exprs" resource pool - we don't
+  // know what resource pool the query has been assigned to yet.
+  RuntimeState state(query_ctx, ExecEnv::GetInstance(), "fe-eval-exprs");
+  // Make sure to close the runtime state no matter how this scope is exited.
+  const auto close_runtime_state =
+      MakeScopeExitTrigger([&state]() { state.ReleaseResources(); });
+
+  THROW_IF_ERROR_RET(
+      jni_frame.push(env), env, JniUtil::internal_exc_class(), result_bytes);
+
+  // Prepare() the exprs. Always Close() the exprs even in case of errors.
   vector<ExprContext*> expr_ctxs;
-  for (vector<TExpr>::iterator it = texprs.begin(); it != texprs.end(); it++) {
+  for (const TExpr& texpr : texprs) {
     ExprContext* ctx;
-    THROW_IF_ERROR_RET(Expr::CreateExprTree(&obj_pool, *it, &ctx), env,
-                       JniUtil::internal_exc_class(), result_bytes);
-    THROW_IF_ERROR_RET(ctx->Prepare(&state, RowDescriptor(), state.query_mem_tracker()),
-                       env, JniUtil::internal_exc_class(), result_bytes);
+    status = Expr::CreateExprTree(&obj_pool, texpr, &ctx);
+    if (!status.ok()) goto error;
+
+    // Add 'ctx' to vector so it will be closed if Prepare() fails.
     expr_ctxs.push_back(ctx);
+    status = ctx->Prepare(&state, RowDescriptor(), state.query_mem_tracker());
+    if (!status.ok()) goto error;
   }
 
-  if (state.codegen_created()) {
-    // Finalize the module so any UDF functions are jit'd
-    LlvmCodeGen* codegen = NULL;
-    state.GetCodegen(&codegen, /* initialize */ false);
+  // UDFs which cannot be interpreted need to be handled by codegen.
+  if (state.ScalarFnNeedsCodegen()) {
+    status = state.CreateCodegen();
+    if (!status.ok()) goto error;
+    LlvmCodeGen* codegen = state.codegen();
     DCHECK(codegen != NULL);
+    status = state.CodegenScalarFns();
+    if (!status.ok()) goto error;
     codegen->EnableOptimizations(false);
-    codegen->FinalizeModule();
+    status = codegen->FinalizeModule();
+    if (!status.ok()) goto error;
   }
 
-  vector<TColumnValue> results;
-  // Open and evaluate the exprs. Also, always Close() the exprs even in case of errors.
-  for (int i = 0; i < expr_ctxs.size(); ++i) {
-    Status open_status = expr_ctxs[i]->Open(&state);
-    if (!open_status.ok()) {
-      for (int j = i; j < expr_ctxs.size(); ++j) {
-        expr_ctxs[j]->Close(&state);
-      }
-      (env)->ThrowNew(JniUtil::internal_exc_class(), open_status.GetDetail().c_str());
-      return result_bytes;
-    }
+  // Open() and evaluate the exprs. Always Close() the exprs even in case of errors.
+  for (ExprContext* expr_ctx : expr_ctxs) {
+    status = expr_ctx->Open(&state);
+    if (!status.ok()) goto error;
+
     TColumnValue val;
-    expr_ctxs[i]->GetValue(NULL, false, &val);
-    // We check here if an error was set in the expression evaluated through GetValue()
-    // and throw an exception accordingly
-    Status getvalue_status = expr_ctxs[i]->root()->GetFnContextError(expr_ctxs[i]);
-    if (!getvalue_status.ok()) {
-      for (int j = i; j < expr_ctxs.size(); ++j) {
-        expr_ctxs[j]->Close(&state);
-      }
-      (env)->ThrowNew(JniUtil::internal_exc_class(), getvalue_status.GetDetail().c_str());
-      return result_bytes;
+    expr_ctx->EvaluateWithoutRow(&val);
+    status = expr_ctx->root()->GetFnContextError(expr_ctx);
+    if (!status.ok()) goto error;
+
+    // Check for mem limit exceeded.
+    status = state.CheckQueryState();
+    if (!status.ok()) goto error;
+    // Check for warnings registered in the runtime state.
+    if (state.HasErrors()) {
+      status = Status(state.ErrorLog());
+      goto error;
     }
 
-    expr_ctxs[i]->Close(&state);
+    expr_ctx->Close(&state);
     results.push_back(val);
   }
 
   expr_results.__set_colVals(results);
-  THROW_IF_ERROR_RET(SerializeThriftMsg(env, &expr_results, &result_bytes), env,
-                     JniUtil::internal_exc_class(), result_bytes);
+  status = SerializeThriftMsg(env, &expr_results, &result_bytes);
+  if (!status.ok()) goto error;
+  return result_bytes;
+
+error:
+  DCHECK(!status.ok());
+  // Convert status to exception. Close all remaining expr contexts.
+  for (ExprContext* expr_ctx : expr_ctxs) expr_ctx->Close(&state);
+  (env)->ThrowNew(JniUtil::internal_exc_class(), status.GetDetail().c_str());
   return result_bytes;
 }
 
@@ -161,6 +188,7 @@ static void ResolveSymbolLookup(const TSymbolLookupParams params,
     type = LibCache::TYPE_JAR;
   } else {
     DCHECK(false) << params.fn_binary_type;
+    type = LibCache::TYPE_JAR; // Set type to something for the case where DCHECK is off.
   }
 
   // Builtin functions are loaded directly from the running process
@@ -253,7 +281,7 @@ static void ResolveSymbolLookup(const TSymbolLookupParams params,
 
 extern "C"
 JNIEXPORT jbyteArray JNICALL
-Java_com_cloudera_impala_service_FeSupport_NativeCacheJar(
+Java_org_apache_impala_service_FeSupport_NativeCacheJar(
     JNIEnv* env, jclass caller_class, jbyteArray thrift_struct) {
   TCacheJarParams params;
   DeserializeThriftMsg(env, thrift_struct, &params);
@@ -273,7 +301,7 @@ Java_com_cloudera_impala_service_FeSupport_NativeCacheJar(
 
 extern "C"
 JNIEXPORT jbyteArray JNICALL
-Java_com_cloudera_impala_service_FeSupport_NativeLookupSymbol(
+Java_org_apache_impala_service_FeSupport_NativeLookupSymbol(
     JNIEnv* env, jclass caller_class, jbyteArray thrift_struct) {
   TSymbolLookupParams lookup;
   DeserializeThriftMsg(env, thrift_struct, &lookup);
@@ -296,7 +324,7 @@ Java_com_cloudera_impala_service_FeSupport_NativeLookupSymbol(
 // specific catalog objects.
 extern "C"
 JNIEXPORT jbyteArray JNICALL
-Java_com_cloudera_impala_service_FeSupport_NativePrioritizeLoad(
+Java_org_apache_impala_service_FeSupport_NativePrioritizeLoad(
     JNIEnv* env, jclass caller_class, jbyteArray thrift_struct) {
   TPrioritizeLoadRequest request;
   DeserializeThriftMsg(env, thrift_struct, &request);
@@ -318,52 +346,35 @@ Java_com_cloudera_impala_service_FeSupport_NativePrioritizeLoad(
   return result_bytes;
 }
 
-extern "C"
-JNIEXPORT jbyteArray JNICALL
-Java_com_cloudera_impala_service_FeSupport_NativeGetStartupOptions(JNIEnv* env,
-    jclass caller_class) {
-  TStartupOptions options;
-  ExecEnv* exec_env = ExecEnv::GetInstance();
-  ImpalaServer* impala_server = exec_env->impala_server();
-  options.__set_compute_lineage(impala_server->IsLineageLoggingEnabled());
-  jbyteArray result_bytes = NULL;
-  THROW_IF_ERROR_RET(SerializeThriftMsg(env, &options, &result_bytes), env,
-                     JniUtil::internal_exc_class(), result_bytes);
-  return result_bytes;
-}
-
 namespace impala {
 
 static JNINativeMethod native_methods[] = {
   {
     (char*)"NativeFeTestInit", (char*)"()V",
-    (void*)::Java_com_cloudera_impala_service_FeSupport_NativeFeTestInit
+    (void*)::Java_org_apache_impala_service_FeSupport_NativeFeTestInit
   },
   {
-    (char*)"NativeEvalConstExprs", (char*)"([B[B)[B",
-    (void*)::Java_com_cloudera_impala_service_FeSupport_NativeEvalConstExprs
+    (char*)"NativeEvalExprsWithoutRow", (char*)"([B[B)[B",
+    (void*)::Java_org_apache_impala_service_FeSupport_NativeEvalExprsWithoutRow
   },
   {
     (char*)"NativeCacheJar", (char*)"([B)[B",
-    (void*)::Java_com_cloudera_impala_service_FeSupport_NativeCacheJar
+    (void*)::Java_org_apache_impala_service_FeSupport_NativeCacheJar
   },
   {
     (char*)"NativeLookupSymbol", (char*)"([B)[B",
-    (void*)::Java_com_cloudera_impala_service_FeSupport_NativeLookupSymbol
+    (void*)::Java_org_apache_impala_service_FeSupport_NativeLookupSymbol
   },
   {
     (char*)"NativePrioritizeLoad", (char*)"([B)[B",
-    (void*)::Java_com_cloudera_impala_service_FeSupport_NativePrioritizeLoad
-  },
-  {
-    (char*)"NativeGetStartupOptions", (char*)"()[B",
-    (void*)::Java_com_cloudera_impala_service_FeSupport_NativeGetStartupOptions
+    (void*)::Java_org_apache_impala_service_FeSupport_NativePrioritizeLoad
   },
 };
 
-void InitFeSupport() {
+void InitFeSupport(bool disable_codegen) {
+  fe_support_disable_codegen = disable_codegen;
   JNIEnv* env = getJNIEnv();
-  jclass native_backend_cl = env->FindClass("com/cloudera/impala/service/FeSupport");
+  jclass native_backend_cl = env->FindClass("org/apache/impala/service/FeSupport");
   env->RegisterNatives(native_backend_cl, native_methods,
       sizeof(native_methods) / sizeof(native_methods[0]));
   EXIT_IF_EXC(env);

@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UTIL_COLLECTION_METRICS_H
@@ -22,7 +25,6 @@
 #include <vector>
 #include <set>
 #include <boost/algorithm/string/join.hpp>
-#include <boost/foreach.hpp>
 #include <boost/accumulators/accumulators.hpp>
 #include <boost/accumulators/statistics/count.hpp>
 #include <boost/accumulators/statistics/mean.hpp>
@@ -76,7 +78,7 @@ class SetMetric : public Metric {
     rapidjson::Value container(rapidjson::kObjectType);
     AddStandardFields(document, &container);
     rapidjson::Value metric_list(rapidjson::kArrayType);
-    BOOST_FOREACH(const T& s, value_) {
+    for (const T& s: value_) {
       rapidjson::Value entry_value;
       ToJsonValue(s, TUnit::NONE, document, &entry_value);
       metric_list.PushBack(entry_value, document->GetAllocator());
@@ -87,7 +89,7 @@ class SetMetric : public Metric {
 
   virtual void ToLegacyJson(rapidjson::Document* document) {
     rapidjson::Value metric_list(rapidjson::kArrayType);
-    BOOST_FOREACH(const T& s, value_) {
+    for (const T& s: value_) {
       rapidjson::Value entry_value;
       ToJsonValue(s, TUnit::NONE, document, &entry_value);
       metric_list.PushBack(entry_value, document->GetAllocator());
@@ -97,7 +99,7 @@ class SetMetric : public Metric {
 
   virtual std::string ToHumanReadable() {
     std::stringstream out;
-    PrettyPrinter::PrintStringList<std::set<T> >(
+    PrettyPrinter::PrintStringList<std::set<T>>(
         value_, TUnit::NONE, &out);
     return out.str();
   }
@@ -274,7 +276,7 @@ class StatsMetric : public Metric {
                                     boost::accumulators::tag::count,
                                     boost::accumulators::tag::min,
                                     boost::accumulators::tag::max,
-                                    boost::accumulators::tag::variance> > Accumulator;
+                                    boost::accumulators::tag::variance>> Accumulator;
   Accumulator acc_;
 
 };

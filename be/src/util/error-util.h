@@ -1,30 +1,31 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UTIL_ERROR_UTIL_H
 #define IMPALA_UTIL_ERROR_UTIL_H
 
-
 #include <string>
 #include <vector>
-#include <boost/cstdint.hpp>
-#include <boost/lexical_cast.hpp>
 
+#include "common/logging.h"
 #include "gen-cpp/CatalogObjects_types.h"
-#include "gen-cpp/ErrorCodes_types.h"
 #include "gen-cpp/ErrorCodes_constants.h"
+#include "gen-cpp/ErrorCodes_types.h"
 #include "gen-cpp/ImpalaInternalService_types.h"
 #include "gutil/strings/substitute.h"
 
@@ -125,14 +126,7 @@ class ErrorMsg {
 
   /// Produce a string representation of the error message that includes the formatted
   /// message of the original error and the attached detail strings.
-  std::string GetFullMessageDetails() const {
-    std::stringstream ss;
-    ss << message_ << "\n";
-    for(size_t i=0, end=details_.size(); i < end; ++i) {
-      ss << details_[i] << "\n";
-    }
-    return ss.str();
-  }
+  std::string GetFullMessageDetails() const;
 
 private:
   TErrorCode::type error_;
@@ -157,6 +151,10 @@ void AppendError(ErrorLogMap* map, const ErrorMsg& e);
 
 /// Helper method to print the contents of an ErrorMap to a stream.
 void PrintErrorMap(std::ostream* stream, const ErrorLogMap& errors);
+
+/// Reset all messages and count, but keep all keys to prevent sending already reported
+/// general errors and counting the same non-general error multiple times.
+void ClearErrorMap(ErrorLogMap& errors);
 
 /// Return the number of errors within this error maps. General errors are counted
 /// individually, while specific errors are counted once per distinct occurrence.

@@ -1,16 +1,19 @@
-# Copyright (c) 2015 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 """This module provides utilities for interacting with a cluster."""
 
@@ -37,6 +40,7 @@ from sys import maxint
 from tempfile import mkdtemp
 from threading import Lock
 from time import mktime, strptime
+from urlparse import urlparse
 from xml.etree.ElementTree import parse as parse_xml
 from zipfile import ZipFile
 
@@ -47,6 +51,11 @@ from tests.util.ssh_util import SshClient
 from tests.util.parse_util import parse_glog, parse_mem_to_mb
 
 LOG = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
+
+DEFAULT_HIVE_HOST = '127.0.0.1'
+DEFAULT_HIVE_PORT = 11050
+DEFAULT_HIVE_USER = 'hive'
+DEFAULT_HIVE_PASSWORD = 'hive'
 
 DEFAULT_TIMEOUT = 300
 
@@ -69,7 +78,7 @@ class Cluster(object):
     self._hive = None
     self._impala = None
 
-  def get_hadoop_config(self, key):
+  def _load_hadoop_config(self):
     if not self._hadoop_configs:
       self._hadoop_configs = dict()
       for file_name in os.listdir(self.local_hadoop_conf_dir):
@@ -84,7 +93,17 @@ class Cluster(object):
           if value is None or value.text is None:
             continue
           self._hadoop_configs[name.text] = value.text
-    return self._hadoop_configs[key]
+
+  def get_hadoop_config(self, key, default=None):
+    """Returns the Hadoop Configuration value mapped to the given key. If a default is
+       specified, it is returned if the key is cannot be found. If no default is specified
+       and the key cannot be found, a 'No Such Key' error will be thrown.
+    """
+    self._load_hadoop_config()
+    result = self._hadoop_configs.get(key, default)
+    if result is None:
+      raise KeyError
+    return result
 
   @abstractproperty
   def shell(self, cmd, host_name, timeout_secs=DEFAULT_TIMEOUT):
@@ -149,8 +168,11 @@ class Cluster(object):
 
 class MiniCluster(Cluster):
 
-  def __init__(self, num_impalads=3):
+  def __init__(self, hive_host=DEFAULT_HIVE_HOST, hive_port=DEFAULT_HIVE_PORT,
+               num_impalads=3):
     Cluster.__init__(self)
+    self.hive_host = hive_host
+    self.hive_port = hive_port
     self.num_impalads = num_impalads
 
   def shell(self, cmd, unused_host_name, timeout_secs=DEFAULT_TIMEOUT):
@@ -159,21 +181,28 @@ class MiniCluster(Cluster):
   def _init_local_hadoop_conf_dir(self):
     self._local_hadoop_conf_dir = mkdtemp()
 
-    node_conf_dir = os.path.join(os.environ["IMPALA_HOME"], "testdata", "cluster",
-        "cdh%s" % os.environ["CDH_MAJOR_VERSION"], "node-1", "etc", "hadoop", "conf")
+    node_conf_dir = self._get_node_conf_dir()
     for file_name in os.listdir(node_conf_dir):
       shutil.copy(os.path.join(node_conf_dir, file_name), self._local_hadoop_conf_dir)
 
-    other_conf_dir = os.path.join(os.environ["IMPALA_HOME"], "fe", "src", "test",
-        "resources")
+    other_conf_dir = self._get_other_conf_dir()
     for file_name in ["hive-site.xml"]:
       shutil.copy(os.path.join(other_conf_dir, file_name), self._local_hadoop_conf_dir)
+
+  def _get_node_conf_dir(self):
+    return os.path.join(os.environ["IMPALA_HOME"], "testdata", "cluster",
+                        "cdh%s" % os.environ["CDH_MAJOR_VERSION"], "node-1",
+                        "etc", "hadoop", "conf")
+
+  def _get_other_conf_dir(self):
+    return os.path.join(os.environ["IMPALA_HOME"], "fe", "src", "test",
+                        "resources")
 
   def _init_hdfs(self):
     self._hdfs = Hdfs(self, self.hadoop_user_name)
 
   def _init_hive(self):
-    self._hive = Hive(self, "127.0.0.1", 11050)
+    self._hive = Hive(self, self.hive_host, self.hive_port)
 
   def _init_impala(self):
     hs2_base_port = 21050
@@ -182,6 +211,23 @@ class MiniCluster(Cluster):
                 for p in xrange(self.num_impalads)]
     self._impala = Impala(self, impalads)
 
+class MiniHiveCluster(MiniCluster):
+  """
+  A MiniCluster useful for running against Hive. It allows Hadoop configuration files
+  to be specified by HADOOP_CONF_DIR and Hive configuration files to be specified by
+  HIVE_CONF_DIR.
+  """
+
+  def __init__(self, hive_host=DEFAULT_HIVE_HOST, hive_port=DEFAULT_HIVE_PORT):
+    MiniCluster.__init__(self)
+    self.hive_host = hive_host
+    self.hive_port = hive_port
+
+  def _get_node_conf_dir(self):
+    return os.environ["HADOOP_CONF_DIR"]
+
+  def _get_other_conf_dir(self):
+    return os.environ["HIVE_CONF_DIR"]
 
 class CmCluster(Cluster):
 
@@ -312,7 +358,8 @@ class Hdfs(Service):
 
   def create_client(self, as_admin=False):
     """Returns an HdfsClient."""
-    endpoint = self.cluster.get_hadoop_config("dfs.namenode.http-address")
+    endpoint = self.cluster.get_hadoop_config("dfs.namenode.http-address",
+                                              "0.0.0.0:50070")
     if endpoint.startswith("0.0.0.0"):
       endpoint.replace("0.0.0.0", "127.0.0.1")
     return HdfsClient("http://%s" % endpoint, use_kerberos=False,
@@ -409,7 +456,8 @@ class Hive(Service):
   @property
   def warehouse_dir(self):
     if not self._warehouse_dir:
-      self._warehouse_dir = self.cluster.get_hadoop_config("hive.metastore.warehouse.dir")
+      self._warehouse_dir = urlparse(
+        self.cluster.get_hadoop_config("hive.metastore.warehouse.dir")).path
     return self._warehouse_dir
 
   def connect(self, db_name=None):
@@ -495,7 +543,7 @@ class Impala(Service):
     """
     stopped_impalads = self.find_stopped_impalads()
     if not stopped_impalads:
-      return stopped_impalads
+      return dict.fromkeys(stopped_impalads)
     messages = OrderedDict()
     impalads_with_message = dict()
     for i, message in izip(stopped_impalads, self.for_each_impalad(
@@ -505,16 +553,16 @@ class Impala(Service):
       else:
         messages[i] = "%s crashed but no info could be found" % i.host_name
     messages.update(impalads_with_message)
-    return stopped_impalads
+    return messages
 
   def for_each_impalad(self, func, impalads=None, as_dict=False):
     if impalads is None:
       impalads = self.impalads
-    promise = self._thread_pool.map_async(func, self.impalads)
+    promise = self._thread_pool.map_async(func, impalads)
     # Python doesn't handle ctrl-c well unless a timeout is provided.
     results = promise.get(maxint)
     if as_dict:
-      results = dict(izip(self.impalads, results))
+      results = dict(izip(impalads, results))
     return results
 
   def restart(self):
@@ -582,7 +630,7 @@ class Impalad(object):
     try:
       self._request_web_page("/cancel_query", params={"query_id": id})
     except requests.exceptions.HTTPError as e:
-      # XXX: Handle losing the race
+      # TODO: Handle losing the race
       raise e
 
   def shell(self, cmd, timeout_secs=DEFAULT_TIMEOUT):
@@ -623,7 +671,7 @@ class Impalad(object):
     bt = self.shell("""
         LAST_CORE_FILE=$(
             find "{core_dump_dir}" -maxdepth 1 -name "*core*" -printf "%T@ %p\\n" \\
-                | sort -n | head -1 | cut -f 1 -d ' ' --complement)
+                | sort -n | tail -1 | cut -f 1 -d ' ' --complement)
         if [[ -n "$LAST_CORE_FILE" ]]; then
           MTIME=$(stat -c %Y "$LAST_CORE_FILE")
           if [[ "$MTIME" -ge {start_time_unix} ]]; then

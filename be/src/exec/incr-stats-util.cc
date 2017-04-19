@@ -1,32 +1,35 @@
-// Copyright 2014 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "incr-stats-util.h"
 
-#include <boost/foreach.hpp>
 #include <boost/unordered_set.hpp>
 #include <gutil/strings/substitute.h>
 #include <cmath>
 #include <sstream>
 
-#include "common/compiler-util.h"
-#include "common/logging.h"
-#include "service/hs2-util.h"
-#include "udf/udf.h"
 #include "gen-cpp/CatalogService_types.h"
 #include "gen-cpp/CatalogObjects_types.h"
+
+#include "common/compiler-util.h"
+#include "common/logging.h"
 #include "exprs/aggregate-functions.h"
+#include "service/hs2-util.h"
+#include "udf/udf.h"
 
 #include "common/names.h"
 
@@ -189,7 +192,7 @@ namespace impala {
 
 void FinalizePartitionedColumnStats(const TTableSchema& col_stats_schema,
     const vector<TPartitionStats>& existing_part_stats,
-    const vector<vector<string> >& expected_partitions, const TRowSet& rowset,
+    const vector<vector<string>>& expected_partitions, const TRowSet& rowset,
     int32_t num_partition_cols, TAlterTableUpdateStatsParams* params) {
   // The rowset should have the following schema: for every column in the source table,
   // five columns are produced, one row per partition.
@@ -198,13 +201,13 @@ void FinalizePartitionedColumnStats(const TTableSchema& col_stats_schema,
 
   const int num_cols =
       (col_stats_schema.columns.size() - num_partition_cols) / COLUMNS_PER_STAT;
-  unordered_set<vector<string> > seen_partitions;
+  unordered_set<vector<string>> seen_partitions;
   vector<PerColumnStats> stats(num_cols);
 
   if (rowset.rows.size() > 0) {
     DCHECK_GE(rowset.rows[0].colVals.size(), COLUMNS_PER_STAT);
     params->__isset.partition_stats = true;
-    BOOST_FOREACH(const TRow& col_stats_row, rowset.rows) {
+    for (const TRow& col_stats_row: rowset.rows) {
       // The last few columns are partition columns that the results are grouped by, and
       // so uniquely identify the partition that these stats belong to.
       vector<string> partition_key_vals;
@@ -265,7 +268,7 @@ void FinalizePartitionedColumnStats(const TTableSchema& col_stats_schema,
   TTableStats empty_table_stats;
   empty_table_stats.__set_num_rows(0);
   empty_part_stats.stats = empty_table_stats;
-  BOOST_FOREACH(const vector<string>& part_key_vals, expected_partitions) {
+  for (const vector<string>& part_key_vals: expected_partitions) {
     DCHECK_EQ(part_key_vals.size(), num_partition_cols);
     if (seen_partitions.find(part_key_vals) != seen_partitions.end()) continue;
     params->partition_stats[part_key_vals] = empty_part_stats;
@@ -274,7 +277,7 @@ void FinalizePartitionedColumnStats(const TTableSchema& col_stats_schema,
   // Now aggregate the existing statistics. The FE will ensure that the set of
   // partitions accessed by the query and this list are disjoint and cover the entire
   // set of partitions.
-  BOOST_FOREACH(const TPartitionStats& existing_stats, existing_part_stats) {
+  for (const TPartitionStats& existing_stats: existing_part_stats) {
     DCHECK_LE(existing_stats.intermediate_col_stats.size(),
         col_stats_schema.columns.size());
     for (int i = 0; i < num_cols; ++i) {

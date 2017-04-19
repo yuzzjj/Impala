@@ -1,31 +1,35 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-import os
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 import pytest
+
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
-from tests.common.skip import SkipIfS3, SkipIfIsilon, SkipIfLocal
+from tests.common.skip import SkipIfS3, SkipIfLocal
 from tests.util.filesystem_utils import IS_ISILON, WAREHOUSE
 from tests.util.hdfs_util import HdfsConfig, get_hdfs_client, get_hdfs_client_from_conf
 
 TEST_TBL = "insert_inherit_permission"
 
-@SkipIfS3.insert
+@SkipIfS3.hdfs_acls
 class TestInsertBehaviourCustomCluster(CustomClusterTestSuite):
 
   @classmethod
   def setup_class(cls):
+    super(TestInsertBehaviourCustomCluster, cls).setup_class()
     if pytest.config.option.namenode_http_address is None:
       hdfs_conf = HdfsConfig(pytest.config.option.minicluster_xml_conf)
       cls.hdfs_client = get_hdfs_client_from_conf(hdfs_conf)
@@ -116,7 +120,7 @@ class TestInsertBehaviourCustomCluster(CustomClusterTestSuite):
       self.execute_query_expect_success(client, "INSERT INTO %s"
                                         " PARTITION(p1=1, p2=3, p3=4) VALUES(1)" % TEST_TBL)
       # Would be 777 if inheritance was enabled
-      if not IS_ISILON: # CDH-27688
+      if not IS_ISILON: # IMPALA-4221
         self._check_partition_perms("p1=1/p2=3/", default_perms)
       self._check_partition_perms("p1=1/p2=3/p3=4/", default_perms)
     finally:

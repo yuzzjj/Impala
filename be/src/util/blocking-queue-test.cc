@@ -1,24 +1,27 @@
-// Copyright 2013 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #include <boost/thread.hpp>
 #include <boost/thread/mutex.hpp>
 #include <glog/logging.h>
-#include <gtest/gtest.h>
 #include <unistd.h>
 
+#include "testutil/gtest-util.h"
 #include "util/blocking-queue.h"
 
 #include "common/names.h"
@@ -50,7 +53,21 @@ TEST(BlockingQueueTest, TestGetFromShutdownQueue) {
   ASSERT_FALSE(test_queue.BlockingGet(&i));
 }
 
-class MultiThreadTest {
+TEST(BlockingQueueTest, TestPutWithTimeout) {
+  int64_t i;
+  BlockingQueue<int64_t> test_queue(2);
+  int64_t timeout_micros = 100 * 1000L; // 100 msecs
+  ASSERT_TRUE(test_queue.BlockingPutWithTimeout(1, timeout_micros));
+  ASSERT_TRUE(test_queue.BlockingPutWithTimeout(2, timeout_micros));
+  boost::system_time now_plus_timeout = boost::get_system_time() +
+      boost::posix_time::microseconds(timeout_micros);
+  ASSERT_FALSE(test_queue.BlockingPutWithTimeout(3, timeout_micros));
+  ASSERT_LE(now_plus_timeout, boost::get_system_time());
+  ASSERT_TRUE(test_queue.BlockingGet(&i));
+  ASSERT_TRUE(test_queue.BlockingPutWithTimeout(3, timeout_micros));
+}
+
+class MultiThreadTest { // NOLINT: members are not arranged for minimal padding
  public:
   MultiThreadTest()
     : iterations_(10000),
@@ -113,7 +130,7 @@ class MultiThreadTest {
   }
 
  private:
-  typedef vector<shared_ptr<thread> > ThreadVector;
+  typedef vector<shared_ptr<thread>> ThreadVector;
 
   int iterations_;
   int nthreads_;
@@ -137,7 +154,4 @@ TEST(BlockingQueueTest, TestMultipleThreads) {
 
 }
 
-int main(int argc, char **argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
+IMPALA_TEST_MAIN();

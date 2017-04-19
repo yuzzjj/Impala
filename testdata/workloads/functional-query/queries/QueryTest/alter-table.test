@@ -1,11 +1,8 @@
 ====
 ---- QUERY
-use alter_table_test_db
----- RESULTS
-====
----- QUERY
 # First create an unpartitioned table
-create external table t1 (i int) location '$FILESYSTEM_PREFIX/test-warehouse/t1_tmp1'
+create external table t1 (i int)
+location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/t1_tmp1'
 ---- RESULTS
 ====
 ---- QUERY
@@ -37,24 +34,26 @@ alter table t1 rename to t2
 show tables
 ---- RESULTS
 't2'
+'part_data'
 ---- TYPES
 string
 ====
 ---- QUERY
 # Move the table to a different database
-alter table t2 rename to alter_table_test_db2.t1_inotherdb
+alter table t2 rename to $DATABASE2.t1_inotherdb
 ---- RESULTS
 ====
 ---- QUERY
 # No longer appears in this database
 show tables
 ---- RESULTS
+'part_data'
 ---- TYPES
 string
 ====
 ---- QUERY
 # Shows up in the second database
-show tables in alter_table_test_db2
+show tables in $DATABASE2
 ---- RESULTS
 't1_inotherdb'
 ---- TYPES
@@ -62,7 +61,7 @@ string
 ====
 ---- QUERY
 # Move the table back to this database
-alter table alter_table_test_db2.t1_inotherdb rename to t2
+alter table $DATABASE2.t1_inotherdb rename to t2
 ---- RESULTS
 ====
 ---- QUERY
@@ -183,6 +182,28 @@ describe t2
 string,string,string
 ====
 ---- QUERY
+# IMPALA-2974: Change a single column to a complex type.
+alter table t2 change column c c array<struct<f1:decimal(10,2)>>;
+describe t2;
+---- RESULTS
+'a','int','Int Col'
+'b','struct<\n  f1:array<int>,\n  f2:map<string,struct<\n    f1:bigint\n  >>\n>',''
+'c','array<struct<\n  f1:decimal(10,2)\n>>',''
+---- TYPES
+string,string,string
+====
+---- QUERY
+# Change a single complex-typed column to a scalar type.
+alter table t2 change column c c varchar(20);
+describe t2;
+---- RESULTS
+'a','int','Int Col'
+'b','struct<\n  f1:array<int>,\n  f2:map<string,struct<\n    f1:bigint\n  >>\n>',''
+'c','varchar(20)',''
+---- TYPES
+string,string,string
+====
+---- QUERY
 create external table jointbl_test like functional.jointbl
 ---- RESULTS
 ====
@@ -226,6 +247,9 @@ bigint,bigint,string,string,string,string,string,string
 # change the table fileformat to match the data
 alter table jointbl_test set fileformat sequencefile
 ---- RESULTS
+'Updated table.'
+---- TYPES
+string
 ====
 ---- QUERY
 # now the proper data should be returned
@@ -241,37 +265,25 @@ bigint,string,int,int
 # Create a partitioned table. Specify the location so we know what dirs need
 # to be cleaned after the test finishes executing.
 create external table t_part (i int) partitioned by (j int, s string)
-location '$FILESYSTEM_PREFIX/test-warehouse/t_part_tmp'
----- RESULTS
-====
----- QUERY
-alter table t_part add partition (j=cast(2-1 as int), s='2012')
----- RESULTS
-====
----- QUERY
-alter table t_part add if not exists partition (j=1, s='2012')
----- RESULTS
-====
----- QUERY
-alter table t_part add if not exists partition (j=1, s='2012/withslash')
----- RESULTS
-====
----- QUERY
-alter table t_part add partition (j=1, s=substring('foo2013bar', 4, 8))
+location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/t_part_tmp';
+alter table t_part add partition (j=cast(2-1 as int), s='2012');
+alter table t_part add if not exists partition (j=1, s='2012');
+alter table t_part add if not exists partition (j=1, s='2012/withslash');
+alter table t_part add partition (j=1, s=substring('foo2013bar', 4, 8));
 ---- RESULTS
 ====
 ---- QUERY
 # Add another partition that points to the same location as another partition.
 # This will cause the data to be read twice, but shouldn't result in an error.
 alter table t_part add partition (j=100, s='same_location')
-location '$FILESYSTEM_PREFIX/test-warehouse/t_part_tmp/j=1/s=2012'
+location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/t_part_tmp/j=1/s=2012'
 ---- RESULTS
 ====
 ---- QUERY
 # Add another partition that points to an existing data location that does not
 # follow the key=value directory structure.
 alter table t_part add partition (j=101, s='different_part_dir')
-location '$FILESYSTEM_PREFIX/test-warehouse/part_data/'
+location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/part_data/'
 ---- RESULTS
 ====
 ---- QUERY
@@ -324,10 +336,16 @@ alter table t_part add partition (j=NULL, s=NULL)
 # be read twice.
 alter table t_part drop partition (j=100, s='same_location')
 ---- RESULTS
+'Dropped 1 partition(s).'
+---- TYPES
+string
 ====
 ---- QUERY
 alter table t_part drop partition (j=101, s='different_part_dir')
 ---- RESULTS
+'Dropped 1 partition(s).'
+---- TYPES
+string
 ====
 ---- QUERY
 insert overwrite table t_part partition(j=NULL, s=NULL)
@@ -383,6 +401,9 @@ int,int,string
 ---- QUERY
 alter table t_part drop partition (j=NULL, s=NULL)
 ---- RESULTS
+'Dropped 1 partition(s).'
+---- TYPES
+string
 ====
 ---- QUERY
 select i, j, s from t_part
@@ -404,6 +425,9 @@ int,int,string
 ---- QUERY
 alter table t_part drop partition (j=NULL, s=trim('  2013  '))
 ---- RESULTS
+'Dropped 1 partition(s).'
+---- TYPES
+string
 ====
 ---- QUERY
 select i, j, s from t_part
@@ -420,6 +444,9 @@ int,int,string
 ---- QUERY
 alter table t_part drop partition (j=1, s='2013')
 ---- RESULTS
+'Dropped 1 partition(s).'
+---- TYPES
+string
 ====
 ---- QUERY
 select i, j, s from t_part
@@ -433,6 +460,9 @@ int,int,string
 ---- QUERY
 alter table t_part drop partition (j=1, s='2012/withslash')
 ---- RESULTS
+'Dropped 1 partition(s).'
+---- TYPES
+string
 ====
 ---- QUERY
 select i, j, s from t_part
@@ -471,6 +501,9 @@ int,int,string
 # Drop default partition using empty string as key
 alter table t_part drop partition (j=2, s='')
 ---- RESULTS
+'Dropped 1 partition(s).'
+---- TYPES
+string
 ====
 ---- QUERY
 # Validate previous partition drop
@@ -519,6 +552,9 @@ set location '$FILESYSTEM_PREFIX/test-warehouse/alltypes_seq_snap/year=2009/mont
 alter table alltypes_test partition(month=4, year=2009)
 set fileformat sequencefile
 ---- RESULTS
+'Updated 1 partition(s).'
+---- TYPES
+string
 ====
 ---- QUERY
 select int_col, count(*) from alltypes_test
@@ -548,6 +584,9 @@ set location '$FILESYSTEM_PREFIX/test-warehouse/alltypes_rc/year=2009/month=5'
 alter table alltypes_test partition(month=cast(2+3 as int), year=2009)
 set fileformat rcfile
 ---- RESULTS
+'Updated 1 partition(s).'
+---- TYPES
+string
 ====
 ---- QUERY
 select int_col, count(*) from alltypes_test
@@ -582,12 +621,18 @@ STRING, STRING, BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
 # Test altering the 'numRows' table property of a table.
 alter table alltypes_test set tblproperties ('numRows'='200')
 ---- RESULTS
+'Updated table.'
+---- TYPES
+string
 ====
 ---- QUERY
 # Test altering the 'numRows' table property of a partition.
 alter table alltypes_test partition(year=2009, month=4)
 set tblproperties ('numRows'='30', 'STATS_GENERATED_VIA_STATS_TASK'='true')
 ---- RESULTS
+'Updated 1 partition(s).'
+---- TYPES
+string
 ====
 ---- QUERY
 # Show the table stats after altering the table and partition stats.
@@ -603,9 +648,6 @@ STRING, STRING, BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
 ====
 ---- QUERY
 # IMPALA-1016: Testing scanning newly added columns
-DROP TABLE IF EXISTS imp1016
-====
----- QUERY
 CREATE TABLE imp1016 (string1 string)
 ---- RESULTS
 ====
@@ -663,9 +705,6 @@ bigint
 ====
 ---- QUERY
 # Create a larger table to test scanning newly added columns
-DROP TABLE IF EXISTS imp1016Large
-====
----- QUERY
 CREATE TABLE imp1016Large (string1 string)
 ---- RESULTS
 ====
@@ -713,99 +752,306 @@ bigint,bigint
 # Tests that renaming a table with column stats across databases
 # preserves table and column stats, and allows the renamed table
 # to be dropped (IMPALA-1711/HIVE-9720).
-create table alter_table_test_db.mv (x int, y string);
-insert into alter_table_test_db.mv values(1, 'a'), (2, 'b'), (NULL, NULL);
-compute stats alter_table_test_db.mv;
-alter table alter_table_test_db.mv rename to alter_table_test_db2.mv2;
-invalidate metadata alter_table_test_db2.mv2
+create table $DATABASE.mv (x int, y string);
+insert into $DATABASE.mv values(1, 'a'), (2, 'b'), (NULL, NULL);
+compute stats $DATABASE.mv;
+alter table $DATABASE.mv rename to $DATABASE2.mv2;
+invalidate metadata $DATABASE2.mv2
 ---- RESULTS
 ====
 ---- QUERY
-show tables in alter_table_test_db like '%mv%'
----- RESULTS
----- TYPES
-STRING
-====
----- QUERY
-show tables in alter_table_test_db2 like '%mv%'
+show tables in $DATABASE like '%mv%'
 ---- RESULTS
 ---- TYPES
 STRING
 ====
 ---- QUERY
-show table stats alter_table_test_db2.mv2
+show tables in $DATABASE2 like '%mv%'
+---- RESULTS
+---- TYPES
+STRING
+====
+---- QUERY
+show table stats $DATABASE2.mv2
 ---- RESULTS
 3,1,'14B','NOT CACHED','NOT CACHED','TEXT','false',regex:.*
 ---- TYPES
 BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
 ====
 ---- QUERY
-show column stats alter_table_test_db2.mv2
+show column stats $DATABASE2.mv2
 ---- RESULTS
 'x','INT',2,-1,4,4
 'y','STRING',2,-1,1,1
 ---- TYPES
-STRING, STRING, BIGINT, BIGINT, INT, DOUBLE
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE
 ====
 ---- QUERY
-drop table alter_table_test_db2.mv2
+drop table $DATABASE2.mv2
 ---- RESULTS
 ====
 ---- QUERY
-show tables in alter_table_test_db2 like '%mv%'
+show tables in $DATABASE2 like '%mv%'
 ---- RESULTS
 ---- TYPES
 STRING
 ====
 ---- QUERY
-# Test tblproperties and serdeproperties key and property value length
-create database if not exists test_alter_property_length_db
-====
----- QUERY
-show databases like 'test_alter_property_length_db'
----- RESULTS
-'test_alter_property_length_db',''
----- TYPES
-STRING,STRING
-====
----- QUERY
-drop table if exists test_alter_property_length_db.property_length
----- RESULTS
-====
----- QUERY
 # alter with serde property lengths just within limits
-create table test_alter_property_length_db.property_length (i int);
-alter table test_alter_property_length_db.property_length
+create table $DATABASE.property_length (i int);
+alter table $DATABASE.property_length
 set serdeproperties(
 'keykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeyk'
 =
 'valuevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevalue'
 )
 ---- RESULTS
+'Updated table.'
+---- TYPES
+string
 ====
 ---- QUERY
 # alter with property lengths just within limits
-alter table test_alter_property_length_db.property_length
+alter table $DATABASE.property_length
 set tblproperties(
 'keykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeykeyk'
 =
 'valuevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevaluevalue'
 )
 ---- RESULTS
-====
----- QUERY
-drop table if exists test_alter_property_length_db.property_length
----- RESULTS
-====
----- QUERY
-# Need to switch databases before dropping
-use default;
-drop database if exists test_alter_property_length_db
----- RESULTS
-====
----- QUERY
-show databases like 'test_alter_property_length_db'
----- RESULTS
+'Updated table.'
 ---- TYPES
-STRING,STRING
+string
+====
+---- QUERY
+-- Change table location after a partition has been created in the original table location
+create table $DATABASE.change_loc (s string) partitioned by (i int);
+insert into $DATABASE.change_loc partition (i=1) values ('a');
+alter table $DATABASE.change_loc
+  set location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/garbage';
+select * from $DATABASE.change_loc;
+---- RESULTS
+'a',1
+---- TYPES
+STRING,INT
+====
+---- QUERY
+-- ALTER TABLE .. SET LOCATION works when setting the location of a partition to be the
+-- the same as a partition of a different table with a different number of clustering
+-- columns.
+create table $DATABASE.table_one_part (s string) partitioned by (i int);
+create table $DATABASE.table_many_part (s string) partitioned by
+  (i0 int, i1 int, i2 int, i3 int, i4 int, i5 int, i6 int, i7 int, i8 int, i9 int);
+insert into $DATABASE.table_one_part partition (i=0) values ('a');
+insert into $DATABASE.table_one_part partition (i=1) values ('b');
+insert into $DATABASE.table_many_part partition
+  (i0=0, i1=1, i2=2, i3=3, i4=4, i5=5, i6=6, i7=7, i8=8, i9=9) values ('c');
+insert into $DATABASE.table_many_part partition
+  (i0=10, i1=11, i2=12, i3=13, i4=14, i5=15, i6=16, i7=17, i8=18, i9=19) values ('d');
+alter table $DATABASE.table_one_part partition (i=1)
+  set location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/table_many_part/i0=10/i1=11/i2=12/i3=13/i4=14/i5=15/i6=16/i7=17/i8=18/i9=19';
+alter table $DATABASE.table_many_part partition
+  (i0=10, i1=11, i2=12, i3=13, i4=14, i5=15, i6=16, i7=17, i8=18, i9=19)
+  set location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/table_one_part/i=0/';
+select i,s from $DATABASE.table_one_part order by i;
+---- RESULTS
+0,'a'
+1,'d'
+---- TYPES
+INT,STRING
+====
+---- QUERY
+select i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, s
+from $DATABASE.table_many_part order by i0;
+---- RESULTS
+0,1,2,3,4,5,6,7,8,9,'c'
+10,11,12,13,14,15,16,17,18,19,'a'
+---- TYPES
+INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING
+====
+---- QUERY
+show partitions $DATABASE.table_one_part
+---- RESULTS
+'0',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_one_part/i=0
+'1',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_many_part/i0=10/i1=11/i2=12/i3=13/i4=14/i5=15/i6=16/i7=17/i8=18/i9=19
+'Total',-1,2,regex:.+,regex:.+,'','','',''
+---- TYPES
+STRING, BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
+====
+---- QUERY
+show partitions $DATABASE.table_many_part
+---- RESULTS
+'0','1','2','3','4','5','6','7','8','9',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_many_part/i0=0/i1=1/i2=2/i3=3/i4=4/i5=5/i6=6/i7=7/i8=8/i9=9
+'10','11','12','13','14','15','16','17','18','19',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_one_part/i=0
+'Total','','','','','','','','','',-1,2,regex:.+,regex:.+,'','','',''
+---- TYPES
+STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
+====
+---- QUERY
+-- Refreshing the tables does not create invalid partition locations
+refresh $DATABASE.table_one_part;
+refresh $DATABASE.table_many_part;
+select i,s from $DATABASE.table_one_part order by i;
+---- RESULTS
+0,'a'
+1,'d'
+---- TYPES
+INT,STRING
+====
+---- QUERY
+select i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, s
+from $DATABASE.table_many_part order by i0;
+---- RESULTS
+0,1,2,3,4,5,6,7,8,9,'c'
+10,11,12,13,14,15,16,17,18,19,'a'
+---- TYPES
+INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING
+====
+---- QUERY
+show partitions $DATABASE.table_one_part
+---- RESULTS
+'0',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_one_part/i=0
+'1',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_many_part/i0=10/i1=11/i2=12/i3=13/i4=14/i5=15/i6=16/i7=17/i8=18/i9=19
+'Total',-1,2,regex:.+,regex:.+,'','','',''
+---- TYPES
+STRING, BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
+====
+---- QUERY
+show partitions $DATABASE.table_many_part
+---- RESULTS
+'0','1','2','3','4','5','6','7','8','9',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_many_part/i0=0/i1=1/i2=2/i3=3/i4=4/i5=5/i6=6/i7=7/i8=8/i9=9
+'10','11','12','13','14','15','16','17','18','19',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_one_part/i=0
+'Total','','','','','','','','','',-1,2,regex:.+,regex:.+,'','','',''
+---- TYPES
+STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
+====
+---- QUERY
+-- Altering the table location does not alter the partition locations
+alter table $DATABASE.table_one_part set location '$FILESYSTEM_PREFIX/garbage/';
+alter table $DATABASE.table_many_part set location '$FILESYSTEM_PREFIX/garbage/';
+select i,s from $DATABASE.table_one_part order by i;
+---- RESULTS
+0,'a'
+1,'d'
+---- TYPES
+INT,STRING
+====
+---- QUERY
+select i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, s
+from $DATABASE.table_many_part order by i0;
+---- RESULTS
+0,1,2,3,4,5,6,7,8,9,'c'
+10,11,12,13,14,15,16,17,18,19,'a'
+---- TYPES
+INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING
+====
+---- QUERY
+show partitions $DATABASE.table_one_part
+---- RESULTS
+'0',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_one_part/i=0
+'1',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_many_part/i0=10/i1=11/i2=12/i3=13/i4=14/i5=15/i6=16/i7=17/i8=18/i9=19
+'Total',-1,2,regex:.+,regex:.+,'','','',''
+---- TYPES
+STRING, BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
+====
+---- QUERY
+show partitions $DATABASE.table_many_part
+---- RESULTS
+'0','1','2','3','4','5','6','7','8','9',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_many_part/i0=0/i1=1/i2=2/i3=3/i4=4/i5=5/i6=6/i7=7/i8=8/i9=9
+'10','11','12','13','14','15','16','17','18','19',-1,1,regex:.+,regex:.+,regex:.+,regex:.+,regex:.+,regex:.*/test-warehouse/$DATABASE.db/table_one_part/i=0
+'Total','','','','','','','','','',-1,2,regex:.+,regex:.+,'','','',''
+---- TYPES
+STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
+====
+---- QUERY
+# IMPALA-1740: Test setting the skip.header.line.count tblproperty
+create table i1740_alter_1 (i1 integer);
+alter table i1740_alter_1 set tblproperties ('skip.header.line.count'='2');
+---- RESULTS
+'Updated table.'
+---- TYPES
+string
+====
+---- QUERY
+# IMPALA-1740: Test setting the skip.header.line.count tblproperty
+create table i1740_alter_2 (i1 integer);
+alter table i1740_alter_2 set tblproperties ('skip.header.line.count'='-1');
+---- CATCH
+Invalid value for table property skip.header.line.count:
+====
+---- QUERY
+# IMPALA-1740: Test setting the skip.header.line.count tblproperty
+create table i1740_alter_3 (i1 integer);
+alter table i1740_alter_3 set tblproperties ('skip.header.line.count'='foo');
+---- CATCH
+Invalid value for table property skip.header.line.count:
+====
+---- QUERY
+# IMPALA-1740: Test setting the skip.header.line.count tblproperty
+create table i1740_alter_4 (i1 integer) stored as parquet;
+alter table i1740_alter_4 set tblproperties ('skip.header.line.count'='2');
+====
+---- QUERY
+# IMPALA-4155: Verify that the default partition is updated by the alter table statement
+create table i4155_alter (c1 int)
+partitioned by (p1 string) row format delimited fields terminated by ',';
+alter table i4155_alter set fileformat PARQUET;
+insert into i4155_alter partition(p1="abc") values (1);
+select * from i4155_alter;
+---- RESULTS
+1,'abc'
+---- TYPES
+INT, STRING
+====
+---- QUERY
+# IMPALA-1670: Support adding multiple partitions in ALTER TABLE ADD PARTITION
+create table i1670A_alter (s string) partitioned by (i integer);
+alter table i1670A_alter add
+partition (i=1) location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/i1670A_alter/i1'
+partition (i=2) location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/i1670A_alter/i2'
+partition (i=3) uncached;
+show partitions i1670A_alter;
+---- RESULTS
+'1',-1,0,'0B','NOT CACHED','NOT CACHED','TEXT','false',regex:.*/i1
+'2',-1,0,'0B','NOT CACHED','NOT CACHED','TEXT','false',regex:.*/i2
+'3',-1,0,'0B','NOT CACHED','NOT CACHED','TEXT','false',regex:.*/i=3
+'Total',-1,0,'0B','0B','','','',''
+---- TYPES
+STRING, BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
+====
+---- QUERY
+# IMPALA-1670: After INVALIDATE METADATA Impala can access previously added partitions and
+# partition data.
+create table i1670A_alter_1 (a int) partitioned by (x int);
+alter table i1670A_alter_1 add partition (x=1)
+partition (x=2) uncached
+partition (x=3) location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/i1670A_alter_1/x3';
+insert into i1670A_alter_1 partition(x=1) values (1), (2), (3);
+insert into i1670A_alter_1 partition(x=2) values (1), (2), (3), (4);
+insert into i1670A_alter_1 partition(x=3) values (1);
+invalidate metadata i1670A_alter_1;
+====
+---- QUERY
+show partitions i1670A_alter_1;
+---- RESULTS
+'1',-1,1,regex:.*,'NOT CACHED','NOT CACHED','TEXT','false',regex:.*/x=1
+'2',-1,1,regex:.*,'NOT CACHED','NOT CACHED','TEXT','false',regex:.*/x=2
+'3',-1,1,regex:.*,'NOT CACHED','NOT CACHED','TEXT','false',regex:.*/x3
+'Total',-1,3,regex:.*,'0B','','','',''
+---- TYPES
+STRING, BIGINT, BIGINT, STRING, STRING, STRING, STRING, STRING, STRING
+====
+---- QUERY
+select x, a from i1670A_alter_1 order by x, a;
+---- RESULTS
+1,1
+1,2
+1,3
+2,1
+2,2
+2,3
+2,4
+3,1
+---- TYPES
+INT, INT
 ====

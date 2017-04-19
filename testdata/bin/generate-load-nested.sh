@@ -1,17 +1,21 @@
 #!/bin/bash
-# Copyright 2015 Cloudera Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 set -euo pipefail
 trap 'echo Error in $0 at line $LINENO: $(cd "'$PWD'" && awk "NR == $LINENO" $0)' ERR
@@ -71,12 +75,12 @@ do
     FILE_NAME=$(basename ${AVRO_SCHEMA_PATH})
     TABLE_NAME="${FILE_NAME%.*}"
     mvn -f "${IMPALA_HOME}/testdata/pom.xml" exec:java \
-      -Dexec.mainClass="com.cloudera.impala.datagenerator.RandomNestedDataGenerator" \
+      -Dexec.mainClass="org.apache.impala.datagenerator.RandomNestedDataGenerator" \
       -Dexec.args="${AVRO_SCHEMA_PATH} ${NUM_ELEMENTS} ${NUM_FIELDS} ${DB_DIR}/${TABLE_NAME}/${TABLE_NAME}.parquet";
 
     if $FLATTEN; then
       mvn -f "${IMPALA_HOME}/testdata/TableFlattener/pom.xml" \
-        exec:java -Dexec.mainClass=com.cloudera.impala.infra.tableflattener.Main \
+        exec:java -Dexec.mainClass=org.apache.impala.infra.tableflattener.Main \
         -Dexec.arguments="file://${DB_DIR}/${TABLE_NAME}/${TABLE_NAME}.parquet,file://${DB_DIR}/${TABLE_NAME}_flat,-sfile://${AVRO_SCHEMA_PATH}";
     fi
   done

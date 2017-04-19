@@ -7,7 +7,7 @@
 #include <stdio.h> // MSVC requires this for _vsnprintf
 #include <vector>
 using std::vector;
-#include <glog/logging.h>
+#include <common/logging.h>
 #include "gutil/logging-inl.h"
 #include "gutil/macros.h"
 
@@ -41,7 +41,7 @@ void StringAppendV(string* dst, const char* format, va_list ap) {
       // Error or MSVC running out of space.  MSVC 8.0 and higher
       // can be asked about space needed with the special idiom below:
       va_copy(backup_ap, ap);
-      result = vsnprintf(NULL, 0, format, backup_ap);
+      result = vsnprintf(nullptr, 0, format, backup_ap);
       va_end(backup_ap);
     }
 
@@ -54,7 +54,7 @@ void StringAppendV(string* dst, const char* format, va_list ap) {
   // Increase the buffer size to the size requested by vsnprintf,
   // plus one for the closing \0.
   int length = result+1;
-  char* buf = new char[length];
+  auto buf = new char[length];
 
   // Restore the va_list before we use it again
   va_copy(backup_ap, ap);

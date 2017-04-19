@@ -1,0 +1,87 @@
+====
+---- QUERY
+# Make sure LIMIT is enforced.
+select * from functional_kudu.dimtbl order by id limit 1;
+---- RESULTS
+1001,'Name1',94611
+---- TYPES
+BIGINT, STRING, INT
+====
+---- QUERY
+# Make sure that we can list the columns to be scanned in any order, that predicates
+# work and that we can have predicates on columns not referenced elsewhere.
+select zip, id from functional_kudu.dimtbl where id >= 1000 and 1002 >= id and
+94611 = zip and 'Name1' = name order by id;
+---- RESULTS
+94611,1001
+---- TYPES
+INT, BIGINT
+====
+---- QUERY
+# Regression test for IMPALA-2740, a NULL value from a previously filtered row would
+# carry over into the next unfiltered row (the result below would incorrectly be 2,NULL).
+CREATE TABLE impala_2740 (key INT PRIMARY KEY, value INT)
+  PARTITION BY HASH (key) PARTITIONS 3 STORED AS KUDU;
+INSERT INTO impala_2740 VALUES (1, NULL), (2, -2);
+SELECT * FROM impala_2740 WHERE key != 1;
+---- RESULTS
+2,-2
+---- TYPES
+INT, INT
+====
+---- QUERY
+# Regression test for IMPALA-2635, the Kudu scanner hangs waiting for data from scanner
+# threads that are never started. The union and both scans land in the same fragment which
+# is run on all impalads. However, for the t1 table there is only as single scan range,
+# so two of the scan instances get empty scan ranges.
+CREATE TABLE impala_2635_t1 (id BIGINT PRIMARY KEY, name STRING)
+  PARTITION BY HASH (id) PARTITIONS 3 STORED AS KUDU;
+CREATE TABLE impala_2635_t2 (id BIGINT PRIMARY KEY, name STRING)
+  PARTITION BY HASH(id) PARTITIONS 16 STORED AS KUDU;
+INSERT INTO impala_2635_t1 VALUES (0, 'Foo');
+INSERT INTO impala_2635_t2 VALUES (1, 'Blah');
+SELECT * FROM impala_2635_t1 UNION ALL SELECT * FROM impala_2635_t2;
+---- RESULTS
+0,'Foo'
+1,'Blah'
+---- TYPES
+BIGINT, STRING
+====
+---- QUERY
+# IMPALA-4408: Test Kudu scans where all materialized slots are non-nullable.
+select count(int_col) from functional_kudu.tinyinttable
+---- RESULTS
+10
+---- TYPES
+BIGINT
+====
+---- QUERY
+# IMPALA-4859: Test Kudu IS NULL/IS NOT NULL pushdown
+select count(*) from functional_kudu.alltypesagg where id < 10 and float_col is null;
+---- RESULTS
+2
+---- TYPES
+BIGINT
+====
+---- QUERY
+select count(*) from functional_kudu.alltypesagg where id < 10 and float_col is not null;
+---- RESULTS
+9
+---- TYPES
+BIGINT
+====
+---- QUERY
+# alltypes.id is primary key/not nullable, verify IS NOT NULL/IS NULL pushdown works
+select count(*) from functional_kudu.alltypes where id is not null;
+---- RESULTS
+7300
+---- TYPES
+BIGINT
+====
+---- QUERY
+select count(*) from functional_kudu.alltypes where id is null;
+---- RESULTS
+0
+---- TYPES
+BIGINT
+====

@@ -1,32 +1,35 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_UTIL_METRICS_H
 #define IMPALA_UTIL_METRICS_H
 
 #include <map>
-#include <string>
 #include <sstream>
 #include <stack>
-#include <boost/foreach.hpp>
+#include <string>
+#include <vector>
 #include <boost/function.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <boost/thread/locks.hpp>
 
 #include "common/logging.h"
-#include "common/status.h"
 #include "common/object-pool.h"
+#include "common/status.h"
 #include "util/debug-util.h"
 #include "util/json-util.h"
 #include "util/pretty-printer.h"
@@ -58,7 +61,7 @@ class MetricDefs {
   /// Contains the map of all TMetricDefs, non-const for testing
   MetricDefsConstants metric_defs_;
 
-  MetricDefs() { };
+  MetricDefs() { }
   DISALLOW_COPY_AND_ASSIGN(MetricDefs);
 };
 
@@ -188,8 +191,8 @@ class SimpleMetric : public Metric {
     document->AddMember(key_.c_str(), val, document->GetAllocator());
   }
 
-  const TUnit::type unit() const { return unit_; }
-  const TMetricKind::type kind() const { return metric_kind; }
+  TUnit::type unit() const { return unit_; }
+  TMetricKind::type kind() const { return metric_kind; }
 
  protected:
   /// Called to compute value_ if necessary during calls to value(). The more natural
@@ -209,6 +212,26 @@ class SimpleMetric : public Metric {
   T value_;
 };
 
+// Gauge metric that computes the sum of several gauges.
+template <typename T>
+class SumGauge : public SimpleMetric<T, TMetricKind::GAUGE> {
+ public:
+  SumGauge(const TMetricDef& metric_def,
+      const std::vector<SimpleMetric<T, TMetricKind::GAUGE>*>& metrics)
+    : SimpleMetric<T, TMetricKind::GAUGE>(metric_def, 0), metrics_(metrics) {}
+  virtual ~SumGauge() {}
+
+ private:
+  virtual void CalculateValue() override {
+    T sum = 0;
+    for (SimpleMetric<T, TMetricKind::GAUGE>* metric : metrics_) sum += metric->value();
+    this->value_ = sum;
+  }
+
+  /// The metrics to be summed.
+  std::vector<SimpleMetric<T, TMetricKind::GAUGE>*> metrics_;
+};
+
 /// Container for a set of metrics. A MetricGroup owns the memory for every metric
 /// contained within it (see Add*() to create commonly used metric
 /// types). Metrics are 'registered' with a MetricGroup, once registered they cannot be
@@ -216,8 +239,8 @@ class SimpleMetric : public Metric {
 //
 /// MetricGroups may be organised hierarchically as a tree.
 //
-/// Typically a metric object is cached by its creator after registration. If a metric must
-/// be retrieved without an available pointer, FindMetricForTesting() will search the
+/// Typically a metric object is cached by its creator after registration. If a metric
+/// must be retrieved without an available pointer, FindMetricForTesting() will search the
 /// MetricGroup and all its descendent MetricGroups in turn.
 //
 /// TODO: Hierarchical naming: that is, resolve "group1.group2.metric-name" to a path
@@ -281,7 +304,7 @@ class MetricGroup {
       groups.pop();
       MetricMap::const_iterator it = group->metric_map_.find(key);
       if (it != group->metric_map_.end()) return reinterpret_cast<M*>(it->second);
-      BOOST_FOREACH(const ChildGroupMap::value_type& child, group->children_) {
+      for (const ChildGroupMap::value_type& child: group->children_) {
         groups.push(child.second);
       }
     } while (!groups.empty());
@@ -297,7 +320,10 @@ class MetricGroup {
       rapidjson::Value* out_val);
 
   /// Creates or returns an already existing child metric group.
-  MetricGroup* GetChildGroup(const std::string& name);
+  MetricGroup* GetOrCreateChildGroup(const std::string& name);
+
+  /// Returns a child metric group with name 'name', or NULL if that group doesn't exist
+  MetricGroup* FindChildGroup(const std::string& name);
 
   /// Useful for debuggers, returns the output of CMCompatibleCallback().
   std::string DebugString();

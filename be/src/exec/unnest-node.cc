@@ -1,24 +1,29 @@
-// Copyright 2015 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "common/status.h"
 #include "exec/unnest-node.h"
 #include "exec/subplan-node.h"
 #include "exprs/expr-context.h"
 #include "exprs/slot-ref.h"
+#include "runtime/row-batch.h"
 #include "runtime/runtime-state.h"
-#include "util/runtime-profile.h"
+#include "runtime/tuple-row.h"
+#include "util/runtime-profile-counters.h"
 
 namespace impala {
 
@@ -130,6 +135,7 @@ Status UnnestNode::GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos) 
 
   // Populate the output row_batch with tuples from the collection.
   DCHECK(coll_value_ != NULL);
+  DCHECK_GE(coll_value_->num_tuples, 0);
   while (item_idx_ < coll_value_->num_tuples) {
     Tuple* item =
         reinterpret_cast<Tuple*>(coll_value_->ptr + item_idx_ * item_byte_size_);

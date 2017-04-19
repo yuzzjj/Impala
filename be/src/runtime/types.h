@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_RUNTIME_TYPE_H
@@ -71,9 +74,9 @@ struct ColumnType {
   PrimitiveType type;
   /// Only set if type == TYPE_CHAR or type == TYPE_VARCHAR
   int len;
-  static const int MAX_VARCHAR_LENGTH = 65355;
-  static const int MAX_CHAR_LENGTH = 255;
-  static const int MAX_CHAR_INLINE_LENGTH = 128;
+  static const int MAX_VARCHAR_LENGTH = (1 << 16) - 1; // 65535
+  static const int MAX_CHAR_LENGTH = (1 << 8) - 1; // 255
+  static const int MAX_CHAR_INLINE_LENGTH = (1 << 7); // 128
 
   /// Only set if type == TYPE_DECIMAL
   int precision, scale;
@@ -81,6 +84,7 @@ struct ColumnType {
   /// Must be kept in sync with FE's max precision/scale.
   static const int MAX_PRECISION = 38;
   static const int MAX_SCALE = MAX_PRECISION;
+  static const int MIN_ADJUSTED_SCALE = 6;
 
   /// The maximum precision representable by a 4-byte decimal (Decimal4Value)
   static const int MAX_DECIMAL4_PRECISION = 9;
@@ -92,6 +96,8 @@ struct ColumnType {
 
   /// Only set if type == TYPE_STRUCT. The field name of each child.
   std::vector<std::string> field_names;
+
+  static const char* LLVM_CLASS_NAME;
 
   ColumnType(PrimitiveType type = INVALID_TYPE)
     : type(type), len(-1), precision(-1), scale(-1) {
@@ -121,16 +127,29 @@ struct ColumnType {
     return ret;
   }
 
+  static bool ValidateDecimalParams(int precision, int scale) {
+    return precision >= 1 && precision <= MAX_PRECISION && scale >= 0
+        && scale <= MAX_SCALE && scale <= precision;
+  }
+
   static ColumnType CreateDecimalType(int precision, int scale) {
-    DCHECK_LE(precision, MAX_PRECISION);
-    DCHECK_LE(scale, MAX_SCALE);
-    DCHECK_GE(precision, 0);
-    DCHECK_LE(scale, precision);
+    DCHECK(ValidateDecimalParams(precision, scale)) << precision << ", " << scale;
     ColumnType ret;
     ret.type = TYPE_DECIMAL;
     ret.precision = precision;
     ret.scale = scale;
     return ret;
+  }
+
+  // Matches the results of createAdjustedDecimalType in front-end code.
+  static ColumnType CreateAdjustedDecimalType(int precision, int scale) {
+    if (precision > MAX_PRECISION) {
+      int min_scale = std::min(scale, MIN_ADJUSTED_SCALE);
+      int delta = precision - MAX_PRECISION;
+      precision = MAX_PRECISION;
+      scale = std::max(scale - delta, min_scale);
+    }
+    return CreateDecimalType(precision, scale);
   }
 
   static ColumnType FromThrift(const TColumnType& t) {
@@ -139,6 +158,8 @@ struct ColumnType {
     DCHECK_EQ(idx, t.types.size() - 1);
     return result;
   }
+
+  static std::vector<ColumnType> FromThrift(const std::vector<TColumnType>& ttypes);
 
   bool operator==(const ColumnType& o) const {
     if (type != o.type) return false;
@@ -158,13 +179,28 @@ struct ColumnType {
     return thrift_type;
   }
 
+  inline bool IsBooleanType() const { return type == TYPE_BOOLEAN; }
+
+  inline bool IsIntegerType() const {
+    return type == TYPE_TINYINT || type == TYPE_SMALLINT || type == TYPE_INT
+        || type == TYPE_BIGINT;
+  }
+
+  inline bool IsFloatingPointType() const {
+    return type == TYPE_FLOAT || type == TYPE_DOUBLE;
+  }
+
+  inline bool IsDecimalType() const { return type == TYPE_DECIMAL; }
+
   inline bool IsStringType() const {
     return type == TYPE_STRING || type == TYPE_VARCHAR || type == TYPE_CHAR;
   }
 
+  inline bool IsTimestampType() const { return type == TYPE_TIMESTAMP; }
+
   inline bool IsVarLenStringType() const {
-    return type == TYPE_STRING || type == TYPE_VARCHAR ||
-        (type == TYPE_CHAR && len > MAX_CHAR_INLINE_LENGTH);
+    return type == TYPE_STRING || type == TYPE_VARCHAR
+        || (type == TYPE_CHAR && len > MAX_CHAR_INLINE_LENGTH);
   }
 
   inline bool IsComplexType() const {
@@ -259,8 +295,6 @@ struct ColumnType {
   /// Recursive implementation of ToThrift() that populates 'thrift_type' with the
   /// TTypeNodes for this type and its children.
   void ToThrift(TColumnType* thrift_type) const;
-
-  static const char* LLVM_CLASS_NAME;
 };
 
 std::ostream& operator<<(std::ostream& os, const ColumnType& type);

@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_COMMON_STATUS_H
@@ -19,10 +22,8 @@
 #include <string>
 #include <vector>
 
-#include <boost/lexical_cast.hpp>
-
-#include "common/logging.h"
 #include "common/compiler-util.h"
+#include "common/logging.h"
 #include "gen-cpp/Status_types.h"  // for TStatus
 #include "gen-cpp/ErrorCodes_types.h"  // for TErrorCode
 #include "gen-cpp/TCLIService_types.h" // for HS2 TStatus
@@ -82,21 +83,26 @@ class Status {
  public:
   typedef strings::internal::SubstituteArg ArgType;
 
-  inline Status(): msg_(NULL) {}
+  ALWAYS_INLINE Status(): msg_(NULL) {}
 
   // Return a default constructed Status instance in the OK case.
-  inline static Status OK() { return Status(); }
+  static ALWAYS_INLINE Status OK() { return Status(); }
 
   // Return a MEM_LIMIT_EXCEEDED error status.
   static Status MemLimitExceeded();
+  static Status MemLimitExceeded(const std::string& details);
 
   static const Status CANCELLED;
   static const Status DEPRECATED_RPC;
 
   /// Copy c'tor makes copy of error detail so Status can be returned by value.
-  inline Status(const Status& status) : msg_(NULL) {
+  ALWAYS_INLINE Status(const Status& status) : msg_(NULL) {
     if (UNLIKELY(status.msg_ != NULL)) CopyMessageFrom(status);
   }
+
+  /// Move constructor that moves the error message (if any) and resets 'other' to the
+  /// default OK Status.
+  ALWAYS_INLINE Status(Status&& other) : msg_(other.msg_) { other.msg_ = NULL; }
 
   /// Status using only the error code as a parameter. This can be used for error messages
   /// that don't take format parameters.
@@ -145,14 +151,23 @@ class Status {
   static Status Expected(const std::string& error_msg);
 
   /// same as copy c'tor
-  inline Status& operator=(const Status& status) {
+  ALWAYS_INLINE Status& operator=(const Status& status) {
     // Take the slow path if either Status objects have non-NULL messages (unless they
     // are aliases).
     if (UNLIKELY(msg_ != status.msg_)) CopyMessageFrom(status);
     return *this;
   }
 
-  inline ~Status() {
+  /// Move assignment that moves the error message (if any) and resets 'other' to the
+  /// default OK Status.
+  ALWAYS_INLINE Status& operator=(Status&& other) {
+    if (UNLIKELY(msg_ != NULL)) FreeMessage();
+    msg_ = other.msg_;
+    other.msg_ = NULL;
+    return *this;
+  }
+
+  ALWAYS_INLINE ~Status() {
     // The UNLIKELY and inlining here are important hints for the compiler to
     // streamline the common case of Status::OK(). Use FreeMessage() which is
     // not inlined to free the message. This avoids potential code bloat due
@@ -176,7 +191,7 @@ class Status {
   /// Retains the TErrorCode value and the message
   Status& operator=(const apache::hive::service::cli::thrift::TStatus& hs2_status);
 
-  bool ok() const { return msg_ == NULL; }
+  bool ALWAYS_INLINE ok() const { return msg_ == NULL; }
 
   bool IsCancelled() const {
     return msg_ != NULL && msg_->error() == TErrorCode::CANCELLED;
@@ -195,16 +210,7 @@ class Status {
   /// Returns the error message associated with a non-successful status.
   const ErrorMsg& msg() const {
     DCHECK(msg_ != NULL);
-    return *msg_;
-  }
-
-  /// Sets the ErrorMessage on the detail of the status. Calling this method is only valid
-  /// if an error was reported.
-  /// TODO: deprecate, error should be immutable
-  void SetErrorMsg(const ErrorMsg& m) {
-    DCHECK(msg_ != NULL);
-    delete msg_;
-    msg_ = new ErrorMsg(m);
+    return *msg_; // NOLINT: clang-tidy thinks this might deref a nullptr
   }
 
   /// Add a detail string. Calling this method is only defined on a non-OK message
@@ -241,10 +247,10 @@ class Status {
   Status(const std::string& error_msg, bool silent);
 
   // A non-inline function for copying status' message.
-  void CopyMessageFrom(const Status& status);
+  void CopyMessageFrom(const Status& status) noexcept;
 
   // A non-inline function for freeing status' message.
-  void FreeMessage();
+  void FreeMessage() noexcept;
 
   /// Status uses a naked pointer to ensure the size of an instance on the stack is only
   /// the sizeof(ErrorMsg*). Every Status owns its ErrorMsg instance.
@@ -252,26 +258,43 @@ class Status {
 };
 
 /// some generally useful macros
-#define RETURN_IF_ERROR(stmt) \
-  do { \
-    Status __status__ = (stmt); \
+#define RETURN_IF_ERROR(stmt)                          \
+  do {                                                 \
+    Status __status__ = (stmt);                        \
     if (UNLIKELY(!__status__.ok())) return __status__; \
   } while (false)
 
-#define EXIT_IF_ERROR(stmt) \
+#define ABORT_IF_ERROR(stmt) \
   do { \
     Status __status__ = (stmt); \
     if (UNLIKELY(!__status__.ok())) { \
-      EXIT_WITH_ERROR(__status__.GetDetail()); \
+      ABORT_WITH_ERROR(__status__.GetDetail()); \
     } \
   } while (false)
 
-#define EXIT_WITH_ERROR(msg) \
+// Log to FATAL and abort process, generating a core dump if enabled. This should be used
+// for unexpected error cases where we want a core dump.
+// LOG(FATAL) will call abort().
+#define ABORT_WITH_ERROR(msg) \
   do { \
-    LOG(ERROR) << msg; \
+    LOG(FATAL) << msg << ". Impalad exiting.\n"; \
+  } while (false)
+
+// Log to ERROR and exit process with status 1 without calling abort() or dumping core.
+// This should be used for expected error cases, e.g. bad command-line arguments where
+// we just want to exit cleanly without generating core dumps.
+#define CLEAN_EXIT_WITH_ERROR(msg) \
+  do { \
+    LOG(ERROR) << msg << ". Impalad exiting.\n"; \
+    google::FlushLogFiles(google::ERROR); \
     exit(1); \
   } while (false)
 
+/// This macro can be appended to a function definition to generate a compiler warning
+/// if the result is ignored.
+/// TODO: when we upgrade gcc from 4.9.2, we may be able to apply this to the Status
+/// type to get this automatically for all Status-returning functions.
+#define WARN_UNUSED_RESULT __attribute__((warn_unused_result))
 }
 
 #endif

@@ -1,16 +1,19 @@
-// Copyright 2014 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_SERVICE_QUERY_OPTIONS_H
 #define IMPALA_SERVICE_QUERY_OPTIONS_H
@@ -32,7 +35,7 @@ class TQueryOptions;
 // the DCHECK.
 #define QUERY_OPTS_TABLE\
   DCHECK_EQ(_TImpalaQueryOptions_VALUES_TO_NAMES.size(),\
-      TImpalaQueryOptions::DISABLE_ROW_RUNTIME_FILTERING + 1);\
+      TImpalaQueryOptions::PARQUET_ARRAY_RESOLUTION + 1);\
   QUERY_OPT_FN(abort_on_default_limit_exceeded, ABORT_ON_DEFAULT_LIMIT_EXCEEDED)\
   QUERY_OPT_FN(abort_on_error, ABORT_ON_ERROR)\
   QUERY_OPT_FN(allow_unsupported_formats, ALLOW_UNSUPPORTED_FORMATS)\
@@ -66,13 +69,29 @@ class TQueryOptions;
   QUERY_OPT_FN(exec_single_node_rows_threshold, EXEC_SINGLE_NODE_ROWS_THRESHOLD)\
   QUERY_OPT_FN(optimize_partition_key_scans, OPTIMIZE_PARTITION_KEY_SCANS)\
   QUERY_OPT_FN(replica_preference, REPLICA_PREFERENCE)\
-  QUERY_OPT_FN(random_replica, RANDOM_REPLICA)\
+  QUERY_OPT_FN(schedule_random_replica, SCHEDULE_RANDOM_REPLICA)\
   QUERY_OPT_FN(scan_node_codegen_threshold, SCAN_NODE_CODEGEN_THRESHOLD)\
   QUERY_OPT_FN(disable_streaming_preaggregations, DISABLE_STREAMING_PREAGGREGATIONS)\
   QUERY_OPT_FN(runtime_filter_mode, RUNTIME_FILTER_MODE)\
-  QUERY_OPT_FN(runtime_bloom_filter_size, RUNTIME_BLOOM_FILTER_SIZE);\
+  QUERY_OPT_FN(runtime_bloom_filter_size, RUNTIME_BLOOM_FILTER_SIZE)\
   QUERY_OPT_FN(runtime_filter_wait_time_ms, RUNTIME_FILTER_WAIT_TIME_MS)\
-  QUERY_OPT_FN(disable_row_runtime_filtering, DISABLE_ROW_RUNTIME_FILTERING);
+  QUERY_OPT_FN(disable_row_runtime_filtering, DISABLE_ROW_RUNTIME_FILTERING)\
+  QUERY_OPT_FN(max_num_runtime_filters, MAX_NUM_RUNTIME_FILTERS)\
+  QUERY_OPT_FN(parquet_annotate_strings_utf8, PARQUET_ANNOTATE_STRINGS_UTF8)\
+  QUERY_OPT_FN(parquet_fallback_schema_resolution, PARQUET_FALLBACK_SCHEMA_RESOLUTION)\
+  QUERY_OPT_FN(mt_dop, MT_DOP)\
+  QUERY_OPT_FN(s3_skip_insert_staging, S3_SKIP_INSERT_STAGING)\
+  QUERY_OPT_FN(runtime_filter_min_size, RUNTIME_FILTER_MIN_SIZE)\
+  QUERY_OPT_FN(runtime_filter_max_size, RUNTIME_FILTER_MAX_SIZE)\
+  QUERY_OPT_FN(prefetch_mode, PREFETCH_MODE)\
+  QUERY_OPT_FN(strict_mode, STRICT_MODE)\
+  QUERY_OPT_FN(scratch_limit, SCRATCH_LIMIT)\
+  QUERY_OPT_FN(enable_expr_rewrites, ENABLE_EXPR_REWRITES)\
+  QUERY_OPT_FN(decimal_v2, DECIMAL_V2)\
+  QUERY_OPT_FN(parquet_dictionary_filtering, PARQUET_DICTIONARY_FILTERING)\
+  QUERY_OPT_FN(parquet_array_resolution, PARQUET_ARRAY_RESOLUTION)\
+  ;
+
 
 /// Converts a TQueryOptions struct into a map of key, value pairs.
 void TQueryOptionsToMap(const TQueryOptions& query_options,
@@ -104,7 +123,8 @@ Status SetQueryOption(const std::string& key, const std::string& value,
 /// Parse a "," separated key=value pair of query options and set it in 'query_options'.
 /// If the same query option is specified more than once, the last one wins. The
 /// set_query_options_mask bitmask is updated to reflect the query options which were
-/// set. Return an error if the input is invalid (bad format or invalid query option).
+/// set. Returns an error status containing an error detail for any invalid options (e.g.
+/// bad format or invalid query option), but all valid query options are still handled.
 Status ParseQueryOptions(const std::string& options, TQueryOptions* query_options,
     QueryOptionsMask* set_query_options_mask);
 

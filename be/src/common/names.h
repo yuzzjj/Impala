@@ -1,25 +1,29 @@
-// Copyright (c) 2015 Cloudera, Inc. All rights reserved.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
-/// The motivation for the using declarations below is to allow accessing the most relevant
-/// and most frequently used library classes without having to explicitly pull them into
-/// the global namespace. The goal is that when readers sees a usage of vector (etc.) without
-/// any further specialization they can rely on the fact that it will be a std::vector.
+/// The motivation for the using declarations below is to allow accessing the most
+/// relevant and most frequently used library classes without having to explicitly pull
+/// them into the global namespace. The goal is that when readers sees a usage of vector
+/// (etc.) without any further specialization they can rely on the fact that it will be a
+/// std::vector.
 //
 /// Instead of actually including the header files for the symbols, this file only checks
-/// if certain include guards are defined before applying the using declaration. This makes sure
-/// that including this file has no impact on the compile time.
+/// if certain include guards are defined before applying the using declaration. This
+/// makes sure that including this file has no impact on the compile time.
 //
 /// Please make sure that this file is included last in the cc file's include list to make
 /// sure that all relevant include guards are defined.
@@ -104,6 +108,24 @@ using std::ostringstream;
 
 #ifdef _GLIBCXX_ALGORITHM
 using std::swap;
+using std::min;
+using std::max;
+using std::sort;
+#endif
+
+#ifdef _GLIBCXX_MEMORY
+using std::make_shared;
+using std::make_unique;
+using std::shared_ptr;
+using std::unique_ptr;
+#endif
+
+#ifdef _GLIBCXX_UTILITY
+using std::move;
+#endif
+
+#ifdef _NEW
+using std::nothrow;
 #endif
 
 #ifdef BOOST_THREAD_THREAD_COMMON_HPP
@@ -144,10 +166,6 @@ using boost::shared_lock;
 using boost::upgrade_lock;
 #endif
 
-#ifdef BOOST_SMART_PTR_SHARED_PTR_HPP_INCLUDED
-using boost::shared_ptr;
-#endif
-
 #ifdef BOOST_SMART_PTR_SCOPED_PTR_HPP_INCLUDED
 using boost::scoped_ptr;
 #endif
@@ -167,4 +185,8 @@ using boost::function;
 #ifdef BOOST_BIND_HPP_INCLUDED
 using boost::bind;
 using boost::mem_fn;
+#endif
+
+#ifdef STRINGS_SUBSTITUTE_H_
+using strings::Substitute;
 #endif

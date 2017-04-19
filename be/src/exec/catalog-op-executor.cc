@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/catalog-op-executor.h"
 
@@ -19,9 +22,12 @@
 #include "exec/incr-stats-util.h"
 #include "common/status.h"
 #include "runtime/lib-cache.h"
+#include "runtime/client-cache-types.h"
+#include "runtime/exec-env.h"
 #include "service/impala-server.h"
 #include "service/hs2-util.h"
 #include "util/string-parser.h"
+#include "util/runtime-profile-counters.h"
 #include "gen-cpp/CatalogService.h"
 #include "gen-cpp/CatalogService_types.h"
 #include "gen-cpp/CatalogObjects_types.h"
@@ -34,7 +40,6 @@
 using namespace impala;
 using namespace apache::hive::service::cli::thrift;
 using namespace apache::thrift;
-using strings::Substitute;
 
 DECLARE_int32(catalog_service_port);
 DECLARE_string(catalog_service_host);
@@ -193,7 +198,7 @@ void CatalogOpExecutor::SetTableStats(const TTableSchema& tbl_stats_schema,
   // Accumulate total number of rows in the table.
   long total_num_rows = 0;
   // Set per-partition stats.
-  BOOST_FOREACH(const TRow& row, tbl_stats_data.rows) {
+  for (const TRow& row: tbl_stats_data.rows) {
     DCHECK_GT(row.colVals.size(), 0);
     // The first column is the COUNT(*) expr of the original query.
     DCHECK(row.colVals[0].__isset.i64Val);
@@ -210,7 +215,7 @@ void CatalogOpExecutor::SetTableStats(const TTableSchema& tbl_stats_schema,
     total_num_rows += num_rows;
   }
 
-  BOOST_FOREACH(const TPartitionStats& existing_stats, existing_part_stats) {
+  for (const TPartitionStats& existing_stats: existing_part_stats) {
     total_num_rows += existing_stats.stats.num_rows;
   }
 

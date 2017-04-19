@@ -1,15 +1,30 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # This modules contians utility functions used to help verify query test results.
-#
+
 import logging
 import math
-import os
-import pytest
-import sys
 import re
+
 from functools import wraps
-from tests.util.test_file_parser import remove_comments
+from tests.util.test_file_parser import (join_section_lines, remove_comments,
+    split_section_lines)
+from tests.util.hdfs_util import NAMENODE
 
 logging.basicConfig(level=logging.INFO, format='%(threadName)s: %(message)s')
 LOG = logging.getLogger('test_result_verfier')
@@ -125,7 +140,7 @@ def try_compile_regex(row_string):
     pattern = row_string[len(ROW_REGEX_PREFIX_PATTERN):].strip()
     regex = re.compile(pattern)
     if regex is None:
-      assert False, "Invalid row regex specification: %s" % self.row_string
+      assert False, "Invalid row regex specification: %s" % row_string
     return regex
   return None
 
@@ -192,11 +207,24 @@ def assert_args_not_none(*args):
   for arg in args:
     assert arg is not None
 
-def verify_query_result_is_subset(expected_results, actual_results):
+def convert_results_to_sets(expected_results, actual_results):
   assert_args_not_none(expected_results, actual_results)
   expected_set = set(map(str, expected_results.rows))
   actual_set = set(map(str, actual_results.rows))
+  return expected_set, actual_set
+
+def verify_query_result_is_subset(expected_results, actual_results):
+  """Check whether the results in expected_results are a subset of the results in
+  actual_results. This uses set semantics, i.e. any duplicates are ignored."""
+  expected_set, actual_set = convert_results_to_sets(expected_results, actual_results)
   assert expected_set <= actual_set
+
+def verify_query_result_is_superset(expected_results, actual_results):
+  """Check whether the results in expected_results are a superset of the results in
+  actual_results. This uses set semantics, i.e. any duplicates are ignored."""
+  expected_set, actual_set = convert_results_to_sets(expected_results, actual_results)
+  assert expected_set >= actual_set
+
 
 def verify_query_result_is_equal(expected_results, actual_results):
   assert_args_not_none(expected_results, actual_results)
@@ -213,6 +241,7 @@ def verify_query_result_is_not_in(expected_results, actual_results):
 # add more verifiers in the future. If a tag is not found, it defaults to verifying
 # equality.
 VERIFIER_MAP = {'VERIFY_IS_SUBSET' : verify_query_result_is_subset,
+                'VERIFY_IS_SUPERSET' : verify_query_result_is_superset,
                 'VERIFY_IS_EQUAL_SORTED'  : verify_query_result_is_equal,
                 'VERIFY_IS_EQUAL'  : verify_query_result_is_equal,
                 'VERIFY_IS_NOT_IN' : verify_query_result_is_not_in,
@@ -230,50 +259,65 @@ def verify_results(expected_results, actual_results, order_matters):
 
 def verify_errors(expected_errors, actual_errors):
   """Convert the errors to our test format, treating them as a single string column row
-  set. This requires enclosing the data in single quotes."""
-  expected = QueryTestResult(["'%s'" % l for l in expected_errors if l], ['STRING'],
-      ['DUMMY_LABEL'], order_matters=False)
+  set if not a row_regex. This requires enclosing the data in single quotes."""
+  converted_expected_errors = []
+  for expected_error in expected_errors:
+    if not expected_error: continue
+    if ROW_REGEX_PREFIX.match(expected_error):
+      converted_expected_errors.append(expected_error)
+    else:
+      converted_expected_errors.append("'%s'" % expected_error)
+  expected = QueryTestResult(converted_expected_errors, ['STRING'], ['DUMMY_LABEL'],
+      order_matters=False)
   actual = QueryTestResult(["'%s'" % l for l in actual_errors if l], ['STRING'],
       ['DUMMY_LABEL'], order_matters=False)
   VERIFIER_MAP['VERIFY_IS_EQUAL'](expected, actual)
 
-def apply_error_match_filter(error_list):
+def apply_error_match_filter(error_list, replace_filenames=True):
   """Applies a filter to each entry in the given list of errors to ensure result matching
   is stable."""
-  updated_errors = list()
-  for row in error_list:
-    # The actual file path isn't very interesting and can vary. Filter it out.
-    row = re.sub(r'^file:.+$|file hdfs:.+$', 'file: hdfs://regex:.$', row)
+  file_regex = r'%s.*/[\w\.\-]+' % NAMENODE
+  def replace_fn(row):
+    # The actual file path isn't very interesting and can vary. Change it to a canonical
+    # string that allows result rows to sort in the same order as expected rows.
+    if replace_filenames: row = re.sub(file_regex, '__HDFS_FILENAME__', row)
     # The "Backend <id>" can also vary, so filter it out as well.
-    updated_errors.append(re.sub(r'Backend \d+:', '', row))
-  return updated_errors
+    return re.sub(r'Backend \d+:', '', row)
+  return [replace_fn(row) for row in error_list]
 
-def verify_raw_results(test_section, exec_result, file_format, update_section=False):
+def verify_raw_results(test_section, exec_result, file_format, update_section=False,
+                       replace_filenames=True, result_section='RESULTS'):
   """
-  Accepts a raw exec_result object and verifies it matches the expected results.
+  Accepts a raw exec_result object and verifies it matches the expected results,
+  including checking the ERRORS, TYPES, and LABELS test sections.
   If update_section is true, updates test_section with the actual results
   if they don't match the expected results. If update_section is false, failed
   verifications result in assertion failures, otherwise they are ignored.
 
   This process includes the parsing/transformation of the raw data results into the
   result format used in the tests.
+
+  The result_section parameter can be used to make this function check the results in
+  a DML_RESULTS section instead of the regular RESULTS section.
+  TODO: separate out the handling of sections like ERRORS from checking of query results
+  to allow regular RESULTS/ERRORS sections in tests with DML_RESULTS (IMPALA-4471).
   """
   expected_results = None
-
-  if 'RESULTS' in test_section:
-    expected_results = remove_comments(test_section['RESULTS'])
+  if result_section in test_section:
+    expected_results = remove_comments(test_section[result_section])
   else:
+    assert 'ERRORS' not in test_section, "'ERRORS' section must have accompanying 'RESULTS' section"
     LOG.info("No results found. Skipping verification");
     return
-
   if 'ERRORS' in test_section:
-    expected_errors = remove_comments(test_section['ERRORS']).split('\n')
-    actual_errors = apply_error_match_filter(exec_result.log.split('\n'))
+    expected_errors = split_section_lines(remove_comments(test_section['ERRORS']))
+    actual_errors = apply_error_match_filter(exec_result.log.split('\n'),
+                                             replace_filenames)
     try:
       verify_errors(expected_errors, actual_errors)
     except AssertionError:
       if update_section:
-        test_section['ERRORS'] = '\n'.join(actual_errors)
+        test_section['ERRORS'] = join_section_lines(actual_errors)
       else:
         raise
 
@@ -281,17 +325,20 @@ def verify_raw_results(test_section, exec_result, file_format, update_section=Fa
     # Distinguish between an empty list and a list with an empty string.
     expected_types = list()
     if test_section.get('TYPES'):
-      expected_types = [c.strip().upper() for c in test_section['TYPES'].split(',')]
+      expected_types = [c.strip().upper() for c in test_section['TYPES'].rstrip('\n').split(',')]
+
+    # Avro and Kudu represent TIMESTAMP columns as strings, so tests using TIMESTAMP are
+    # skipped because results will be wrong.
+    if file_format in ('avro', 'kudu') and 'TIMESTAMP' in expected_types:
+        LOG.info("TIMESTAMP columns unsupported in %s, skipping verification." %\
+            file_format)
+        return
 
     # Avro does not support as many types as Hive, so the Avro test tables may
     # have different column types than we expect (e.g., INT instead of
-    # TINYINT). We represent TIMESTAMP columns as strings in Avro, so we bail in
-    # this case since the results will be wrong. Otherwise we bypass the type
-    # checking by ignoring the actual types of the Avro table.
+    # TINYINT). Bypass the type checking by ignoring the actual types of the Avro
+    # table.
     if file_format == 'avro':
-      if 'TIMESTAMP' in expected_types:
-        LOG.info("TIMESTAMP columns unsupported in Avro, skipping verification.")
-        return
       LOG.info("Skipping type verification of Avro-format table.")
       actual_types = expected_types
     else:
@@ -301,7 +348,7 @@ def verify_raw_results(test_section, exec_result, file_format, update_section=Fa
       verify_results(expected_types, actual_types, order_matters=True)
     except AssertionError:
       if update_section:
-        test_section['TYPES'] = ', '.join(actual_types)
+        test_section['TYPES'] = join_section_lines([', '.join(actual_types)])
       else:
         raise
   else:
@@ -323,7 +370,7 @@ def verify_raw_results(test_section, exec_result, file_format, update_section=Fa
       verify_results(expected_labels, actual_labels, order_matters=True)
     except AssertionError:
       if update_section:
-        test_section['LABELS'] = ', '.join(actual_labels)
+        test_section['LABELS'] = join_section_lines([', '.join(actual_labels)])
       else:
         raise
 
@@ -347,7 +394,7 @@ def verify_raw_results(test_section, exec_result, file_format, update_section=Fa
     expected_results_list = map(lambda s: s.replace('\n', '\\n'),
         re.findall(r'\[(.*?)\]', expected_results, flags=re.DOTALL))
   else:
-    expected_results_list = expected_results.split('\n')
+    expected_results_list = split_section_lines(expected_results)
   expected = QueryTestResult(expected_results_list, expected_types,
       actual_labels, order_matters)
   actual = QueryTestResult(parse_result_rows(exec_result), actual_types,
@@ -357,7 +404,7 @@ def verify_raw_results(test_section, exec_result, file_format, update_section=Fa
     VERIFIER_MAP[verifier](expected, actual)
   except AssertionError:
     if update_section:
-      test_section['RESULTS'] = '\n'.join(actual.result_list)
+      test_section[results_section] = join_section_lines(actual.result_list)
     else:
       raise
 
@@ -388,7 +435,7 @@ def parse_result_rows(exec_result):
   """
   raw_result = exec_result.data
   if not raw_result:
-    return ['']
+    return []
 
   # If the schema is 'None' assume this is an insert statement
   if exec_result.schema is None:
@@ -409,18 +456,87 @@ def parse_result_rows(exec_result):
     result.append(','.join(new_cols))
   return result
 
+# Special syntax for basic aggregation over fields in the runtime profile.
+# The syntax is:
+# aggregation(function, field_name): expected_value
+# Currently, the only implemented function is SUM and only integers are supported.
+AGGREGATION_PREFIX_PATTERN = 'aggregation\('
+AGGREGATION_PREFIX = re.compile(AGGREGATION_PREFIX_PATTERN)
+AGGREGATION_SYNTAX_MATCH_PATTERN = 'aggregation\((\w+)[ ]*,[ ]*(\w+)\):[ ]*(\d+)'
+
+def try_compile_aggregation(row_string):
+  """
+  Check to see if this row string specifies an aggregation. If the row string contains
+  an aggregation, it returns a tuple with all the information for evaluating the
+  aggregation. Otherwise, it returns None.
+  """
+  if row_string and AGGREGATION_PREFIX.match(row_string):
+    function, field, value = re.findall(AGGREGATION_SYNTAX_MATCH_PATTERN, row_string)[0]
+    # Validate function
+    assert(function == 'SUM')
+    # Validate value is integer
+    expected_value = int(value)
+    return (function, field, expected_value)
+  return None
+
+def compute_aggregation(function, field, runtime_profile):
+  """
+  Evaluate an aggregation function over a field on the runtime_profile. This skips
+  the averaged fragment and returns the aggregate value. It currently supports only
+  integer values and the SUM function.
+  """
+  start_avg_fragment_re = re.compile('[ ]*Averaged Fragment')
+  field_regex = "{0}: (\d+)".format(field)
+  field_regex_re = re.compile(field_regex)
+  inside_avg_fragment = False
+  avg_fragment_indent = None
+  past_avg_fragment = False
+  match_list = []
+  for line in runtime_profile.splitlines():
+    # Detect the boundaries of the averaged fragment by looking at indentation.
+    # The averaged fragment starts with a particular indentation level. All of
+    # its children are at a greater indent. When the indentation gets back to
+    # the level of the the averaged fragment start, then the averaged fragment
+    # is done.
+    if inside_avg_fragment:
+      indentation = len(line) - len(line.lstrip())
+      if indentation > avg_fragment_indent:
+        continue
+      else:
+        inside_avg_fragment = False
+        past_avg_fragment = True
+
+    if not past_avg_fragment and start_avg_fragment_re.match(line):
+      inside_avg_fragment = True
+      avg_fragment_indent = len(line) - len(line.lstrip())
+      continue
+
+    if (field_regex_re.search(line)):
+      match_list.extend(re.findall(field_regex, line))
+
+  int_match_list = map(int, match_list)
+  result = None
+  if function == 'SUM':
+    result = sum(int_match_list)
+
+  return result
+
 def verify_runtime_profile(expected, actual):
   """
   Check that lines matching all of the expected runtime profile entries are present
   in the actual text runtime profile. The check passes if, for each of the expected
   rows, at least one matching row is present in the actual runtime profile. Rows
-  with the "row_regex:" prefix are treated as regular expressions.
+  with the "row_regex:" prefix are treated as regular expressions. Rows with
+  the "aggregation(function,field): value" syntax specifies an aggregation over
+  the runtime profile.
   """
   expected_lines = remove_comments(expected).splitlines()
   matched = [False] * len(expected_lines)
   expected_regexes = []
+  expected_aggregations = []
   for expected_line in expected_lines:
     expected_regexes.append(try_compile_regex(expected_line))
+    expected_aggregations.append(try_compile_aggregation(expected_line))
 
   # Check the expected and actual rows pairwise.
   for line in actual.splitlines():
@@ -428,6 +544,9 @@ def verify_runtime_profile(expected, actual):
       if matched[i]: continue
       if expected_regexes[i] is not None:
         match = expected_regexes[i].match(line)
+      elif expected_aggregations[i] is not None:
+        # Aggregations are enforced separately
+        match = True
       else:
         match = expected_lines[i].strip() == line.strip()
       if match:
@@ -442,3 +561,33 @@ def verify_runtime_profile(expected, actual):
       "\nEXPECTED LINES:\n%s\n\nACTUAL PROFILE:\n%s" % ('\n'.join(unmatched_lines),
         actual))
 
+  # Compute the aggregations and check against values
+  for i in xrange(len(expected_aggregations)):
+    if (expected_aggregations[i] is None): continue
+    function, field, expected_value = expected_aggregations[i]
+    actual_value = compute_aggregation(function, field, actual)
+    assert actual_value == expected_value, ("Aggregation of %s over %s did not match "
+        "expected results.\nEXPECTED VALUE:\n%d\n\nACTUAL VALUE:\n%d"
+        "\n\nPROFILE:\n%s\n" % (function, field, expected_value, actual_value, actual))
+
+def get_node_exec_options(profile_string, exec_node_id):
+  """ Return a list with all of the ExecOption strings for the given exec node id. """
+  results = []
+  matched_node = False
+  id_string = "(id={0})".format(exec_node_id)
+  for line in profile_string.splitlines():
+    if matched_node and line.strip().startswith("ExecOption:"):
+      results.append(line.strip())
+    matched_node = False
+    if id_string in line:
+      # Check for the ExecOption string on the next line.
+      matched_node = True
+  return results
+
+def assert_codegen_enabled(profile_string, exec_node_ids):
+  """ Check that codegen is enabled for the given exec node ids by parsing the text
+  runtime profile in 'profile_string'"""
+  for exec_node_id in exec_node_ids:
+    for exec_options in get_node_exec_options(profile_string, exec_node_id):
+      assert 'Codegen Enabled' in exec_options
+      assert not 'Codegen Disabled' in exec_options

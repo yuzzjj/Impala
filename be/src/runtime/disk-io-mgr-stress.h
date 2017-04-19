@@ -1,21 +1,25 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_RUNTIME_DISK_IO_MGR_STRESS_H
 #define IMPALA_RUNTIME_DISK_IO_MGR_STRESS_H
 
+#include <memory>
 #include <vector>
 #include <boost/scoped_ptr.hpp>
 #include <boost/thread/mutex.hpp>
@@ -54,8 +58,8 @@ class DiskIoMgrStress {
   /// during the test
   std::vector<File> files_;
 
-  /// Dummy mem tracker
-  MemTracker dummy_tracker_;
+  /// Root mem tracker.
+  MemTracker mem_tracker_;
 
   /// io manager
   boost::scoped_ptr<DiskIoMgr> io_mgr_;
@@ -66,6 +70,9 @@ class DiskIoMgrStress {
   /// Array of clients
   int num_clients_;
   Client* clients_;
+
+  /// Client MemTrackers, one per client.
+  std::vector<std::unique_ptr<MemTracker>> client_mem_trackers_;
 
   /// If true, tests cancelling readers
   bool includes_cancellation_;

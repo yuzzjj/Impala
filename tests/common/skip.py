@@ -1,55 +1,67 @@
-# Copyright (c) 2015 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # Impala py.test skipif markers.  When a test can't be run against S3,
 # choose the appropriate reason (or add a new one if needed) and
 # annotate the class or test routine with the marker.
 #
 
-import re
 import os
 import pytest
 from functools import partial
-from tests.util.filesystem_utils import IS_DEFAULT_FS, IS_S3, IS_ISILON, IS_LOCAL
+
+from tests.common.environ import IMPALAD_BUILD, USING_OLD_AGGS_JOINS
+from tests.util.filesystem_utils import (
+    IS_ISILON,
+    IS_LOCAL,
+    IS_S3,
+    SECONDARY_FILESYSTEM)
 
 
 class SkipIfS3:
 
   # These ones are skipped due to product limitations.
-  insert = pytest.mark.skipif(IS_S3, reason="INSERT not implemented for S3")
-  load_data = pytest.mark.skipif(IS_S3, reason="LOAD DATA not implemented for S3")
   caching = pytest.mark.skipif(IS_S3, reason="SET CACHED not implemented for S3")
   hive = pytest.mark.skipif(IS_S3, reason="Hive doesn't work with S3")
   hdfs_block_size = pytest.mark.skipif(IS_S3, reason="S3 uses it's own block size")
+  hdfs_acls = pytest.mark.skipif(IS_S3, reason="HDFS acls are not supported on S3")
   jira = partial(pytest.mark.skipif, IS_S3)
+  hdfs_encryption = pytest.mark.skipif(IS_S3,
+      reason="HDFS encryption is not supported with S3")
 
   # These ones need test infra work to re-enable.
   udfs = pytest.mark.skipif(IS_S3, reason="udas/udfs not copied to S3")
   datasrc = pytest.mark.skipif(IS_S3, reason="data sources not copied to S3")
-  hdfs_client = pytest.mark.skipif(IS_S3, reason="hdfs_client doesn't work with S3")
   hbase = pytest.mark.skipif(IS_S3, reason="HBase not started with S3")
   qualified_path = pytest.mark.skipif(IS_S3,
       reason="Tests rely on HDFS qualified paths, IMPALA-1872")
 
+class SkipIfKudu:
+  unsupported_env = pytest.mark.skipif(os.environ["KUDU_IS_SUPPORTED"] == "false",
+      reason="Kudu is not supported in this environment")
+
 class SkipIf:
-  # Some tests require a non-default filesystem to be present.
-  default_fs = pytest.mark.skipif(IS_DEFAULT_FS, reason="Non-default filesystem needed")
   skip_hbase = pytest.mark.skipif(pytest.config.option.skip_hbase,
       reason="--skip_hbase argument specified")
-  not_default_fs = pytest.mark.skipif(not IS_DEFAULT_FS,
-      reason="Default filesystem needed")
-
+  kudu_not_supported = pytest.mark.skipif(os.environ["KUDU_IS_SUPPORTED"] == "false",
+      reason="Kudu is not supported")
+  not_s3 = pytest.mark.skipif(not IS_S3, reason="S3 Filesystem needed")
+  no_secondary_fs = pytest.mark.skipif(not SECONDARY_FILESYSTEM,
+      reason="Secondary filesystem needed")
 
 class SkipIfIsilon:
   caching = pytest.mark.skipif(IS_ISILON, reason="SET CACHED not implemented for Isilon")
@@ -64,21 +76,15 @@ class SkipIfIsilon:
       reason="This Isilon issue has yet to be triaged.")
   jira = partial(pytest.mark.skipif, IS_ISILON)
 
-# TODO: looking at TEST_START_CLUSTER_ARGS is a hack. It would be better to add an option
-# to pytest.
-test_start_cluster_args = os.environ.get("TEST_START_CLUSTER_ARGS","")
-old_agg_regex = "enable_partitioned_aggregation=false"
-old_hash_join_regex = "enable_partitioned_hash_join=false"
-using_old_aggs_joins = re.search(old_agg_regex, test_start_cluster_args) is not None or \
-    re.search(old_hash_join_regex, test_start_cluster_args) is not None
-
 class SkipIfOldAggsJoins:
-  nested_types = pytest.mark.skipif(using_old_aggs_joins,
+  nested_types = pytest.mark.skipif(USING_OLD_AGGS_JOINS,
       reason="Nested types not supported with old aggs and joins")
-  passthrough_preagg = pytest.mark.skipif(using_old_aggs_joins,
+  passthrough_preagg = pytest.mark.skipif(USING_OLD_AGGS_JOINS,
       reason="Passthrough optimization not implemented by old agg")
-  unsupported = pytest.mark.skipif(using_old_aggs_joins,
+  unsupported = pytest.mark.skipif(USING_OLD_AGGS_JOINS,
       reason="Query unsupported with old aggs and joins")
+  requires_spilling = pytest.mark.skipif(USING_OLD_AGGS_JOINS,
+      reason="Test case requires spilling to pass")
 
 class SkipIfLocal:
   # These ones are skipped due to product limitations.
@@ -107,21 +113,6 @@ class SkipIfLocal:
   root_path = pytest.mark.skipif(IS_LOCAL,
       reason="Tests rely on the root directory")
 
-# Try to derive the build type. Assume it's 'latest' by default.
-impala_home = os.environ.get("IMPALA_HOME", "")
-build_type_regex = re.compile(r'--build_type=(\w+)', re.I)
-build_type_search_result = re.search(build_type_regex, test_start_cluster_args)
-
-if build_type_search_result is not None:
-  build_type = build_type_search_result.groups()[0].lower()
-else:
-  build_type = 'latest'
-
-# Resolve any symlinks in the path.
-impalad_basedir = \
-    os.path.realpath(os.path.join(impala_home, 'be/build', build_type)).rstrip('/')
-debug_build = os.path.basename(impalad_basedir).lower() == 'debug'
-
-class SkipIfNotDebugBuild:
-  debug_only = pytest.mark.skipif(not debug_build,
+class SkipIfBuildType:
+  not_dev_build = pytest.mark.skipif(not IMPALAD_BUILD.is_dev(),
       reason="Tests depends on debug build startup option.")

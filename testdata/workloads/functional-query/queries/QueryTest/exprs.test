@@ -803,6 +803,35 @@ NULL
 boolean
 ====
 ---- QUERY
+# In predicate with strings
+select int_col, string_col from alltypesagg
+where string_col in ('212', '768', '1242', '124141', '0000', '99999')
+order by int_col limit 20
+---- RESULTS
+212,'212'
+212,'212'
+212,'212'
+212,'212'
+212,'212'
+212,'212'
+212,'212'
+212,'212'
+212,'212'
+212,'212'
+768,'768'
+768,'768'
+768,'768'
+768,'768'
+768,'768'
+768,'768'
+768,'768'
+768,'768'
+768,'768'
+768,'768'
+---- TYPES
+int,string
+====
+---- QUERY
 select count(*) from alltypesagg
 where true in (bool_col, tinyint_col)
 ---- RESULTS
@@ -1902,6 +1931,33 @@ CAUSED BY: InternalException: Could not compile regexp pattern: *
 Error: no argument for repetition operator: *
 ====
 ---- QUERY
+select sum(length(replace(y, x, 'bbbbbbbbbbb')))
+from (select cast(round(float_col) AS STRING) as x, string_col as y
+      from functional.alltypes) v;
+---- TYPES
+BIGINT
+---- RESULTS
+43800
+====
+---- QUERY
+select sum(length(replace(y, '0', x)))
+from (select cast(round(float_col) AS STRING) as x, string_col as y
+      from functional.alltypes) v;
+---- TYPES
+BIGINT
+---- RESULTS
+7300
+====
+---- QUERY
+select sum(length(concat(replace(y, '0', x), replace(y, '0', x))))
+from (select cast(round(float_col) AS STRING) as x, string_col as y
+      from functional.alltypes) v;
+---- TYPES
+BIGINT
+---- RESULTS
+14600
+====
+---- QUERY
 # Test for factorial operator
 select distinct int_col, int_col! from functional.alltypes order by 1
 ---- RESULTS
@@ -2414,4 +2470,267 @@ select CAST(1312822084003 as timestamp) FROM alltypestiny GROUP BY 1
 NULL
 ---- TYPES
 timestamp
+====
+---- QUERY
+# base64 encoding/decoding
+select count(*) from functional.alltypes
+where length(string_col) > 0 &&
+length(base64encode(string_col)) <= length(string_col)
+---- RESULTS
+0
+---- TYPES
+BIGINT
+====
+---- QUERY
+# base64 encoding/decoding
+select count (*) from functional.alltypes
+where base64decode(base64encode(string_col)) IS DISTINCT FROM string_col
+---- RESULTS
+0
+---- TYPES
+BIGINT
+====
+---- QUERY
+# base64 decoding a string of invalid length (must be divisible by 4)
+select base64decode('foo')
+---- RESULTS
+'NULL'
+---- TYPES
+STRING
+---- ERRORS
+UDF WARNING: Invalid base64 string; input length is 3, which is not a multiple of 4.
+====
+---- QUERY
+# base64 decoding a string with invalid characters
+select base64decode('abc%')
+---- RESULTS
+'NULL'
+---- TYPES
+STRING
+---- ERRORS
+UDF WARNING: Could not base64 decode input in space 4; actual output length 0
+====
+---- QUERY
+# IMPALA-1731: test parsing infinity values
+select cast('inf' as double), cast('InFinity' as float),
+    cast('inf ' as float), cast('  infinity ' as double),
+    cast('infinite' as double), cast('1.23inf' as double), cast('1inf' as float)
+---- RESULTS
+Infinity,Infinity,Infinity,Infinity,NULL,NULL,NULL
+---- TYPES
+double,float,float,double,double,double,float
+====
+---- QUERY
+# IMPALA-1731: test parsing NaN values
+select cast('nan' as double), cast('NaN' as float), cast(' nan   ' as double),
+    cast('nana' as double), cast('1.23nan' as double), cast('1nan' as float)
+---- RESULTS
+NaN,NaN,NaN,NULL,NULL,NULL
+---- TYPES
+double,float,double,double,double,float
+====
+---- QUERY
+# IMPALA-3868: test parsing float with multiple dots
+select cast('1.23' as double), cast('.1.23' as float), cast('123.456.' as double),
+    cast('1.23.456' as double), cast('1.23.4.5' as float), cast('0..e' as double)
+---- RESULTS
+1.23,NULL,NULL,NULL,NULL,NULL
+---- TYPES
+double,float,double,double,float,double
+====
+---- QUERY
+# IMPALA-4058: reverse assumed memory was 16-byte aligned; reverse 16, 17, 32, 33, and 64
+# byte strings
+select reverse('123456789abcdef0'), reverse('123456789abcdef01'),
+    reverse('123456789abcdef0!@#$%^&*(ABCDEF)'),
+    reverse('123456789abcdef0!@#$%^&*(ABCDEF)`'),
+    reverse('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ345678901234')
+---- RESULTS
+'0fedcba987654321','10fedcba987654321',')FEDCBA(*&^%$#@!0fedcba987654321','`)FEDCBA(*&^%$#@!0fedcba987654321','432109876543ZYXWVUTSRQPONMLKJIHGFEDCBAzyxwvutsrqponmlkjihgfedcba'
+---- TYPES
+STRING,STRING,STRING,STRING,STRING
+====
+---- QUERY
+# IMPALA-4196: Regression test for built-in bit-byte-functions with codegen
+select count(shiftleft(int_col, 1)) from functional_parquet.alltypes
+---- RESULTS
+7300
+---- TYPES
+bigint
+====
+---- QUERY
+# Test constant timestamp expressions in various query clauses. Exercises
+# timestamp literals when run with expr rewrites enabled.
+select count(now()) c, avg(cast('2016-11-22 16:40:00.00' as timestamp)) a,
+  cast('2016-11-22 16:40:00.00' as timestamp) as g
+from functional_parquet.alltypes
+where timestamp_col < cast('2013-02-18 20:46:00.01' as timestamp)
+group by g
+having a = cast('2016-11-22 16:40:00.00' as timestamp)
+order by c, cast('2016-11-22 16:40:00.00' as timestamp)
+---- RESULTS
+7300,2016-11-22 16:40:00,2016-11-22 16:40:00
+---- TYPES
+BIGINT, TIMESTAMP, TIMESTAMP
+====
+---- QUERY
+# Constant timestamp expressions in a join condition / runtime filter as well
+# as a select node.
+select count(*) from (
+  select a.timestamp_col from
+  functional_parquet.alltypessmall a
+  inner join functional_parquet.alltypestiny b
+  on cast('2013-02-18 20:46:00.01' as timestamp) + interval a.id years =
+     cast('2013-02-18 20:46:00.01' as timestamp) + interval b.id years
+  order by a.timestamp_col limit 10
+) v
+where timestamp_col < cast('2013-02-18 20:46:00.01' as timestamp)
+---- RESULTS
+8
+---- TYPES
+BIGINT
+====
+---- QUERY
+# IMPALA-4739: rewrites in HAVING clause
+select tinyint_col, count(*) cnt
+from functional_parquet.alltypesagg
+group by 1
+having cnt > 1000 or cnt > 1000
+  and cnt between 1500 and 2500
+---- TYPES
+TINYINT, BIGINT
+---- RESULTS
+NULL,2000
+====
+---- QUERY
+# IMPALA-4550: Regression test for proper cast analysis after slot substitution within a
+# no-op explicit cast.
+select /* +straight_join */ a.id
+from   functional.alltypestiny a
+join   functional.alltypestiny b on a.string_col = b.timestamp_col
+where  (cast(a.string_col as string) > 'a');
+---- RESULTS
+---- TYPES
+INT
+====
+---- QUERY
+# Test from_utc_timestamp() returning out-of-range result.
+select from_utc_timestamp(CAST("1400-01-01 05:00:00" as TIMESTAMP), "PST")
+from alltypes
+limit 1
+---- RESULTS
+NULL
+---- TYPES
+TIMESTAMP
+---- ERRORS
+UDF WARNING: Timestamp '1400-01-01 05:00:00' did not convert to a valid local time in timezone 'PST'
+====
+---- QUERY
+# Test from_utc_timestamp() returning out-of-range result.
+select to_utc_timestamp(CAST("1400-01-01 05:00:00" as TIMESTAMP), "JST")
+from alltypes
+limit 1
+---- RESULTS
+NULL
+---- TYPES
+TIMESTAMP
+---- ERRORS
+UDF WARNING: Timestamp '1400-01-01 05:00:00' in timezone 'JST' could not be converted to UTC
+====
+---- QUERY
+# Test out-of-range value handling when adding dates.
+select CAST('9999-12-31 21:00:00' AS TIMESTAMP) + INTERVAL 1 DAYS
+from alltypes
+limit 1
+---- RESULTS
+NULL
+---- TYPES
+TIMESTAMP
+---- ERRORS
+UDF WARNING: Cannot add interval 1: Year is out of valid range: 1400..9999
+====
+---- QUERY
+# Test out-of-range value handling when subtracting dates.
+select CAST('1400-01-01 21:00:00' AS TIMESTAMP) - INTERVAL 1 DAYS
+from alltypes
+limit 1
+---- RESULTS
+NULL
+---- TYPES
+TIMESTAMP
+---- ERRORS
+UDF WARNING: Cannot subtract interval 1: Year is out of valid range: 1400..9999
+====
+---- QUERY
+# IMPALA-4574: UUID() is not a constant expression.
+select count(*) from functional.alltypestiny group by concat(uuid(), "_test")
+---- RESULTS
+1
+1
+1
+1
+1
+1
+1
+1
+---- TYPES
+BIGINT
+====
+---- QUERY
+# IMPALA-4716: Tests that decode with 'when' values of different types is analyzed
+# correctly when expr rewrites are enabled.
+select decode(0, 1, 0, id, 1, 2) a from functional.alltypestiny order by a
+---- RESULTS
+1
+2
+2
+2
+2
+2
+2
+2
+---- TYPES
+TINYINT
+====
+---- QUERY
+# Test expr rewrite behavior of IF with constant conditions.
+select if(true, id * 10, 0) from functional.alltypestiny where id = if(false, 0, 1)
+---- RESULTS
+10
+---- TYPES
+BIGINT
+====
+---- QUERY
+# Test expr rewrite behavior of CompoundPredicate with constant conditions.
+select id, null and id = 0 from functional.alltypestiny where id < 2 or false
+---- RESULTS
+0,NULL
+1,false
+---- TYPES
+INT,BOOLEAN
+====
+---- QUERY
+# Test expr rewrite behavior of CASE with constant conditions.
+select id, case id when null then null when 1 then 10 when true then 20 end
+from functional.alltypestiny
+where id = case when false then 0 when 1 = 1 then 1 else 2 end
+---- RESULTS
+1,10
+---- TYPES
+INT,TINYINT
+====
+---- QUERY
+# IMPALA-4849: verify that DISTINCT with a CASE that is rewritten analyzes correctly.
+select distinct case when true then id else 0 end from functional.alltypestiny
+---- RESULTS
+0
+1
+2
+3
+4
+5
+6
+7
+---- TYPES
+INT
 ====

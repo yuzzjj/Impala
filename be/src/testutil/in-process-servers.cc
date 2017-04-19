@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "testutil/in-process-servers.h"
 
@@ -31,24 +34,32 @@
 
 DECLARE_string(ssl_server_certificate);
 DECLARE_string(ssl_private_key);
+DECLARE_int32(be_port);
 
 using namespace apache::thrift;
 using namespace impala;
-using boost::shared_ptr;
-
-/// Pick a random port in the range of ephemeral ports
-/// https://tools.ietf.org/html/rfc6335
-static uint32_t RandomEphemeralPort() {
-  static uint32_t LOWER = 49152, UPPER = 65000;
-  return LOWER + rand() % (UPPER - LOWER);
-}
 
 InProcessImpalaServer* InProcessImpalaServer::StartWithEphemeralPorts(
     const string& statestore_host, int statestore_port) {
-  for (uint32_t tries = 0; tries < 10; ++tries) {
-    uint32_t p = RandomEphemeralPort();
-    uint32_t backend_port = p, subscriber_port = ++p, webserver_port = ++p,
-        beeswax_port = ++p, hs2_port = ++p;
+  for (int tries = 0; tries < 10; ++tries) {
+    int backend_port = FindUnusedEphemeralPort();
+    if (backend_port == -1) continue;
+    // This flag is read directly in several places to find the address of the local
+    // backend interface.
+    FLAGS_be_port = backend_port;
+
+    int subscriber_port = FindUnusedEphemeralPort();
+    if (subscriber_port == -1) continue;
+
+    int webserver_port = FindUnusedEphemeralPort();
+    if (webserver_port == -1) continue;
+
+    int beeswax_port = FindUnusedEphemeralPort();
+    if (beeswax_port == -1) continue;
+
+    int hs2_port = FindUnusedEphemeralPort();
+    if (hs2_port == -1) continue;
+
     InProcessImpalaServer* impala =
         new InProcessImpalaServer("localhost", backend_port, subscriber_port,
             webserver_port, statestore_host, statestore_port);
@@ -122,9 +133,13 @@ Status InProcessImpalaServer::Join() {
 }
 
 InProcessStatestore* InProcessStatestore::StartWithEphemeralPorts() {
-  for (uint32_t tries = 0; tries < 10; ++tries) {
-    uint32_t p = RandomEphemeralPort();
-    uint32_t statestore_port = p, webserver_port = ++p;
+  for (int tries = 0; tries < 10; ++tries) {
+    int statestore_port = FindUnusedEphemeralPort();
+    if (statestore_port == -1) continue;
+
+    int webserver_port = FindUnusedEphemeralPort();
+    if (webserver_port == -1) continue;
+
     InProcessStatestore* ips = new InProcessStatestore(statestore_port, webserver_port);
     if (ips->Start().ok()) return ips;
     delete ips;
@@ -144,14 +159,14 @@ InProcessStatestore::InProcessStatestore(int statestore_port, int webserver_port
 
 Status InProcessStatestore::Start() {
   webserver_->Start();
-  shared_ptr<TProcessor> processor(
+  boost::shared_ptr<TProcessor> processor(
       new StatestoreServiceProcessor(statestore_->thrift_iface()));
 
   statestore_server_.reset(new ThriftServer("StatestoreService", processor,
       statestore_port_, NULL, metrics_.get(), 5));
   if (EnableInternalSslConnections()) {
     LOG(INFO) << "Enabling SSL for Statestore";
-    EXIT_IF_ERROR(statestore_server_->EnableSsl(
+    ABORT_IF_ERROR(statestore_server_->EnableSsl(
         FLAGS_ssl_server_certificate, FLAGS_ssl_private_key));
   }
   statestore_main_loop_.reset(

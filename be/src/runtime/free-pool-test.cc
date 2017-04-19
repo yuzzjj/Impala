@@ -1,23 +1,26 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <string>
-#include <gtest/gtest.h>
 
 #include "runtime/free-pool.h"
 #include "runtime/mem-pool.h"
 #include "runtime/mem-tracker.h"
+#include "testutil/gtest-util.h"
 
 #include "common/names.h"
 
@@ -45,7 +48,7 @@ TEST(FreePoolTest, Basic) {
   for (int i = 0; i < 10; ++i) {
     uint8_t* p2 = pool.Allocate(1);
     *p2 = 111;
-    ASSERT_EQ(p1, p2);
+    EXPECT_EQ(p1, p2);
     EXPECT_EQ(mem_pool.total_allocated_bytes(), 16);
     pool.Free(p2);
   }
@@ -61,28 +64,52 @@ TEST(FreePoolTest, Basic) {
   pool.Free(p2);
   pool.Free(p3);
 
-  // We know have 2 1 byte allocations. Make a two byte allocation.
+  // We know have 2 1 byte allocations, which were rounded up to 8 bytes. Make an 8
+  // byte allocation, which can reuse one of the existing ones.
   uint8_t* p4 = pool.Allocate(2);
   memset(p4, 2, 123);
-  EXPECT_EQ(mem_pool.total_allocated_bytes(), 48);
-  EXPECT_TRUE(p4 != p1);
-  EXPECT_TRUE(p4 != p2);
-  EXPECT_TRUE(p4 != p3);
+  EXPECT_EQ(mem_pool.total_allocated_bytes(), 32);
+  EXPECT_TRUE(p4 == p1 || p4 == p2 || p4 == p3);
   pool.Free(p4);
+
+  // Make a 9 byte allocation, which requires a new allocation.
+  uint8_t* p5 = pool.Allocate(9);
+  memset(p5, 9, 123);
+  EXPECT_EQ(mem_pool.total_allocated_bytes(), 56);
+  pool.Free(p5);
+  EXPECT_TRUE(p5 != p1);
+  EXPECT_TRUE(p5 != p2);
+  EXPECT_TRUE(p5 != p3);
 
   // Everything's freed. Try grabbing the ones that have been allocated.
   p1 = pool.Allocate(1);
   *p1 = 123;
   p2 = pool.Allocate(1);
   *p2 = 123;
-  p3 = pool.Allocate(2);
-  memset(p3, 123, 2);
-  EXPECT_EQ(mem_pool.total_allocated_bytes(), 48);
+  p5 = pool.Allocate(9);
+  memset(p5, 123, 9);
+  EXPECT_EQ(mem_pool.total_allocated_bytes(), 56);
 
   // Make another 1 byte allocation.
   p4 = pool.Allocate(1);
   *p4 = 1;
-  EXPECT_EQ(mem_pool.total_allocated_bytes(), 64);
+  EXPECT_EQ(mem_pool.total_allocated_bytes(), 72);
+
+  mem_pool.FreeAll();
+
+  // Try making allocations larger than 1GB.
+  uint8_t* p6 = pool.Allocate(1LL << 32);
+  EXPECT_TRUE(p6 != NULL);
+  for (int64_t i = 0; i < (1LL << 32); i += (1 << 29)) {
+    *(p6 + i) = i;
+  }
+  EXPECT_EQ(mem_pool.total_allocated_bytes(), (1LL << 32) + 8);
+
+  // Test zero-byte allocation.
+  p6 = pool.Allocate(0);
+  EXPECT_TRUE(p6 != NULL);
+  EXPECT_EQ(mem_pool.total_allocated_bytes(), (1LL << 32) + 8);
+  pool.Free(p6);
 
   mem_pool.FreeAll();
 }
@@ -96,13 +123,13 @@ TEST(FreePoolTest, Loop) {
   MemPool mem_pool(&tracker);
   FreePool pool(&mem_pool);
 
-  map<int, pair<uint8_t*, uint8_t*> > primed_allocations;
-  vector<int> allocation_sizes;
+  map<int64_t, pair<uint8_t*, uint8_t*>> primed_allocations;
+  vector<int64_t> allocation_sizes;
 
   int64_t expected_pool_size = 0;
 
   // Pick a non-power of 2 to exercise more code.
-  for (int size = 3; size < 1024 * 1024 * 1024; size *= 3) {
+  for (int64_t size = 5; size < 6LL * 1024 * 1024 * 1024; size *= 5) {
     uint8_t* p1 = pool.Allocate(size);
     uint8_t* p2 = pool.Allocate(size);
     EXPECT_TRUE(p1 != NULL);
@@ -163,13 +190,20 @@ TEST(FreePoolTest, ReAlloc) {
   ptr = pool.Allocate(600);
   EXPECT_EQ(mem_pool.total_allocated_bytes(), 1024 + 8 + 2048 + 8);
 
+  // Try allocation larger than 1GB.
+  uint8_t* ptr4 = pool.Reallocate(ptr3, 1LL << 32);
+  EXPECT_TRUE(ptr3 != ptr4);
+  EXPECT_EQ(mem_pool.total_allocated_bytes(), 1024 + 8 + 2048 + 8 + (1LL << 32) + 8);
+
+  // Shrink the allocation.
+  uint8_t* ptr5 = pool.Reallocate(ptr4, 1024);
+  EXPECT_TRUE(ptr4 == ptr5);
+  EXPECT_EQ(mem_pool.total_allocated_bytes(), 1024 + 8 + 2048 + 8 + (1LL << 32) + 8);
+  pool.Free(ptr5);
+
   mem_pool.FreeAll();
 }
 
 }
 
-int main(int argc, char **argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
-
+IMPALA_TEST_MAIN();

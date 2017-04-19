@@ -1,30 +1,33 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_UTIL_DICT_ENCODING_H
 #define IMPALA_UTIL_DICT_ENCODING_H
 
 #include <map>
 
-#include <boost/foreach.hpp>
 #include <boost/unordered_map.hpp>
 
+#include "gutil/bits.h"
+#include "gutil/strings/substitute.h"
 #include "exec/parquet-common.h"
 #include "runtime/mem-pool.h"
 #include "runtime/string-value.h"
 #include "util/rle-encoding.h"
-#include "util/runtime-profile.h"
 
 namespace impala {
 
@@ -70,7 +73,7 @@ class DictEncoderBase {
   int bit_width() const {
     if (UNLIKELY(num_entries() == 0)) return 0;
     if (UNLIKELY(num_entries() == 1)) return 1;
-    return BitUtil::Log2(num_entries());
+    return Bits::Log2Ceiling64(num_entries());
   }
 
   /// Writes out any buffered indices to buffer preceded by the bit width of this data.
@@ -164,19 +167,29 @@ class DictEncoder : public DictEncoderBase {
 /// by the caller and valid as long as this object is.
 class DictDecoderBase {
  public:
-  /// The rle encoded indices into the dictionary.
-  void SetData(uint8_t* buffer, int buffer_len) {
-    DCHECK_GT(buffer_len, 0);
+  /// The rle encoded indices into the dictionary. Returns an error status if the buffer
+  /// is too short or the bit_width metadata in the buffer is invalid.
+  Status SetData(uint8_t* buffer, int buffer_len) {
+    DCHECK_GE(buffer_len, 0);
+    if (UNLIKELY(buffer_len == 0)) return Status("Dictionary cannot be 0 bytes");
     uint8_t bit_width = *buffer;
-    DCHECK_GE(bit_width, 0);
+    if (UNLIKELY(bit_width < 0 || bit_width > BitReader::MAX_BITWIDTH)) {
+      return Status(strings::Substitute("Dictionary has invalid or unsupported bit "
+          "width: $0", bit_width));
+    }
     ++buffer;
     --buffer_len;
     data_decoder_.Reset(buffer, buffer_len, bit_width);
+    return Status::OK();
   }
 
   virtual ~DictDecoderBase() {}
 
   virtual int num_entries() const = 0;
+
+  /// Reads the dictionary value at the specified index into the buffer provided.
+  /// The buffer must be large enough to receive the datatype for this dictionary.
+  virtual void GetValue(int index, void* buffer) = 0;
 
  protected:
   RleDecoder data_decoder_;
@@ -185,26 +198,33 @@ class DictDecoderBase {
 template<typename T>
 class DictDecoder : public DictDecoderBase {
  public:
-  /// The input buffer containing the dictionary.  'dict_len' is the byte length
-  /// of dict_buffer.
+  /// Construct empty dictionary.
+  DictDecoder() {}
+
+  /// Initialize the decoder with an input buffer containing the dictionary.
+  /// 'dict_len' is the byte length of dict_buffer.
   /// For string data, the decoder returns StringValues with data directly from
   /// dict_buffer (i.e. no copies).
   /// fixed_len_size is the size that must be passed to decode fixed-length
   /// dictionary values (values stored using FIXED_LEN_BYTE_ARRAY).
-  DictDecoder(uint8_t* dict_buffer, int dict_len, int fixed_len_size);
-
-  /// Construct empty dictionary.
-  DictDecoder() {}
-
-  /// Reset decoder to fresh state.
-  void Reset(uint8_t* dict_buffer, int dict_len, int fixed_len_size);
+  /// Returns true if the dictionary values were all successfully decoded, or false
+  /// if the dictionary was corrupt.
+  bool Reset(uint8_t* dict_buffer, int dict_len, int fixed_len_size);
 
   virtual int num_entries() const { return dict_.size(); }
+
+  virtual void GetValue(int index, void* buffer) {
+    T* val_ptr = reinterpret_cast<T*>(buffer);
+    DCHECK_GE(index, 0);
+    DCHECK_LT(index, dict_.size());
+    // TODO: is there any circumstance where this should be a memcpy?
+    *val_ptr = dict_[index];
+  }
 
   /// Returns the next value.  Returns false if the data is invalid.
   /// For StringValues, this does not make a copy of the data.  Instead,
   /// the string data is from the dictionary buffer passed into the c'tor.
-  bool GetValue(T* value);
+  bool GetNextValue(T* value);
 
  private:
   std::vector<T> dict_;
@@ -266,7 +286,7 @@ inline int DictEncoder<StringValue>::AddToTable(const StringValue& value,
 }
 
 template<typename T>
-inline bool DictDecoder<T>::GetValue(T* value) {
+inline bool DictDecoder<T>::GetNextValue(T* value) {
   int index = -1; // Initialize to avoid compiler warning.
   bool result = data_decoder_.Get(&index);
   // Use & to avoid branches.
@@ -278,7 +298,7 @@ inline bool DictDecoder<T>::GetValue(T* value) {
 }
 
 template<>
-inline bool DictDecoder<Decimal16Value>::GetValue(Decimal16Value* value) {
+inline bool DictDecoder<Decimal16Value>::GetNextValue(Decimal16Value* value) {
   int index;
   bool result = data_decoder_.Get(&index);
   if (!result) return false;
@@ -293,7 +313,7 @@ inline bool DictDecoder<Decimal16Value>::GetValue(Decimal16Value* value) {
 
 template<typename T>
 inline void DictEncoder<T>::WriteDict(uint8_t* buffer) {
-  BOOST_FOREACH(const Node& node, nodes_) {
+  for (const Node& node: nodes_) {
     buffer += ParquetPlainEncoder::Encode(buffer, encoded_value_size_, node.value);
   }
 }
@@ -305,7 +325,7 @@ inline int DictEncoderBase::WriteData(uint8_t* buffer, int buffer_len) {
   --buffer_len;
 
   RleEncoder encoder(buffer, buffer_len, bit_width());
-  BOOST_FOREACH(int index, buffered_indices_) {
+  for (int index: buffered_indices_) {
     if (!encoder.Put(index)) return -1;
   }
   encoder.Flush();
@@ -313,22 +333,19 @@ inline int DictEncoderBase::WriteData(uint8_t* buffer, int buffer_len) {
 }
 
 template<typename T>
-inline DictDecoder<T>::DictDecoder(uint8_t* dict_buffer, int dict_len,
-    int fixed_len_size) {
-  Reset(dict_buffer, dict_len, fixed_len_size);
-}
-
-template<typename T>
-inline void DictDecoder<T>::Reset(uint8_t* dict_buffer, int dict_len,
+inline bool DictDecoder<T>::Reset(uint8_t* dict_buffer, int dict_len,
     int fixed_len_size) {
   dict_.clear();
   uint8_t* end = dict_buffer + dict_len;
   while (dict_buffer < end) {
     T value;
-    dict_buffer +=
-        ParquetPlainEncoder::Decode(dict_buffer, fixed_len_size, &value);
+    int decoded_len =
+        ParquetPlainEncoder::Decode(dict_buffer, end, fixed_len_size, &value);
+    if (UNLIKELY(decoded_len < 0)) return false;
+    dict_buffer += decoded_len;
     dict_.push_back(value);
   }
+  return true;
 }
 
 }

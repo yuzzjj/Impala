@@ -1,5 +1,21 @@
 #!/bin/bash
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 set -euo pipefail
 trap 'echo Error in $0 at line $LINENO: $(cd "'$PWD'" && awk "NR == $LINENO" $0)' ERR
@@ -7,7 +23,7 @@ trap 'echo Error in $0 at line $LINENO: $(cd "'$PWD'" && awk "NR == $LINENO" $0)
 CLUSTER_BIN=${IMPALA_HOME}/testdata/bin
 HBASE_JAAS_CLIENT=${HBASE_CONF_DIR}/hbase-jaas-client.conf
 HBASE_JAAS_SERVER=${HBASE_CONF_DIR}/hbase-jaas-server.conf
-HBASE_LOGDIR=${IMPALA_TEST_CLUSTER_LOG_DIR}/hbase
+HBASE_LOGDIR=${IMPALA_CLUSTER_LOGS_DIR}/hbase
 
 # Kill and clean data for a clean start.
 ${CLUSTER_BIN}/kill-hbase.sh > /dev/null 2>&1
@@ -22,10 +38,10 @@ export HBASE_LOG_DIR=${HBASE_LOGDIR}
 export HBASE_PID_DIR=${HBASE_LOGDIR}
 EOF
 
-# Put zookeeper things in the cluster_logs/zoo directory.
+# Put zookeeper things in the logs/cluster/zoo directory.
 # (See hbase.zookeeper.property.dataDir in hbase-site.xml)
-rm -rf ${IMPALA_TEST_CLUSTER_LOG_DIR}/zoo
-mkdir -p ${IMPALA_TEST_CLUSTER_LOG_DIR}/zoo
+rm -rf ${IMPALA_CLUSTER_LOGS_DIR}/zoo
+mkdir -p ${IMPALA_CLUSTER_LOGS_DIR}/zoo
 mkdir -p ${HBASE_LOGDIR}
 
 if ${CLUSTER_DIR}/admin is_kerberized; then
@@ -73,18 +89,42 @@ export HBASE_REGIONSERVER_OPTS="${K1} ${K2} ${K4}"
 EOF
 fi
 
-# To work around HBase bug (HBASE-4467), unset $HADOOP_HOME before calling hbase
-HADOOP_HOME=
+: ${HBASE_START_RETRY_ATTEMPTS=5}
 
-# Start HBase and 3 regionserver
-$HBASE_HOME/bin/start-hbase.sh 2>&1 | tee ${HBASE_LOGDIR}/hbase-startup.out
+# `rm -f` hbase startup output capture so that `tee -a` below appends
+# only for the lifetime of this script
+rm -f ${HBASE_LOGDIR}/hbase-startup.out ${HBASE_LOGDIR}/hbase-rs-startup.out
 
-# TODO: Remove once the race between master and RS has been resolved.
-# Note wait-for-hbase-master.py requires having org.apache.zookeeper.ZooKeeperMain on the
-# classpath. ZooKeeper has conflicts with JARs added as part of set-classpath.sh, so
-# generate a valid classpath using the 'hadoop classpath' command.
-export CLASSPATH=`hadoop classpath`
-${CLUSTER_BIN}/wait-for-hbase-master.py
+for ((i=1; i <= HBASE_START_RETRY_ATTEMPTS; ++i)); do
+  echo "HBase start attempt: ${i}/${HBASE_START_RETRY_ATTEMPTS}"
 
-$HBASE_HOME/bin/local-regionservers.sh start 1 2 3 2>&1 | \
-    tee ${HBASE_LOGDIR}/hbase-rs-startup.out
+  echo "Killing any HBase processes possibly lingering from previous start attempts"
+  ${IMPALA_HOME}/testdata/bin/kill-hbase.sh
+  if ((i > 1)); then
+    HBASE_WAIT_AFTER_KILL=$((${i} * 2))
+    echo "Waiting ${HBASE_WAIT_AFTER_KILL} seconds before trying again..."
+    sleep ${HBASE_WAIT_AFTER_KILL}
+  fi
+
+  if ((i < HBASE_START_RETRY_ATTEMPTS)); then
+    # Here, we don't want errexit to take effect, so we use if blocks to control the flow.
+    if ! ${HBASE_HOME}/bin/start-hbase.sh 2>&1 | tee -a ${HBASE_LOGDIR}/hbase-startup.out
+    then
+      echo "HBase Master startup failed"
+    elif ! ${HBASE_HOME}/bin/local-regionservers.sh start 2 3 2>&1 | \
+        tee -a ${HBASE_LOGDIR}/hbase-rs-startup.out
+    then
+      echo "HBase regionserver startup failed"
+    else
+      break
+    fi
+  else
+    # In the last iteration, it's fine for errexit to do its thing.
+    ${HBASE_HOME}/bin/start-hbase.sh 2>&1 | tee -a ${HBASE_LOGDIR}/hbase-startup.out
+    ${HBASE_HOME}/bin/local-regionservers.sh start 2 3 2>&1 | \
+        tee -a ${HBASE_LOGDIR}/hbase-rs-startup.out
+  fi
+
+done
+${CLUSTER_BIN}/check-hbase-nodes.py
+echo "HBase startup scripts succeeded"

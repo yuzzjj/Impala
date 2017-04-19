@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_RUNTIME_THREAD_RESOURCE_MGR_H
 #define IMPALA_RUNTIME_THREAD_RESOURCE_MGR_H
@@ -18,10 +21,7 @@
 #include <stdlib.h>
 
 #include <boost/function.hpp>
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
 #include <boost/thread/mutex.hpp>
-#include <boost/thread/thread.hpp>
 
 #include <list>
 
@@ -60,6 +60,8 @@ namespace impala {
 ///  - Priorities for different pools
 /// If both the mgr and pool locks need to be taken, the mgr lock must
 /// be taken first.
+///
+/// TODO: make ResourcePool a stand-alone class
 class ThreadResourceMgr {
  public:
   class ResourcePool;
@@ -72,8 +74,6 @@ class ThreadResourceMgr {
   /// when it is called, a thread is available (the quota could have changed again in
   /// between).  It is simply that something might have happened (similar to condition
   /// variable semantics).
-  /// TODO: this is manageable now since it just needs to call into the io
-  /// mgr.  What's the best model for something more general.
   typedef boost::function<void (ResourcePool*)> ThreadAvailableCb;
 
   /// Pool abstraction for a single resource pool.
@@ -114,13 +114,15 @@ class ThreadResourceMgr {
     /// Must not be called from from ThreadAvailableCb.
     void ReleaseThreadToken(bool required);
 
-    /// Add a callback to be notified when a thread is available.
-    /// 'arg' is opaque and passed directly to the callback.
-    /// The previous callback is no longer notified.
+    /// Register a callback to be notified when a thread is available.
+    /// Returns a unique id to be used when removing the callback.
     /// TODO: rethink this.  How we do coordinate when we have multiple places in
     /// the execution that all need threads (e.g. do we use that thread for
     /// the scanner or for the join).
-    void SetThreadAvailableCb(ThreadAvailableCb fn);
+    int AddThreadAvailableCb(ThreadAvailableCb fn);
+
+    /// Unregister the callback corresponding to 'id'.
+    void RemoveThreadAvailableCb(int id);
 
     /// Returns the number of threads that are from AcquireThreadToken.
     int num_required_threads() const { return num_threads_ & 0xFFFFFFFF; }
@@ -170,6 +172,9 @@ class ThreadResourceMgr {
     /// Resets internal state.
     void Reset();
 
+    /// Invoke registered callbacks in round-robin manner until the quota is exhausted.
+    void InvokeCallbacks();
+
     ThreadResourceMgr* parent_;
 
     int max_quota_;
@@ -186,7 +191,16 @@ class ThreadResourceMgr {
     /// TODO: reconsider this.
     boost::mutex lock_;
 
-    ThreadAvailableCb thread_available_fn_;
+    /// A vector of registered callback functions. Entries will be NULL
+    /// for unregistered functions.
+    std::vector<ThreadAvailableCb> thread_callbacks_;
+
+    /// The number of registered callbacks (i.e. the number of non-NULL entries in
+    /// thread_callbacks_).
+    int num_callbacks_;
+
+    /// The index into thread_callbacks_ of the next callback to invoke.
+    int next_callback_idx_;
   };
 
   /// Create a thread mgr object.  If threads_quota is non-zero, it will be
@@ -268,19 +282,7 @@ inline void ThreadResourceMgr::ResourcePool::ReleaseThreadToken(bool required) {
       }
     }
   }
-
-  /// We need to grab a lock before issuing the callback to prevent the
-  /// callback from being removed while it is happening.
-  /// Note: this is unlikely to be a big deal for performance currently
-  /// since only scanner threads call this with any frequency and that only
-  /// happens once when the scanner thread is complete.
-  /// TODO: reconsider this.
-  if (num_available_threads() > 0 && thread_available_fn_ != NULL) {
-    boost::unique_lock<boost::mutex> l(lock_);
-    if (num_available_threads() > 0 && thread_available_fn_ != NULL) {
-      thread_available_fn_(this);
-    }
-  }
+  InvokeCallbacks();
 }
 
 } // namespace impala

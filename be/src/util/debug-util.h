@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_UTIL_DEBUG_UTIL_H
 #define IMPALA_UTIL_DEBUG_UTIL_H
@@ -29,7 +32,6 @@
 #include "gen-cpp/RuntimeProfile_types.h"
 #include "gen-cpp/ImpalaService_types.h"
 #include "gen-cpp/parquet_types.h"
-#include "gen-cpp/Llama_types.h"
 
 #include "runtime/descriptors.h" // for SchemaPath
 
@@ -69,8 +71,13 @@ std::string PrintEncoding(const parquet::Encoding::type& type);
 std::string PrintAsHex(const char* bytes, int64_t len);
 std::string PrintTMetricKind(const TMetricKind::type& type);
 std::string PrintTUnit(const TUnit::type& type);
+std::string PrintTImpalaQueryOptions(const TImpalaQueryOptions::type& type);
+
 /// Returns the fully qualified path, e.g. "database.table.array_col.item.field"
 std::string PrintPath(const TableDescriptor& tbl_desc, const SchemaPath& path);
+/// Same as PrintPath(), but truncates the path after the given 'end_path_idx'.
+std::string PrintSubPath(const TableDescriptor& tbl_desc, const SchemaPath& path,
+    int end_path_idx);
 /// Returns the numeric path without column/field names, e.g. "[0,1,2]"
 std::string PrintNumericPath(const SchemaPath& path);
 
@@ -96,6 +103,23 @@ std::string GetVersionString(bool compact = false);
 /// Note: there is a libc bug that causes this not to work on 64 bit machines
 /// for recursive calls.
 std::string GetStackTrace();
+
+/// Returns the backend name in "host:port" form suitable for human consumption.
+std::string GetBackendString();
+
+// FILE_CHECKs are conditions that we expect to be true but could fail due to a malformed
+// input file. They differentiate these cases from DCHECKs, which indicate conditions that
+// are true unless there's a bug in Impala. We would ideally always return a bad Status
+// instead of failing a FILE_CHECK, but in many cases we use FILE_CHECK instead because
+// there's a performance cost to doing the check in a release build, or just due to legacy
+// code.
+#define FILE_CHECK(a) DCHECK(a)
+#define FILE_CHECK_EQ(a, b) DCHECK_EQ(a, b)
+#define FILE_CHECK_NE(a, b) DCHECK_NE(a, b)
+#define FILE_CHECK_GT(a, b) DCHECK_GT(a, b)
+#define FILE_CHECK_LT(a, b) DCHECK_LT(a, b)
+#define FILE_CHECK_GE(a, b) DCHECK_GE(a, b)
+#define FILE_CHECK_LE(a, b) DCHECK_LE(a, b)
 
 }
 

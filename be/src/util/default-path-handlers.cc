@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/default-path-handlers.h"
 
@@ -19,7 +22,7 @@
 #include <sys/stat.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/bind.hpp>
-#include <google/malloc_extension.h>
+#include <gperftools/malloc_extension.h>
 #include <gutil/strings/substitute.h>
 
 #include "common/logging.h"
@@ -68,18 +71,53 @@ void LogsHandler(const Webserver::ArgumentMap& args, Document* document) {
   }
 }
 
-// Registered to handle "/flags", and produces Json with 'title" and 'contents' members
-// where the latter is a string with all the command-line flags and their values.
+// Registered to handle "/flags", and produces json containing an array of flag metadata
+// objects:
+//
+// "title": "Command-line Flags",
+// "flags": [
+//     {
+//       "name": "catalog_service_port",
+//       "type": "int32",
+//       "description": "port where the CatalogService is running",
+//       "default": "26000",
+//       "current": "26000"
+//     },
+// .. etc
 void FlagsHandler(const Webserver::ArgumentMap& args, Document* document) {
+  vector<CommandLineFlagInfo> flag_info;
+  GetAllFlags(&flag_info);
+  Value flag_arr(kArrayType);
+  for (const CommandLineFlagInfo& flag: flag_info) {
+    Value flag_val(kObjectType);
+    Value name(flag.name.c_str(), document->GetAllocator());
+    flag_val.AddMember("name", name, document->GetAllocator());
+
+    Value type(flag.type.c_str(), document->GetAllocator());
+    flag_val.AddMember("type", type, document->GetAllocator());
+
+    Value description(flag.description.c_str(), document->GetAllocator());
+    flag_val.AddMember("description", description, document->GetAllocator());
+
+    Value default_value(flag.default_value.c_str(), document->GetAllocator());
+    flag_val.AddMember("default", default_value, document->GetAllocator());
+
+    Value current_value(flag.current_value.c_str(), document->GetAllocator());
+    flag_val.AddMember("current", current_value, document->GetAllocator());
+
+    if (!flag.is_default) {
+      flag_val.AddMember("value_changed", 1, document->GetAllocator());
+    }
+    flag_arr.PushBack(flag_val, document->GetAllocator());
+  }
   Value title("Command-line Flags", document->GetAllocator());
   document->AddMember("title", title, document->GetAllocator());
-  Value flags(CommandlineFlagsIntoString().c_str(), document->GetAllocator());
-  document->AddMember("contents", flags, document->GetAllocator());
+  document->AddMember("flags", flag_arr, document->GetAllocator());
 }
 
 // Registered to handle "/memz"
-void MemUsageHandler(MemTracker* mem_tracker, const Webserver::ArgumentMap& args,
-    Document* document) {
+void MemUsageHandler(MemTracker* mem_tracker, MetricGroup* metric_group,
+    const Webserver::ArgumentMap& args, Document* document) {
   DCHECK(mem_tracker != NULL);
   Value mem_limit(PrettyPrinter::Print(mem_tracker->limit(), TUnit::BYTES).c_str(),
       document->GetAllocator());
@@ -101,20 +139,45 @@ void MemUsageHandler(MemTracker* mem_tracker, const Webserver::ArgumentMap& args
   Value overview(ss.str().c_str(), document->GetAllocator());
   document->AddMember("overview", overview, document->GetAllocator());
 
-  if (args.find("detailed") != args.end()) {
-    // Dump all mem trackers.
-    Value detailed(mem_tracker->LogUsage().c_str(), document->GetAllocator());
-    document->AddMember("detailed", detailed, document->GetAllocator());
+  // Dump all mem trackers.
+  Value detailed(mem_tracker->LogUsage().c_str(), document->GetAllocator());
+  document->AddMember("detailed", detailed, document->GetAllocator());
+
+  if (metric_group != NULL) {
+    MetricGroup* jvm_group = metric_group->FindChildGroup("jvm");
+    if (jvm_group != NULL) {
+      Value jvm(kObjectType);
+      jvm_group->ToJson(false, document, &jvm);
+      Value heap(kArrayType);
+      Value non_heap(kArrayType);
+      Value total(kArrayType);
+      for (SizeType i = 0; i < jvm["metrics"].Size(); ++i) {
+        if (strstr(jvm["metrics"][i]["name"].GetString(), "total") != nullptr) {
+          total.PushBack(jvm["metrics"][i], document->GetAllocator());
+        } else if (strstr(jvm["metrics"][i]["name"].GetString(), "non-heap") != nullptr) {
+          non_heap.PushBack(jvm["metrics"][i], document->GetAllocator());
+        } else if (strstr(jvm["metrics"][i]["name"].GetString(), "heap") != nullptr) {
+          heap.PushBack(jvm["metrics"][i], document->GetAllocator());
+        }
+      }
+      document->AddMember("jvm_total", total, document->GetAllocator());
+      document->AddMember("jvm_heap", heap, document->GetAllocator());
+      document->AddMember("jvm_non_heap", non_heap, document->GetAllocator());
+    }
   }
 }
 
+
 void impala::AddDefaultUrlCallbacks(
-    Webserver* webserver, MemTracker* process_mem_tracker) {
+    Webserver* webserver, MemTracker* process_mem_tracker, MetricGroup* metric_group) {
   webserver->RegisterUrlCallback("/logs", "logs.tmpl", LogsHandler);
-  webserver->RegisterUrlCallback("/varz", "common-pre.tmpl", FlagsHandler);
+  webserver->RegisterUrlCallback("/varz", "flags.tmpl", FlagsHandler);
   if (process_mem_tracker != NULL) {
-    webserver->RegisterUrlCallback("/memz","memz.tmpl",
-        bind<void>(&MemUsageHandler, process_mem_tracker, _1, _2));
+    auto callback = [process_mem_tracker, metric_group]
+        (const Webserver::ArgumentMap& args, Document* doc) {
+      MemUsageHandler(process_mem_tracker, metric_group, args, doc);
+    };
+    webserver->RegisterUrlCallback("/memz", "memz.tmpl", callback);
   }
 
 #ifndef ADDRESS_SANITIZER

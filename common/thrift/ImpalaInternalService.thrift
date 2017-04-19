@@ -1,22 +1,25 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 //
 // This file contains the details of the protocol between coordinators and backends.
 
 namespace cpp impala
-namespace java com.cloudera.impala.thrift
+namespace java org.apache.impala.thrift
 
 include "Status.thrift"
 include "ErrorCodes.thrift"
@@ -30,7 +33,6 @@ include "DataSinks.thrift"
 include "Results.thrift"
 include "RuntimeProfile.thrift"
 include "ImpalaService.thrift"
-include "Llama.thrift"
 
 // constants for TQueryOptions.num_nodes
 const i32 NUM_NODES_ALL = 0
@@ -41,6 +43,19 @@ const i32 INVALID_PLAN_NODE_ID = -1
 
 // Constant default partition ID, must be < 0 to avoid collisions
 const i64 DEFAULT_PARTITION_ID = -1;
+
+enum TParquetFallbackSchemaResolution {
+  POSITION,
+  NAME
+}
+
+// The order of the enum values needs to be kepy in sync with
+// ParquetMetadataUtils::ORDERED_ARRAY_ENCODINGS in parquet-metadata-utils.cc.
+enum TParquetArrayResolution {
+  THREE_LEVEL,
+  TWO_LEVEL,
+  TWO_LEVEL_THEN_THREE_LEVEL
+}
 
 // Query options that correspond to ImpalaService.ImpalaQueryOptions, with their
 // respective defaults. Query options can be set in the following ways:
@@ -57,18 +72,21 @@ const i64 DEFAULT_PARTITION_ID = -1;
 // metadata which overrides everything else.
 struct TQueryOptions {
   1: optional bool abort_on_error = 0
-  2: optional i32 max_errors = 0
+  2: optional i32 max_errors = 100
   3: optional bool disable_codegen = 0
   4: optional i32 batch_size = 0
   5: optional i32 num_nodes = NUM_NODES_ALL
   6: optional i64 max_scan_range_length = 0
   7: optional i32 num_scanner_threads = 0
 
+  // TODO: IMPALA-4306: retire at compatibility-breaking version
   8: optional i32 max_io_buffers = 0              // Deprecated in 1.1
   9: optional bool allow_unsupported_formats = 0
+  // TODO: IMPALA-4306: retire at compatibility-breaking version
   10: optional i64 default_order_by_limit = -1    // Deprecated in 1.4
   11: optional string debug_action = ""
   12: optional i64 mem_limit = 0
+  // TODO: IMPALA-4306: retire at compatibility-breaking version
   13: optional bool abort_on_default_limit_exceeded = 0 // Deprecated in 1.4
   14: optional CatalogObjects.THdfsCompression compression_codec
   15: optional i32 hbase_caching = 0
@@ -82,10 +100,12 @@ struct TQueryOptions {
   20: optional string request_pool
 
   // Per-host virtual CPU cores required for query (only relevant with RM).
+  // TODO: IMPALA-3271: retire at compatibility-breaking version
   21: optional i16 v_cpu_cores
 
   // Max time in milliseconds the resource broker should wait for
   // a resource request to be granted by Llama/Yarn (only relevant with RM).
+  // TODO: IMPALA-3271: retire at compatibility-breaking version
   22: optional i64 reservation_request_timeout
 
   // Disables taking advantage of HDFS caching. This has two parts:
@@ -97,6 +117,7 @@ struct TQueryOptions {
   24: optional bool disable_outermost_topn = 0
 
   // Override for initial memory reservation size if RM is enabled.
+  // TODO: IMPALA-3271: retire at compatibility-breaking version
   25: optional i64 rm_initial_mem = 0
 
   // Time, in s, before a query will be timed out if it is inactive. May not exceed
@@ -133,12 +154,10 @@ struct TQueryOptions {
   33: optional PlanNodes.TReplicaPreference replica_preference =
       PlanNodes.TReplicaPreference.CACHE_LOCAL
 
-  // Configure whether scheduling of scans over multiple non-cached replicas will break
-  // ties between multiple, otherwise equivalent locations at random or deterministically.
-  // The former will pick a random replica, the latter will use the replica order from the
-  // metastore. This setting will not affect tie-breaking for cached replicas. Instead,
-  // they will always break ties randomly.
-  34: optional bool random_replica = 0
+  // Configure whether scan ranges with local replicas will be assigned by starting from
+  // the same replica for every query or by starting with a new, pseudo-random replica for
+  // subsequent queries. The default is to start with the same replica for every query.
+  34: optional bool schedule_random_replica = 0
 
   // For scan nodes with any conjuncts, use codegen to evaluate the conjuncts if
   // the number of rows * number of operators in the conjuncts exceeds this threshold.
@@ -148,16 +167,75 @@ struct TQueryOptions {
   36: optional bool disable_streaming_preaggregations = 0
 
   // If true, runtime filter propagation is enabled
-  37: optional Types.TRuntimeFilterMode runtime_filter_mode = 1
+  37: optional Types.TRuntimeFilterMode runtime_filter_mode = 2
 
-  // Size in bytes of runtime bloom filters
-  38: optional i32 runtime_bloom_filter_size = 0
+  // Size in bytes of Bloom Filters used for runtime filters. Actual size of filter will
+  // be rounded up to the nearest power of two.
+  38: optional i32 runtime_bloom_filter_size = 1048576
 
-  // Time in ms to wait until partition filters are delivered
+  // Time in ms to wait until partition filters are delivered. If 0, the default defined
+  // by the startup flag of the same name is used.
   39: optional i32 runtime_filter_wait_time_ms = 0
 
   // If true, per-row runtime filtering is disabled
   40: optional bool disable_row_runtime_filtering = false
+
+  // Maximum number of runtime filters allowed per query
+  41: optional i32 max_num_runtime_filters = 10
+
+  // If true, use UTF-8 annotation for string columns. Note that char and varchar columns
+  // always use the annotation.
+  //
+  // This is disabled by default in order to preserve the existing behavior of legacy
+  // workloads. In addition, Impala strings are not necessarily UTF8-encoded.
+  42: optional bool parquet_annotate_strings_utf8 = false
+
+  // Determines how to resolve Parquet files' schemas in the absence of field IDs (which
+  // is always, since fields IDs are NYI). Valid values are "position" (default) and
+  // "name".
+  43: optional TParquetFallbackSchemaResolution parquet_fallback_schema_resolution = 0
+
+  // Multi-threaded execution: degree of parallelism (= number of active threads) per
+  // query per backend.
+  // > 0: multi-threaded execution mode, with given dop
+  // 0: single-threaded execution mode
+  // unset: may be set automatically to > 0 in createExecRequest(), otherwise same as 0
+  44: optional i32 mt_dop
+
+  // If true, INSERT writes to S3 go directly to their final location rather than being
+  // copied there by the coordinator. We cannot do this for INSERT OVERWRITES because for
+  // those queries, the coordinator deletes all files in the final location before copying
+  // the files there.
+  45: optional bool s3_skip_insert_staging = true
+
+  // Minimum runtime filter size, in bytes
+  46: optional i32 runtime_filter_min_size = 1048576
+
+  // Maximum runtime filter size, in bytes
+  47: optional i32 runtime_filter_max_size = 16777216
+
+  // Prefetching behavior during hash tables' building and probing.
+  48: optional Types.TPrefetchMode prefetch_mode = Types.TPrefetchMode.HT_BUCKET
+
+  // Additional strict handling of invalid data parsing and type conversions.
+  49: optional bool strict_mode = false
+
+  // A limit on the amount of scratch directory space that can be used;
+  50: optional i64 scratch_limit = -1
+
+  // Indicates whether the FE should rewrite Exprs for optimization purposes.
+  // It's sometimes useful to disable rewrites for testing, e.g., expr-test.cc.
+  51: optional bool enable_expr_rewrites = true
+
+  // Indicates whether to use the new decimal semantics.
+  52: optional bool decimal_v2 = false
+
+  // Indicates whether to use dictionary filtering for Parquet files
+  53: optional bool parquet_dictionary_filtering = true
+
+  // Policy for resolving nested array fields in Parquet files.
+  54: optional TParquetArrayResolution parquet_array_resolution =
+    TParquetArrayResolution.TWO_LEVEL_THEN_THREE_LEVEL
 }
 
 // Impala currently has two types of sessions: Beeswax and HiveServer2
@@ -185,6 +263,9 @@ struct TSessionState {
 
   // Client network address
   4: required Types.TNetworkAddress network_address
+
+  // If set, the latest Kudu timestamp observed within this session.
+  7: optional i64 kudu_latest_observed_ts;
 }
 
 // Client request including stmt to execute and query options.
@@ -204,9 +285,10 @@ struct TClientRequest {
 // TODO: Separate into FE/BE initialized vars.
 struct TQueryCtx {
   // Client request containing stmt to execute and query options.
-  1: required TClientRequest request
+  1: required TClientRequest client_request
 
   // A globally unique id assigned to the entire query in the BE.
+  // The bottom 4 bytes are 0 (for details see be/src/util/uid-util.h).
   2: required Types.TUniqueId query_id
 
   // Session state including user.
@@ -236,25 +318,34 @@ struct TQueryCtx {
 
   // List of tables suspected to have corrupt stats
   10: optional list<CatalogObjects.TTableName> tables_with_corrupt_stats
+
+  // The snapshot timestamp as of which to execute the query
+  // When the backing storage engine supports snapshot timestamps (such as Kudu) this
+  // allows to select a snapshot timestamp on which to perform the scan, making sure that
+  // results returned from multiple scan nodes are consistent.
+  // This defaults to -1 when no timestamp is specified.
+  11: optional i64 snapshot_timestamp = -1;
+
+  // Contains only the union of those descriptors referenced by list of fragments destined
+  // for a single host. Optional for frontend tests.
+  12: optional Descriptors.TDescriptorTable desc_tbl
+
+  // Milliseconds since UNIX epoch at the start of query execution.
+  13: required i64 start_unix_millis
+
+  // Hint to disable codegen. Set by planner for single-node optimization or by the
+  // backend in NativeEvalExprsWithoutRow() in FESupport. This flag is only advisory to
+  // avoid the overhead of codegen and can be ignored if codegen is needed functionally.
+  14: optional bool disable_codegen_hint = false;
+
+  // List of tables with scan ranges that map to blocks with missing disk IDs.
+  15: optional list<CatalogObjects.TTableName> tables_missing_diskids
 }
 
-// Context of a fragment instance, including its unique id, the total number
-// of fragment instances, the query context, the coordinator address, etc.
-struct TPlanFragmentInstanceCtx {
-  // context of the query this fragment instance belongs to
-  1: required TQueryCtx query_ctx
-
-  // the globally unique fragment instance id
-  2: required Types.TUniqueId fragment_instance_id
-
-  // ordinal of this fragment instance, range [0, num_fragment_instances)
-  3: required i32 per_fragment_instance_idx
-
-  // total number of instances of this fragment
-  4: required i32 num_fragment_instances
-
-  // Index of this fragment instance across all combined instances in this query.
-  5: required i32 fragment_instance_idx
+// Context to collect information, which is shared among all instances of that plan
+// fragment.
+struct TPlanFragmentCtx {
+  1: required Planner.TPlanFragment fragment
 }
 
 // A scan range plus the parameters needed to execute that scan.
@@ -274,34 +365,49 @@ struct TPlanFragmentDestination {
   2: required Types.TNetworkAddress server
 }
 
-// Parameters for a single execution instance of a particular TPlanFragment
+// Execution parameters of a fragment instance, including its unique id, the total number
+// of fragment instances, the query context, the coordinator address, etc.
 // TODO: for range partitioning, we also need to specify the range boundaries
-struct TPlanFragmentExecParams {
-  // initial scan ranges for each scan node in TPlanFragment.plan_tree
-  1: required map<Types.TPlanNodeId, list<TScanRangeParams>> per_node_scan_ranges
+struct TPlanFragmentInstanceCtx {
+  // The globally unique fragment instance id.
+  // Format: query id + query-wide fragment instance index
+  // The query-wide fragment instance index starts at 0, so that the query id
+  // and the id of the first fragment instance are identical.
+  // If there is a coordinator instance, it is the first one, with index 0.
+  1: required Types.TUniqueId fragment_instance_id
 
-  // number of senders for ExchangeNodes contained in TPlanFragment.plan_tree;
+  // Index of this fragment instance accross all instances of its parent fragment,
+  // range [0, TPlanFragmentCtx.num_fragment_instances).
+  2: required i32 per_fragment_instance_idx
+
+  // Initial scan ranges for each scan node in TPlanFragment.plan_tree
+  3: required map<Types.TPlanNodeId, list<TScanRangeParams>> per_node_scan_ranges
+
+  // Number of senders for ExchangeNodes contained in TPlanFragment.plan_tree;
   // needed to create a DataStreamRecvr
-  2: required map<Types.TPlanNodeId, i32> per_exch_num_senders
+  // TODO for per-query exec rpc: move these to TPlanFragmentCtx
+  4: required map<Types.TPlanNodeId, i32> per_exch_num_senders
 
   // Output destinations, one per output partition.
   // The partitioning of the output is specified by
   // TPlanFragment.output_sink.output_partition.
   // The number of output partitions is destinations.size().
-  3: list<TPlanFragmentDestination> destinations
+  // TODO for per-query exec rpc: move these to TPlanFragmentCtx
+  5: list<TPlanFragmentDestination> destinations
 
   // Debug options: perform some action in a particular phase of a particular node
-  4: optional Types.TPlanNodeId debug_node_id
-  5: optional PlanNodes.TExecNodePhase debug_phase
-  6: optional PlanNodes.TDebugAction debug_action
+  6: optional Types.TPlanNodeId debug_node_id
+  7: optional PlanNodes.TExecNodePhase debug_phase
+  8: optional PlanNodes.TDebugAction debug_action
 
   // The pool to which this request has been submitted. Used to update pool statistics
   // for admission control.
-  7: optional string request_pool
+  9: optional string request_pool
 
   // Id of this fragment in its role as a sender.
-  8: optional i32 sender_id
+  10: optional i32 sender_id
 }
+
 
 // Service Protocol Details
 
@@ -315,25 +421,15 @@ enum ImpalaInternalServiceVersion {
 struct TExecPlanFragmentParams {
   1: required ImpalaInternalServiceVersion protocol_version
 
-  // required in V1
-  2: optional Planner.TPlanFragment fragment
+  // Context of the query, which this fragment is part of.
+  2: optional TQueryCtx query_ctx
 
-  // required in V1
-  // Contains only those descriptors referenced by fragment's scan nodes and data sink
-  3: optional Descriptors.TDescriptorTable desc_tbl
+  // Context of this fragment.
+  3: optional TPlanFragmentCtx fragment_ctx
 
-  // required in V1
-  4: optional TPlanFragmentExecParams params
-
-  // Context of this fragment, including its instance id, the total number fragment
-  // instances, the query context, etc.
-  5: optional TPlanFragmentInstanceCtx fragment_instance_ctx
-
-  // Resource reservation to run this plan fragment in.
-  6: optional Llama.TAllocatedResource reserved_resource
-
-  // Address of local node manager (used for expanding resource allocations)
-  7: optional Types.TNetworkAddress local_resource_address
+  // Context of this fragment instance, including its instance id, the total number
+  // fragment instances, the query context, etc.
+  4: optional TPlanFragmentInstanceCtx fragment_instance_ctx
 }
 
 struct TExecPlanFragmentResult {
@@ -347,30 +443,50 @@ struct TParquetInsertStats {
   1: required map<string, i64> per_column_size
 }
 
-// Per partition insert stats
+struct TKuduDmlStats {
+  // The number of reported per-row errors, i.e. this many rows were not modified.
+  // Note that this aggregate is less useful than a breakdown of the number of errors by
+  // error type, e.g. number of rows with duplicate key conflicts, number of rows
+  // violating nullability constraints, etc., but it isn't possible yet to differentiate
+  // all error types in the KuduTableSink yet.
+  1: optional i64 num_row_errors
+}
+
+// Per partition DML stats
 // TODO: this should include the table stats that we update the metastore with.
+// TODO: Refactor to reflect usage by other DML statements.
 struct TInsertStats {
   1: required i64 bytes_written
   2: optional TParquetInsertStats parquet_stats
+  3: optional TKuduDmlStats kudu_stats
 }
 
 const string ROOT_PARTITION_KEY = ''
 
-// Per-partition statistics and metadata resulting from INSERT queries.
+// Per-partition statistics and metadata resulting from DML statements.
+// TODO: Refactor to reflect usage by other DML statements.
 struct TInsertPartitionStatus {
   // The id of the partition written to (may be -1 if the partition is created by this
   // query). See THdfsTable.partitions.
   1: optional i64 id
 
-  // The number of rows appended to this partition
-  2: optional i64 num_appended_rows
+  // The number of rows modified in this partition
+  2: optional i64 num_modified_rows
 
   // Detailed statistics gathered by table writers for this partition
   3: optional TInsertStats stats
+
+  // Fully qualified URI to the base directory for this partition.
+  4: required string partition_base_dir
+
+  // The latest observed Kudu timestamp reported by the local KuduSession.
+  // This value is an unsigned int64.
+  5: optional i64 kudu_latest_observed_ts
 }
 
-// The results of an INSERT query, sent to the coordinator as part of
+// The results of a DML statement, sent to the coordinator as part of
 // TReportExecStatusParams
+// TODO: Refactor to reflect usage by other DML statements.
 struct TInsertExecStatus {
   // A map from temporary absolute file path to final absolute destination. The
   // coordinator performs these updates after the query completes.
@@ -387,7 +503,7 @@ struct TInsertExecStatus {
 struct TErrorLogEntry {
 
   // Number of error messages reported using the above identifier
-  1: i32 count
+  1: i32 count = 0
 
   // Sample messages from the above error code
   2: list<string> messages
@@ -399,31 +515,27 @@ struct TReportExecStatusParams {
   // required in V1
   2: optional Types.TUniqueId query_id
 
-  // passed into ExecPlanFragment() as TPlanFragmentInstanceCtx.backend_num
   // required in V1
-  3: optional i32 fragment_instance_idx
-
-  // required in V1
-  4: optional Types.TUniqueId fragment_instance_id
+  3: optional Types.TUniqueId fragment_instance_id
 
   // Status of fragment execution; any error status means it's done.
   // required in V1
-  5: optional Status.TStatus status
+  4: optional Status.TStatus status
 
   // If true, fragment finished executing.
   // required in V1
-  6: optional bool done
+  5: optional bool done
 
   // cumulative profile
   // required in V1
-  7: optional RuntimeProfile.TRuntimeProfileTree profile
+  6: optional RuntimeProfile.TRuntimeProfileTree profile
 
   // Cumulative structural changes made by a table sink
   // optional in V1
-  8: optional TInsertExecStatus insert_exec_status;
+  7: optional TInsertExecStatus insert_exec_status;
 
   // New errors that have not been reported to the coordinator
-  9: optional map<ErrorCodes.TErrorCode, TErrorLogEntry> error_log;
+  8: optional map<ErrorCodes.TErrorCode, TErrorLogEntry> error_log;
 }
 
 struct TReportExecStatusResult {
@@ -533,9 +645,14 @@ struct TBloomFilter {
   // details.
   1: required i32 log_heap_space
 
-  // List of buckets representing the Bloom Filter contents. See BloomFilter::Bucket and
+  // List of buckets representing the Bloom Filter contents, laid out contiguously in one
+  // string for efficiency of (de)serialisation. See BloomFilter::Bucket and
   // BloomFilter::directory_.
-  2: list<binary> directory
+  2: binary directory
+
+  // If true, this filter allows all elements to pass (i.e. its selectivity is 1). If
+  // true, 'directory' and 'log_heap_space' are not meaningful.
+  4: required bool always_true
 }
 
 struct TUpdateFilterResult {

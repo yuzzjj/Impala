@@ -1,22 +1,25 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <iostream>
-#include <gtest/gtest.h>
 
 #include "common/logging.h"
 #include "udf/uda-test-harness.h"
+#include "testutil/gtest-util.h"
 #include "testutil/test-udas.h"
 
 #include "common/names.h"
@@ -113,7 +116,7 @@ void MinUpdate(FunctionContext* context, const StringVal& input, BufferVal* val)
 }
 
 // Serialize the state into the min string
-const BufferVal MinSerialize(FunctionContext* context, const BufferVal& intermediate) {
+BufferVal MinSerialize(FunctionContext* context, const BufferVal& intermediate) {
   MinState* state = reinterpret_cast<MinState*>(intermediate);
   if (state->value == NULL) return intermediate;
   // Hack to persist the intermediate state's value without leaking.
@@ -249,7 +252,7 @@ TEST(CountMultiArgTest, Basic) {
 bool FuzzyCompare(const BigIntVal& r1, const BigIntVal& r2) {
   if (r1.is_null && r2.is_null) return true;
   if (r1.is_null || r2.is_null) return false;
-  return abs(r1.val - r2.val) <= 1;
+  return std::abs(r1.val - r2.val) <= 1;
 }
 
 TEST(CountTest, FuzzyEquals) {
@@ -310,8 +313,4 @@ TEST(MemTest, Basic) {
   EXPECT_FALSE(test_leak.Execute(input, BigIntVal(100))) << test.GetErrorMsg();
 }
 
-int main(int argc, char** argv) {
-  impala::InitGoogleLoggingSafe(argv[0]);
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
+IMPALA_TEST_MAIN();

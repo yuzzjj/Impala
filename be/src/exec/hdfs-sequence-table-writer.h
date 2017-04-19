@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_EXEC_HDFS_SEQUENCE_WRITER_H
 #define IMPALA_EXEC_HDFS_SEQUENCE_WRITER_H
@@ -48,15 +51,14 @@ class HdfsSequenceTableWriter : public HdfsTableWriter {
   virtual Status Init();
   virtual Status Finalize() { return Flush(); }
   virtual Status InitNewFile() { return WriteFileHeader(); }
-  virtual void Close() { return; }
+  virtual void Close();
   virtual uint64_t default_block_size() const { return 0; }
   virtual std::string file_extension() const { return "seq"; }
 
   /// Outputs the given rows into an HDFS sequence file. The rows are buffered
   /// to fill a sequence file block.
-  virtual Status AppendRowBatch(RowBatch* rows,
-                                const std::vector<int32_t>& row_group_indices,
-                                bool* new_file);
+  virtual Status AppendRows(
+      RowBatch* rows, const std::vector<int32_t>& row_group_indices, bool* new_file);
 
  private:
   /// processes a single row, delegates to Compress or NoCompress ConsumeRow().
@@ -90,7 +92,7 @@ class HdfsSequenceTableWriter : public HdfsTableWriter {
   WriteStream row_buf_;
 
   /// memory pool used by codec to allocate output buffer
-  MemPool* mem_pool_;
+  boost::scoped_ptr<MemPool> mem_pool_;
 
   /// true if compression is enabled
   bool compress_flag_;

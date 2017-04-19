@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_SCANNER_CONTEXT_H
@@ -23,13 +26,12 @@
 #include "common/status.h"
 #include "exec/filter-context.h"
 #include "runtime/disk-io-mgr.h"
-#include "runtime/row-batch.h"
 
 namespace impala {
 
 struct HdfsFileDesc;
 class HdfsPartitionDescriptor;
-class HdfsScanNode;
+class HdfsScanNodeBase;
 class MemPool;
 class RowBatch;
 class RuntimeState;
@@ -53,13 +55,18 @@ class TupleRow;
 ///      from processing the bytes. This is the consumer.
 ///   3. The scan node/main thread which calls into the context to trigger cancellation
 ///      or other end of stream conditions.
+/// TODO: Some of the synchronization mechanisms such as cancelled() can be removed
+/// once the legacy hdfs scan node has been removed.
 class ScannerContext {
  public:
   /// Create a scanner context with the parent scan_node (where materialized row batches
   /// get pushed to) and the scan range to process.
   /// This context starts with 1 stream.
-  ScannerContext(RuntimeState*, HdfsScanNode*, HdfsPartitionDescriptor*,
+  ScannerContext(RuntimeState*, HdfsScanNodeBase*, HdfsPartitionDescriptor*,
       DiskIoMgr::ScanRange* scan_range, const std::vector<FilterContext>& filter_ctxs);
+
+  /// Destructor verifies that all stream objects have been released.
+  ~ScannerContext();
 
   /// Encapsulates a stream (continuous byte range) that can be read.  A context
   /// can contain one or more streams.  For non-columnar files, there is only
@@ -98,11 +105,16 @@ class ScannerContext {
     void set_contains_tuple_data(bool v) { contains_tuple_data_ = v; }
 
     /// Callback that returns the buffer size to use when reading past the end of the scan
-    /// range.  By default a constant value is used, which scanners can override with this
-    /// callback.  The callback takes the file offset of the asynchronous read (this may be
-    /// more than file_offset() due to data being assembled in the boundary buffer).
-    /// Reading past the end of the scan range is likely a remote read, so we want to
-    /// minimize the number of io requests as well as the data volume.
+    /// range. Reading past the end of the scan range is likely a remote read, so we want
+    /// find a good trade-off between io requests and data volume. Scanners that have
+    /// some information about the optimal read size can provide this callback to
+    /// override the default read-size doubling strategy (see GetNextBuffer()). If the
+    /// callback returns a positive length, this overrides the default strategy. If the
+    /// callback returns a length greater than the max read size, the max read size will
+    /// be used.
+    ///
+    /// The callback takes the file offset of the asynchronous read (this may be more
+    /// than file_offset() due to data being assembled in the boundary buffer).
     typedef boost::function<int (int64_t)> ReadPastSizeCallback;
     void set_read_past_size_cb(ReadPastSizeCallback cb) { read_past_size_cb_ = cb; }
 
@@ -177,7 +189,13 @@ class ScannerContext {
     /// earlier, i.e. the file was truncated.
     int64_t file_len_;
 
+    /// Callback if a scanner wants to implement custom logic for guessing how far to
+    /// read past the end of the scan range.
     ReadPastSizeCallback read_past_size_cb_;
+
+    /// The next amount we should read past the end of the file, if using the default
+    /// doubling algorithm. Unused if 'read_past_size_cb_' is set.
+    int64_t next_read_past_size_bytes_;
 
     /// The current io buffer. This starts as NULL before we've read any bytes.
     DiskIoMgr::BufferDescriptor* io_buffer_;
@@ -224,55 +242,65 @@ class ScannerContext {
     /// Gets (and blocks) for the next io buffer. After fetching all buffers in the scan
     /// range, performs synchronous reads past the scan range until EOF.
     //
-    /// When performing a synchronous read, the read size is the max of read_past_size and
-    /// the result returned by read_past_size_cb_() (or DEFAULT_READ_PAST_SIZE if no
-    /// callback is set). read_past_size is not used otherwise.
-    //
-    /// Updates io_buffer_, io_buffer_bytes_left_, and io_buffer_pos_.  If GetNextBuffer()
-    /// is called after all bytes in the file have been returned, io_buffer_bytes_left_
-    /// will be set to 0. In the non-error case, io_buffer_ is never set to NULL, even if
-    /// it contains 0 bytes.
+    /// When performing a synchronous read, the read size is the max of 'read_past_size'
+    /// and either the result of read_past_size_cb_(), or the result of iteratively
+    /// doubling INIT_READ_PAST_SIZE up to the max read size. 'read_past_size' is not
+    /// used otherwise. This is done to find a balance between reading too much data
+    /// and issuing too many small reads.
+    ///
+    /// Updates 'io_buffer_', 'io_buffer_bytes_left_', and 'io_buffer_pos_'.  If
+    /// GetNextBuffer() is called after all bytes in the file have been returned,
+    /// 'io_buffer_bytes_left_' will be set to 0. In the non-error case, 'io_buffer_' is
+    /// never set to NULL, even if it contains 0 bytes.
     Status GetNextBuffer(int64_t read_past_size = 0);
 
-    /// If 'batch' is not NULL, attaches all completed io buffers and the boundary mem
-    /// pool to batch.  If 'done' is set, releases the completed resources.
-    /// If 'batch' is NULL then contains_tuple_data_ should be false.
+    /// If 'batch' is not NULL and 'contains_tuple_data_' is true, attaches all completed
+    /// io buffers and the boundary mem pool to 'batch'. If 'done' is set, all in-flight
+    /// resources are also attached or released.
+    /// If 'batch' is NULL then 'done' must be true or 'contains_tuple_data_' false. Such
+    /// a call will release all completed resources. If 'done' is true all in-flight
+    /// resources are also freed.
     void ReleaseCompletedResources(RowBatch* batch, bool done);
 
     /// Error-reporting functions.
     Status ReportIncompleteRead(int64_t length, int64_t bytes_read);
     Status ReportInvalidRead(int64_t length);
+    Status ReportInvalidInt();
   };
 
   Stream* GetStream(int idx = 0) {
     DCHECK_GE(idx, 0);
     DCHECK_LT(idx, streams_.size());
-    return streams_[idx];
+    return streams_[idx].get();
   }
 
   /// If a non-NULL 'batch' is passed, attaches completed io buffers and boundary mem pools
   /// from all streams to 'batch'. Attaching only completed resources ensures that buffers
   /// (and their cleanup) trail the rows that reference them (row batches are consumed and
   /// cleaned up in order by the rest of the query).
-  /// If a NULL 'batch' is passed, then it tries to release whatever resource can be
-  /// released, ie. completed io buffers if 'done' is not set, and the mem pool if 'done'
-  /// is set. In that case, contains_tuple_data_ should be false.
-  //
   /// If 'done' is true, this is the final call for the current streams and any pending
-  /// resources in each stream are also passed to the row batch, and the streams are
-  /// cleared from this context.
-  //
+  /// resources in each stream are also passed to the row batch. Callers which want to
+  /// clear the streams from the context should also call ClearStreams().
+  ///
+  /// A NULL 'batch' may be passed to free all resources. It is only valid to pass a NULL
+  /// 'batch' when also passing 'done'.
+  ///
   /// This must be called with 'done' set when the scanner is complete and no longer needs
-  /// any resources (e.g. tuple memory, io buffers) returned from the current
-  /// streams. After calling with 'done' set, this should be called again if new streams
-  /// are created via AddStream().
+  /// any resources (e.g. tuple memory, io buffers) returned from the current streams.
+  /// After calling with 'done' set, this should be called again if new streams are
+  /// created via AddStream().
   void ReleaseCompletedResources(RowBatch* batch, bool done);
+
+  /// Releases all the Stream objects in the vector 'streams_' and reduces the vector's
+  /// size to 0.
+  void ClearStreams();
 
   /// Add a stream to this ScannerContext for 'range'. Returns the added stream.
   /// The stream is created in the runtime state's object pool
   Stream* AddStream(DiskIoMgr::ScanRange* range);
 
-  /// If true, the ScanNode has been cancelled and the scanner thread should finish up
+  /// Returns false it scan_node_ is multi-threaded and has been cancelled.
+  /// Always returns false if the scan_node_ is not multi-threaded.
   bool cancelled() const;
 
   int num_completed_io_buffers() const { return num_completed_io_buffers_; }
@@ -283,12 +311,12 @@ class ScannerContext {
   friend class Stream;
 
   RuntimeState* state_;
-  HdfsScanNode* scan_node_;
+  HdfsScanNodeBase* scan_node_;
 
   HdfsPartitionDescriptor* partition_desc_;
 
-  /// Vector of streams.  Non-columnar formats will always have one stream per context.
-  std::vector<Stream*> streams_;
+  /// Vector of streams. Non-columnar formats will always have one stream per context.
+  std::vector<std::unique_ptr<Stream>> streams_;
 
   /// Always equal to the sum of completed_io_buffers_.size() across all streams.
   int num_completed_io_buffers_;

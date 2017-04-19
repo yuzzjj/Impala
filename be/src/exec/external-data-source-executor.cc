@@ -1,16 +1,19 @@
-// Copyright 2014 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/external-data-source-executor.h"
 
@@ -58,11 +61,9 @@ class ExternalDataSourceExecutor::JniState {
     JniLocalFrame jni_frame;
     RETURN_IF_ERROR(jni_frame.push(env));
 
-    jclass cl = env->FindClass(
-        "com/cloudera/impala/extdatasource/ExternalDataSourceExecutor");
-    RETURN_ERROR_IF_EXC(env);
-    executor_class_ = reinterpret_cast<jclass>(env->NewGlobalRef(cl));
-    RETURN_ERROR_IF_EXC(env);
+    RETURN_IF_ERROR(JniUtil::GetGlobalClassRef(env,
+        "org/apache/impala/extdatasource/ExternalDataSourceExecutor",
+        &executor_class_));
     uint32_t num_methods = sizeof(methods) / sizeof(methods[0]);
     for (int i = 0; i < num_methods; ++i) {
       RETURN_IF_ERROR(JniUtil::LoadJniMethod(env, executor_class_, &(methods[i])));
@@ -99,7 +100,7 @@ class ExternalDataSourceExecutor::JniState {
     return Status::OK();
   }
 
-  /// Class reference for com.cloudera.impala.extdatasource.ExternalDataSourceExecutor
+  /// Class reference for org.apache.impala.extdatasource.ExternalDataSourceExecutor
   jclass executor_class_;
 
   jmethodID ctor_;
@@ -158,8 +159,7 @@ Status ExternalDataSourceExecutor::Init(const string& jar_path,
   jobject local_exec = jni_env->NewObject(s.executor_class_, s.ctor_, jar_path_jstr,
       class_name_jstr, api_version_jstr, init_string_jstr);
   RETURN_ERROR_IF_EXC(jni_env);
-  executor_ = jni_env->NewGlobalRef(local_exec);
-  RETURN_ERROR_IF_EXC(jni_env);
+  RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(jni_env, local_exec, &executor_));
   RETURN_IF_ERROR(s.UpdateClassCacheMetrics());
   is_initialized_ = true;
   return Status::OK();
@@ -204,10 +204,7 @@ Status ExternalDataSourceExecutor::Close(const TCloseParams& params,
   Status status = CallJniMethod(executor_, s.close_id_, params,
       result);
   JNIEnv* env = getJNIEnv();
-  if (executor_ != NULL) {
-    env->DeleteGlobalRef(executor_);
-    status.MergeStatus(JniUtil::GetJniExceptionMsg(env)); // no-op if Status == OK
-  }
+  if (executor_ != NULL) status.MergeStatus(JniUtil::FreeGlobalRef(env, executor_));
   is_initialized_ = false;
   return status;
 }

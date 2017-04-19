@@ -1,0 +1,360 @@
+select * from functional_kudu.testtbl
+---- PLAN
+PLAN-ROOT SINK
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+---- SCANRANGELOCATIONS
+NODE 0:
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [(int64 id=1004), (int64 id=1008))}
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [(int64 id=1008), <end>)}
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [<start>, (int64 id=1004))}
+---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+====
+select * from functional_kudu.testtbl where name = '10'
+---- PLAN
+PLAN-ROOT SINK
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   kudu predicates: name = '10'
+---- SCANRANGELOCATIONS
+NODE 0:
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [(int64 id=1004), (int64 id=1008))}
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [(int64 id=1008), <end>)}
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [<start>, (int64 id=1004))}
+---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   kudu predicates: name = '10'
+====
+select * from functional_kudu.testtbl where name = NULL
+---- PLAN
+PLAN-ROOT SINK
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   predicates: name = NULL
+====
+insert into functional_kudu.testtbl(id) values (10)
+---- PLAN
+INSERT INTO KUDU [functional_kudu.testtbl]
+|
+00:UNION
+   constant-operands=1
+---- DISTRIBUTEDPLAN
+INSERT INTO KUDU [functional_kudu.testtbl]
+|
+00:UNION
+   constant-operands=1
+====
+insert into functional_kudu.testtbl(id) select int_col from functional_kudu.tinyinttable
+---- PLAN
+INSERT INTO KUDU [functional_kudu.testtbl]
+|
+00:SCAN KUDU [functional_kudu.tinyinttable]
+---- DISTRIBUTEDPLAN
+INSERT INTO KUDU [functional_kudu.testtbl]
+|
+00:SCAN KUDU [functional_kudu.tinyinttable]
+====
+insert into functional_kudu.testtbl(id, name)
+select count(distinct id), name from functional_kudu.dimtbl
+group by name
+---- PLAN
+INSERT INTO KUDU [functional_kudu.testtbl]
+|
+02:AGGREGATE [FINALIZE]
+|  output: count(id)
+|  group by: name
+|
+01:AGGREGATE
+|  group by: name, id
+|
+00:SCAN KUDU [functional_kudu.dimtbl]
+---- DISTRIBUTEDPLAN
+INSERT INTO KUDU [functional_kudu.testtbl]
+|
+02:AGGREGATE [FINALIZE]
+|  output: count(id)
+|  group by: name
+|
+04:AGGREGATE
+|  group by: name, id
+|
+03:EXCHANGE [HASH(name)]
+|
+01:AGGREGATE [STREAMING]
+|  group by: name, id
+|
+00:SCAN KUDU [functional_kudu.dimtbl]
+====
+# All predicates can be pushed down.
+select * from functional_kudu.testtbl
+where id >= 10 and zip <= 5 and 20 >= id and 'foo' = name and zip >= 0 and 30 >= zip
+and zip > 1 and zip < 50
+---- PLAN
+PLAN-ROOT SINK
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   kudu predicates: id <= 20, id >= 10, zip < 50, zip <= 30, zip <= 5, zip > 1, zip >= 0, name = 'foo'
+---- SCANRANGELOCATIONS
+NODE 0:
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [<start>, (int64 id=1004))}
+---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   kudu predicates: id <= 20, id >= 10, zip < 50, zip <= 30, zip <= 5, zip > 1, zip >= 0, name = 'foo'
+====
+# Test constant folding.
+select * from functional_kudu.testtbl
+where id < 10 + 30  and cast(sin(id) as boolean) = true and 20 * 3 >= id and 10 * 10 + 3 > id
+---- PLAN
+PLAN-ROOT SINK
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   predicates: CAST(sin(id) AS BOOLEAN) = TRUE
+   kudu predicates: id < 103, id < 40, id <= 60
+---- SCANRANGELOCATIONS
+NODE 0:
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [<start>, (int64 id=1004))}
+---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   predicates: CAST(sin(id) AS BOOLEAN) = TRUE
+   kudu predicates: id < 103, id < 40, id <= 60
+====
+# Some predicates can be pushed down but others can't (predicate on an non-const value).
+select * from functional_kudu.testtbl
+where cast(sin(id) as boolean) = true and name = 'a'
+---- PLAN
+PLAN-ROOT SINK
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   predicates: CAST(sin(id) AS BOOLEAN) = TRUE
+   kudu predicates: name = 'a'
+---- SCANRANGELOCATIONS
+NODE 0:
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [(int64 id=1004), (int64 id=1008))}
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [(int64 id=1008), <end>)}
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [<start>, (int64 id=1004))}
+---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   predicates: CAST(sin(id) AS BOOLEAN) = TRUE
+   kudu predicates: name = 'a'
+====
+# No predicates can be pushed down (predicate on a non-const value and
+# non-binary predicate). There is a single tablet so no partition pruning.
+select * from functional_kudu.testtbl
+where cast(sin(id) as boolean) = true and name is null
+---- PLAN
+PLAN-ROOT SINK
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   predicates: CAST(sin(id) AS BOOLEAN) = TRUE
+   kudu predicates: name IS NULL
+---- SCANRANGELOCATIONS
+NODE 0:
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [(int64 id=1004), (int64 id=1008))}
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [(int64 id=1008), <end>)}
+  ScanToken{table=impala::functional_kudu.testtbl, range-partition: [<start>, (int64 id=1004))}
+---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+   predicates: CAST(sin(id) AS BOOLEAN) = TRUE
+   kudu predicates: name IS NULL
+====
+# IMPALA-3856: KuduScanNode crash when pushing predicates including a cast
+select o_orderkey from tpch_kudu.orders where o_orderkey < 10.0 order by 1
+---- PLAN
+PLAN-ROOT SINK
+|
+01:SORT
+|  order by: o_orderkey ASC
+|
+00:SCAN KUDU [tpch_kudu.orders]
+   predicates: o_orderkey < 10.0
+====
+# IMPALA-3871: Casting literals to TIMESTAMP throw when pushed to KuduScanNode
+select t.c from
+  (select cast(o_orderdate as timestamp) c from tpch_kudu.orders where o_orderkey < 10) t
+where t.c <= cast('1995-01-01 00:00:00' as timestamp) order by c
+---- PLAN
+PLAN-ROOT SINK
+|
+01:SORT
+|  order by: c ASC
+|
+00:SCAN KUDU [tpch_kudu.orders]
+   predicates: CAST(o_orderdate AS TIMESTAMP) <= TIMESTAMP '1995-01-01 00:00:00'
+   kudu predicates: o_orderkey < 10
+====
+# IMPALA-4213: Planner not pushing some predicates with constant exprs to Kudu
+select count(*) from functional_kudu.alltypes
+where id < 1475059765 + 10
+and 1475059765 + 100 < id
+---- PLAN
+PLAN-ROOT SINK
+|
+01:AGGREGATE [FINALIZE]
+|  output: count(*)
+|
+00:SCAN KUDU [functional_kudu.alltypes]
+   kudu predicates: id < 1475059775, id > 1475059865
+====
+# IMPALA-2521: clustered insert into table adds sort node.
+insert into table functional_kudu.alltypes /*+ clustered */
+select * from functional_kudu.alltypes
+---- PLAN
+INSERT INTO KUDU [functional_kudu.alltypes]
+|
+01:SORT
+|  order by: id ASC NULLS LAST
+|
+00:SCAN KUDU [functional_kudu.alltypes]
+---- DISTRIBUTEDPLAN
+INSERT INTO KUDU [functional_kudu.alltypes]
+|
+01:SORT
+|  order by: id ASC NULLS LAST
+|
+00:SCAN KUDU [functional_kudu.alltypes]
+====
+# IMPALA-2521: clustered insert into table adds sort node, correctly substituting exprs.
+insert into table functional_kudu.testtbl /*+ clustered */
+select id, name, maxzip as zip
+from (
+select id, max(zip) as maxzip, name
+from functional_kudu.testtbl group by id, name
+) as sub;
+---- PLAN
+INSERT INTO KUDU [functional_kudu.testtbl]
+|
+02:SORT
+|  order by: id ASC NULLS LAST
+|
+01:AGGREGATE [FINALIZE]
+|  output: max(zip)
+|  group by: id, name
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+---- DISTRIBUTEDPLAN
+INSERT INTO KUDU [functional_kudu.testtbl]
+|
+04:SORT
+|  order by: id ASC NULLS LAST
+|
+03:AGGREGATE [FINALIZE]
+|  output: max:merge(zip)
+|  group by: id, name
+|
+02:EXCHANGE [HASH(id,name)]
+|
+01:AGGREGATE [STREAMING]
+|  output: max(zip)
+|  group by: id, name
+|
+00:SCAN KUDU [functional_kudu.testtbl]
+====
+# IMPALA-4479: Test proper folding of constant boolean exprs.
+select * from functional_kudu.alltypes
+where bool_col = (true and false)
+---- PLAN
+PLAN-ROOT SINK
+|
+00:SCAN KUDU [functional_kudu.alltypes]
+   kudu predicates: bool_col = FALSE
+====
+# IMPALA-4578: Test predicate propagation for Kudu scans.
+select /* +straight_join */ count(*)
+from functional_kudu.alltypes a
+inner join functional_kudu.alltypessmall b
+  on a.id = b.id
+left outer join functional_kudu.alltypestiny c
+  on b.int_col = c.int_col
+where a.id > 10 and c.int_col > 20
+  and cast(b.id as string) > '123'
+---- PLAN
+PLAN-ROOT SINK
+|
+05:AGGREGATE [FINALIZE]
+|  output: count(*)
+|
+04:HASH JOIN [LEFT OUTER JOIN]
+|  hash predicates: b.int_col = c.int_col
+|  other predicates: c.int_col > 20
+|
+|--02:SCAN KUDU [functional_kudu.alltypestiny c]
+|     kudu predicates: c.int_col > 20
+|
+03:HASH JOIN [INNER JOIN]
+|  hash predicates: a.id = b.id
+|
+|--01:SCAN KUDU [functional_kudu.alltypessmall b]
+|     predicates: CAST(b.id AS STRING) > '123'
+|     kudu predicates: b.id > 10
+|
+00:SCAN KUDU [functional_kudu.alltypes a]
+   predicates: CAST(a.id AS STRING) > '123'
+   kudu predicates: a.id > 10
+====
+# IMPALA-4662: Kudu analysis failure for NULL literal in IN list
+# NULL literal in values list results in applying predicate at scan node
+select id from functional_kudu.alltypestiny where
+id in (1, null) and string_col in (null) and bool_col in (null) and double_col in (null)
+and float_col in (null) and tinyint_col in (null) and smallint_col in (null) and
+bigint_col in (null)
+---- PLAN
+PLAN-ROOT SINK
+|
+00:SCAN KUDU [functional_kudu.alltypestiny]
+   predicates: id IN (1, NULL), bigint_col IN (NULL), bool_col IN (NULL), double_col IN (NULL), float_col IN (NULL), smallint_col IN (NULL), string_col IN (NULL), tinyint_col IN (NULL)
+====
+# IMPALA-3586: The operand with the Kudu scan cannot be passed through because id is
+# not-nullable (primary key).
+select id from functional_kudu.alltypes
+union all
+select id from functional.alltypes;
+---- PLAN
+PLAN-ROOT SINK
+|
+00:UNION
+|  pass-through-operands: 02
+|
+|--01:SCAN KUDU [functional_kudu.alltypes]
+|
+02:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+====
+# IMPALA-3586: When both operands are Kudu scans, they should both be passed through.
+select id from functional_kudu.alltypes
+union all
+select id from functional_kudu.alltypes;
+---- PLAN
+PLAN-ROOT SINK
+|
+00:UNION
+|  pass-through-operands: all
+|
+|--02:SCAN KUDU [functional_kudu.alltypes]
+|
+01:SCAN KUDU [functional_kudu.alltypes]
+====

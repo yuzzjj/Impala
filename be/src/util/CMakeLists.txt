@@ -1,21 +1,22 @@
-# Copyright 2012 Cloudera Inc.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
-# Without this option Squeasel looks up the SSL library at run-time
-# and may not guess the correct name on some distributions
-SET_SOURCE_FILES_PROPERTIES(${SQUEASEL_SRC_DIR}/squeasel.c PROPERTIES
-  COMPILE_FLAGS -DNO_SSL_DL)
+set(SQUEASEL_SRC_DIR "${CMAKE_SOURCE_DIR}/be/src/thirdparty/squeasel")
+set(MUSTACHE_SRC_DIR "${CMAKE_SOURCE_DIR}/be/src/thirdparty/mustache")
 
 # where to put generated libraries
 set(LIBRARY_OUTPUT_PATH "${BUILD_OUTPUT_ROOT_DIRECTORY}/util")
@@ -26,10 +27,12 @@ set(EXECUTABLE_OUTPUT_PATH "${BUILD_OUTPUT_ROOT_DIRECTORY}/util")
 add_library(Util
   auth-util.cc
   avro-util.cc
+  backend-gflag-util.cc
   benchmark.cc
   bitmap.cc
+  bit-util.cc
   bloom-filter.cc
-  cgroups-mgr.cc
+  coding-util.cc
   codec.cc
   compress.cc
   cpu-info.cc
@@ -46,12 +49,13 @@ add_library(Util
   hdr-histogram.cc
   impalad-metrics.cc
   jni-util.cc
-  llama-util.cc
   logging-support.cc
   mem-info.cc
   memory-metrics.cc
   metrics.cc
+  minidump.cc
   network-util.cc
+  openssl-util.cc
   os-info.cc
   os-util.cc
   parse-util.cc
@@ -65,7 +69,6 @@ add_library(Util
   redactor.cc
   runtime-profile.cc
   simple-logger.cc
-  spinlock.cc
   symbols-util.cc
   static-asserts.cc
   summary-util.cc
@@ -75,15 +78,11 @@ add_library(Util
   time.cc
   tuple-row-compare.cc
   url-parser.cc
-  url-coding.cc
-)
-add_dependencies(Util thrift-deps gen_ir_descriptions)
-
-add_library(Webserver STATIC
   ${SQUEASEL_SRC_DIR}/squeasel.c
   webserver.cc
   ${MUSTACHE_SRC_DIR}/mustache.cc
 )
+add_dependencies(Util thrift-deps gen_ir_descriptions)
 
 # Squeasel requires C99 compatibility to build.
 SET_SOURCE_FILES_PROPERTIES(${SQUEASEL_SRC_DIR}/squeasel.c
@@ -94,43 +93,43 @@ add_library(loggingsupport SHARED
   logging-support.cc
 )
 
-target_link_libraries(Webserver pthread dl Util ${OPENSSL_LIBS})
-
-add_executable(network-perf-benchmark network-perf-benchmark.cc)
 add_executable(parquet-reader parquet-reader.cc)
 
-target_link_libraries(network-perf-benchmark ${IMPALA_LINK_LIBS})
 target_link_libraries(parquet-reader ${IMPALA_LINK_LIBS})
 
 target_link_libraries(loggingsupport ${IMPALA_LINK_LIBS_DYNAMIC_TARGETS})
 
-ADD_BE_TEST(runtime-profile-test)
 ADD_BE_TEST(benchmark-test)
-ADD_BE_TEST(decompress-test)
-ADD_BE_TEST(metrics-test)
-ADD_BE_TEST(debug-util-test)
-ADD_BE_TEST(url-coding-test)
+ADD_BE_TEST(bitmap-test)
+ADD_BE_TEST(bit-packing-test)
 ADD_BE_TEST(bit-util-test)
-ADD_BE_TEST(rle-test)
 ADD_BE_TEST(blocking-queue-test)
+ADD_BE_TEST(bloom-filter-test)
+ADD_BE_TEST(coding-util-test)
+ADD_BE_TEST(debug-util-test)
+ADD_BE_TEST(decompress-test)
 ADD_BE_TEST(dict-test)
-ADD_BE_TEST(thread-pool-test)
+ADD_BE_TEST(error-util-test)
+ADD_BE_TEST(filesystem-util-test)
+ADD_BE_TEST(fixed-size-hash-table-test)
+ADD_BE_TEST(hdfs-util-test)
 ADD_BE_TEST(internal-queue-test)
-ADD_BE_TEST(string-parser-test)
+ADD_BE_TEST(logging-support-test)
+ADD_BE_TEST(lru-cache-test)
+ADD_BE_TEST(metrics-test)
+ADD_BE_TEST(openssl-util-test)
 ADD_BE_TEST(parse-util-test)
-ADD_BE_TEST(promise-test)
-ADD_BE_TEST(symbols-util-test)
 #ADD_BE_TEST(perf-counters-test)
-ADD_BE_TEST(webserver-test)
 ADD_BE_TEST(pretty-printer-test)
+ADD_BE_TEST(proc-info-test)
+ADD_BE_TEST(promise-test)
 ADD_BE_TEST(redactor-config-parser-test)
 ADD_BE_TEST(redactor-test)
 ADD_BE_TEST(redactor-unconfigured-test)
-ADD_BE_TEST(error-util-test)
-target_link_libraries(error-util-test Util)
-ADD_BE_TEST(proc-info-test)
-ADD_BE_TEST(lru-cache-test)
-ADD_BE_TEST(filesystem-util-test)
-ADD_BE_TEST(bitmap-test)
-ADD_BE_TEST(fixed-size-hash-table-test)
-ADD_BE_TEST(bloom-filter-test)
+ADD_BE_TEST(rle-test)
+ADD_BE_TEST(runtime-profile-test)
+ADD_BE_TEST(string-parser-test)
+ADD_BE_TEST(symbols-util-test)
+ADD_BE_TEST(thread-pool-test)
+ADD_BE_TEST(uid-util-test)
+ADD_BE_TEST(webserver-test)

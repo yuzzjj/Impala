@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# Copyright 2012 Cloudera Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 # Removes compiled or generated artifacts. Should be used before switching branches
 # between releases. In addition must be used before switching from a toolchain enabled
@@ -22,12 +26,7 @@ trap 'echo Error in $0 at line $LINENO: $(cd "'$PWD'" && awk "NR == $LINENO" $0)
 
 # If the project was never build, no Makefile will exist and thus make clean will fail.
 # Combine the make command with the bash noop to always return true.
-make clean || :
-
-# Stop the minikdc if needed.
-if ${CLUSTER_DIR}/admin is_kerberized; then
-    ${IMPALA_HOME}/testdata/bin/minikdc.sh stop
-fi
+"${MAKE_CMD:-make}" clean || :
 
 # clean the external data source project
 pushd ${IMPALA_HOME}/ext-data-source
@@ -41,37 +40,44 @@ pushd $IMPALA_FE_DIR
 rm -rf target
 rm -f src/test/resources/{core,hbase,hive}-site.xml
 rm -rf generated-sources/*
-rm -rf ${IMPALA_TEST_CLUSTER_LOG_DIR}/*
+[ -z "$IMPALA_LOGS_DIR" ] || rm -rf "${IMPALA_LOGS_DIR}"/*
+mkdir -p $IMPALA_ALL_LOGS_DIRS
 popd
 
 # clean be
-pushd $IMPALA_HOME/be
+pushd "$IMPALA_HOME/be"
 # remove everything listed in .gitignore
-git clean -Xdfq
+git rev-parse 2>/dev/null && git clean -Xdfq
 popd
 
 # clean shell build artifacts
-pushd $IMPALA_HOME/shell
+pushd "$IMPALA_HOME/shell"
 # remove everything listed in .gitignore
-git clean -Xdfq
+git rev-parse 2>/dev/null && git clean -Xdfq
 popd
 
 # Clean stale .pyc, .pyo files and __pycache__ directories.
-pushd ${IMPALA_HOME}
+pushd "${IMPALA_HOME}"
 find . -type f -name "*.py[co]" -delete
 find . -type d -name "__pycache__" -delete
 popd
 
 # clean llvm
-rm -f $IMPALA_HOME/llvm-ir/impala*.ll
-rm -f $IMPALA_HOME/be/generated-sources/impala-ir/*
+rm -f "$IMPALA_HOME/llvm-ir/"impala*.ll
+rm -f "$IMPALA_HOME/be/generated-sources/impala-ir/"*
 
 # Cleanup Impala-lzo
-if [ -e $IMPALA_LZO ]; then
-  pushd $IMPALA_LZO; git clean -fdx .; popd
+if [ -e "$IMPALA_LZO" ]; then
+  pushd "$IMPALA_LZO"
+  git rev-parse 2>/dev/null && git clean -fdx
+  popd
 fi
 
 # When switching to and from toolchain, make sure to remove all CMake generated files
-find -iname '*cmake*' -not -name CMakeLists.txt \
-    -not -path '*cmake_modules*' \
-    -not -path '*thirdparty*' | xargs rm -Rf
+FIND_ARGS=("$IMPALA_HOME" -iname '*cmake*' -not -name CMakeLists.txt \
+    -not -path "$IMPALA_HOME/cmake_modules*" \
+    -not -path "$IMPALA_HOME/thirdparty*")
+if [[ -n "$IMPALA_TOOLCHAIN" ]]; then
+  FIND_ARGS+=(-not -path "$IMPALA_TOOLCHAIN/*")
+fi
+find "${FIND_ARGS[@]}" -exec rm -Rf {} +

@@ -1,18 +1,21 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
-package com.cloudera.impala.analysis;
+package org.apache.impala.analysis;
 
 import java_cup.runtime.Symbol;
 import java.lang.Integer;
@@ -25,7 +28,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.ArrayList;
 
-import com.cloudera.impala.analysis.SqlParserSymbols;
+import org.apache.impala.analysis.SqlParserSymbols;
 
 %%
 
@@ -46,7 +49,7 @@ import com.cloudera.impala.analysis.SqlParserSymbols;
   // uses "and" as a display name and not "&&".
   // Please keep the puts sorted alphabetically by keyword (where the order
   // does not affect the desired error reporting)
-  private static final Map<String, Integer> keywordMap =
+  public static final Map<String, Integer> keywordMap =
       new LinkedHashMap<String, Integer>();
   static {
     keywordMap.put("&&", new Integer(SqlParserSymbols.KW_AND));
@@ -65,6 +68,7 @@ import com.cloudera.impala.analysis.SqlParserSymbols;
     keywordMap.put("between", new Integer(SqlParserSymbols.KW_BETWEEN));
     keywordMap.put("bigint", new Integer(SqlParserSymbols.KW_BIGINT));
     keywordMap.put("binary", new Integer(SqlParserSymbols.KW_BINARY));
+    keywordMap.put("block_size", new Integer(SqlParserSymbols.KW_BLOCKSIZE));
     keywordMap.put("boolean", new Integer(SqlParserSymbols.KW_BOOLEAN));
     keywordMap.put("by", new Integer(SqlParserSymbols.KW_BY));
     keywordMap.put("cached", new Integer(SqlParserSymbols.KW_CACHED));
@@ -78,6 +82,7 @@ import com.cloudera.impala.analysis.SqlParserSymbols;
     keywordMap.put("column", new Integer(SqlParserSymbols.KW_COLUMN));
     keywordMap.put("columns", new Integer(SqlParserSymbols.KW_COLUMNS));
     keywordMap.put("comment", new Integer(SqlParserSymbols.KW_COMMENT));
+    keywordMap.put("compression", new Integer(SqlParserSymbols.KW_COMPRESSION));
     keywordMap.put("compute", new Integer(SqlParserSymbols.KW_COMPUTE));
     keywordMap.put("create", new Integer(SqlParserSymbols.KW_CREATE));
     keywordMap.put("cross", new Integer(SqlParserSymbols.KW_CROSS));
@@ -88,6 +93,8 @@ import com.cloudera.impala.analysis.SqlParserSymbols;
     keywordMap.put("date", new Integer(SqlParserSymbols.KW_DATE));
     keywordMap.put("datetime", new Integer(SqlParserSymbols.KW_DATETIME));
     keywordMap.put("decimal", new Integer(SqlParserSymbols.KW_DECIMAL));
+    keywordMap.put("default", new Integer(SqlParserSymbols.KW_DEFAULT));
+    keywordMap.put("delete", new Integer(SqlParserSymbols.KW_DELETE));
     keywordMap.put("delimited", new Integer(SqlParserSymbols.KW_DELIMITED));
     keywordMap.put("desc", new Integer(SqlParserSymbols.KW_DESC));
     keywordMap.put("describe", new Integer(SqlParserSymbols.KW_DESCRIBE));
@@ -96,6 +103,7 @@ import com.cloudera.impala.analysis.SqlParserSymbols;
     keywordMap.put("double", new Integer(SqlParserSymbols.KW_DOUBLE));
     keywordMap.put("drop", new Integer(SqlParserSymbols.KW_DROP));
     keywordMap.put("else", new Integer(SqlParserSymbols.KW_ELSE));
+    keywordMap.put("encoding", new Integer(SqlParserSymbols.KW_ENCODING));
     keywordMap.put("end", new Integer(SqlParserSymbols.KW_END));
     keywordMap.put("escaped", new Integer(SqlParserSymbols.KW_ESCAPED));
     keywordMap.put("exists", new Integer(SqlParserSymbols.KW_EXISTS));
@@ -119,9 +127,11 @@ import com.cloudera.impala.analysis.SqlParserSymbols;
     keywordMap.put("functions", new Integer(SqlParserSymbols.KW_FUNCTIONS));
     keywordMap.put("grant", new Integer(SqlParserSymbols.KW_GRANT));
     keywordMap.put("group", new Integer(SqlParserSymbols.KW_GROUP));
+    keywordMap.put("hash", new Integer(SqlParserSymbols.KW_HASH));
     keywordMap.put("having", new Integer(SqlParserSymbols.KW_HAVING));
     keywordMap.put("if", new Integer(SqlParserSymbols.KW_IF));
     keywordMap.put("ilike", new Integer(SqlParserSymbols.KW_ILIKE));
+    keywordMap.put("ignore", new Integer(SqlParserSymbols.KW_IGNORE));
     keywordMap.put("in", new Integer(SqlParserSymbols.KW_IN));
     keywordMap.put("incremental", new Integer(SqlParserSymbols.KW_INCREMENTAL));
     keywordMap.put("init_fn", new Integer(SqlParserSymbols.KW_INIT_FN));
@@ -137,6 +147,7 @@ import com.cloudera.impala.analysis.SqlParserSymbols;
     keywordMap.put("iregexp", new Integer(SqlParserSymbols.KW_IREGEXP));
     keywordMap.put("is", new Integer(SqlParserSymbols.KW_IS));
     keywordMap.put("join", new Integer(SqlParserSymbols.KW_JOIN));
+    keywordMap.put("kudu", new Integer(SqlParserSymbols.KW_KUDU));
     keywordMap.put("last", new Integer(SqlParserSymbols.KW_LAST));
     keywordMap.put("left", new Integer(SqlParserSymbols.KW_LEFT));
     keywordMap.put("like", new Integer(SqlParserSymbols.KW_LIKE));
@@ -165,6 +176,7 @@ import com.cloudera.impala.analysis.SqlParserSymbols;
     keywordMap.put("partitions", new Integer(SqlParserSymbols.KW_PARTITIONS));
     keywordMap.put("preceding", new Integer(SqlParserSymbols.KW_PRECEDING));
     keywordMap.put("prepare_fn", new Integer(SqlParserSymbols.KW_PREPARE_FN));
+    keywordMap.put("primary", new Integer(SqlParserSymbols.KW_PRIMARY));
     keywordMap.put("produced", new Integer(SqlParserSymbols.KW_PRODUCED));
     keywordMap.put("purge", new Integer(SqlParserSymbols.KW_PURGE));
     keywordMap.put("range", new Integer(SqlParserSymbols.KW_RANGE));
@@ -215,7 +227,9 @@ import com.cloudera.impala.analysis.SqlParserSymbols;
     keywordMap.put("unbounded", new Integer(SqlParserSymbols.KW_UNBOUNDED));
     keywordMap.put("uncached", new Integer(SqlParserSymbols.KW_UNCACHED));
     keywordMap.put("union", new Integer(SqlParserSymbols.KW_UNION));
+    keywordMap.put("update", new Integer(SqlParserSymbols.KW_UPDATE));
     keywordMap.put("update_fn", new Integer(SqlParserSymbols.KW_UPDATE_FN));
+    keywordMap.put("upsert", new Integer(SqlParserSymbols.KW_UPSERT));
     keywordMap.put("use", new Integer(SqlParserSymbols.KW_USE));
     keywordMap.put("using", new Integer(SqlParserSymbols.KW_USING));
     keywordMap.put("values", new Integer(SqlParserSymbols.KW_VALUES));
@@ -287,7 +301,6 @@ import com.cloudera.impala.analysis.SqlParserSymbols;
 %}
 
 LineTerminator = \r|\n|\r\n
-NonTerminator = [^\r\n]
 Whitespace = {LineTerminator} | [ \t\f]
 
 // Order of rules to resolve ambiguity:
@@ -307,14 +320,30 @@ QuotedIdentifier = \`(\\.|[^\\\`])*\`
 SingleQuoteStringLiteral = \'(\\.|[^\\\'])*\'
 DoubleQuoteStringLiteral = \"(\\.|[^\\\"])*\"
 
+EolHintBegin = "--" " "* "+"
+CommentedHintBegin = "/*" " "* "+"
+CommentedHintEnd = "*/"
+
 // Both types of plan hints must appear within a single line.
-TraditionalCommentedPlanHints = "/*" [ ]* "+" [^\r\n*]* "*/"
-// Must end with a line terminator.
-EndOfLineCommentedPlanHints = "--" [ ]* "+" {NonTerminator}* {LineTerminator}
+HintContent = " "* "+" [^\r\n]*
 
 Comment = {TraditionalComment} | {EndOfLineComment}
-TraditionalComment = "/*" ~"*/"
-EndOfLineComment = "--" {NonTerminator}* {LineTerminator}?
+
+// Match anything that has a comment end (*/) in it.
+ContainsCommentEnd = [^]* "*/" [^]*
+// Match anything that has a line terminator in it.
+ContainsLineTerminator = [^]* {LineTerminator} [^]*
+
+// A traditional comment is anything that starts and ends like a comment and has neither a
+// plan hint inside nor a CommentEnd (*/).
+TraditionalComment = "/*" !({HintContent}|{ContainsCommentEnd}) "*/"
+// Similar for a end-of-line comment.
+EndOfLineComment = "--" !({HintContent}|{ContainsLineTerminator}) {LineTerminator}?
+
+// This additional state is needed because newlines signal the end of a end-of-line hint
+// if one has been started earlier. Hence we need to discern between newlines within and
+// outside of end-of-line hints.
+%state EOLHINT
 
 %%
 // Put '...' before '.'
@@ -398,18 +427,22 @@ EndOfLineComment = "--" {NonTerminator}* {LineTerminator}?
   return newToken(SqlParserSymbols.STRING_LITERAL, yytext().substring(1, yytext().length()-1));
 }
 
-{TraditionalCommentedPlanHints} {
-  String text = yytext();
-  // Remove everything before the first '+' as well as the trailing "*/"
-  String hintStr = text.substring(text.indexOf('+') + 1, text.length() - 2);
-  return newToken(SqlParserSymbols.COMMENTED_PLAN_HINTS, hintStr.trim());
+{CommentedHintBegin} {
+  return newToken(SqlParserSymbols.COMMENTED_PLAN_HINT_START, null);
 }
 
-{EndOfLineCommentedPlanHints} {
-  String text = yytext();
-  // Remove everything before the first '+'
-  String hintStr = text.substring(text.indexOf('+') + 1);
-  return newToken(SqlParserSymbols.COMMENTED_PLAN_HINTS, hintStr.trim());
+{CommentedHintEnd} {
+  return newToken(SqlParserSymbols.COMMENTED_PLAN_HINT_END, null);
+}
+
+{EolHintBegin} {
+  yybegin(EOLHINT);
+  return newToken(SqlParserSymbols.COMMENTED_PLAN_HINT_START, null);
+}
+
+<EOLHINT> {LineTerminator} {
+  yybegin(YYINITIAL);
+  return newToken(SqlParserSymbols.COMMENTED_PLAN_HINT_END, null);
 }
 
 {Comment} { /* ignore */ }

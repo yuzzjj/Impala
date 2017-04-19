@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# Copyright 2012 Cloudera Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # Script that allows easily creating tables with a large number of partitions
 # and/or blocks. To achieve generation of a large number of blocks, the script
@@ -24,6 +28,12 @@ set -euo pipefail
 trap 'echo Error in $0 at line $LINENO: $(cd "'$PWD'" && awk "NR == $LINENO" $0)' ERR
 
 . ${IMPALA_HOME}/bin/impala-config.sh > /dev/null 2>&1
+
+# Environment variables needed for remote cluster
+: ${HS2_HOST_PORT:=localhost:11050}
+JDBC_URL="jdbc:hive2://${HS2_HOST_PORT}/default;"
+
+HIVE_CMD="beeline -n $USER -u $JDBC_URL"
 
 LOCAL_OUTPUT_DIR=$(mktemp -dt "impala_test_tmp.XXXXXX")
 echo $LOCAL_OUTPUT_DIR
@@ -62,9 +72,9 @@ HDFS_PATH=/test-warehouse/many_blocks_num_blocks_per_partition_${BLOCKS_PER_PART
 DB_NAME=scale_db
 TBL_NAME=num_partitions_${NUM_PARTITIONS}_blocks_per_partition_${BLOCKS_PER_PARTITION}
 
-hive -e "create database if not exists scale_db"
-hive -e "drop table if exists ${DB_NAME}.${TBL_NAME}"
-hive -e "create external table ${DB_NAME}.${TBL_NAME} (i int) partitioned by (j int)"
+$HIVE_CMD -e "create database if not exists scale_db"
+$HIVE_CMD -e "drop table if exists ${DB_NAME}.${TBL_NAME}"
+$HIVE_CMD -e "create external table ${DB_NAME}.${TBL_NAME} (i int) partitioned by (j int)"
 
 # Generate many (small) files. Each file will be assigned a unique block.
 echo "Generating ${BLOCKS_PER_PARTITION} files"
@@ -94,6 +104,6 @@ done
 echo ";" >> ${LOCAL_OUTPUT_DIR}/hive_create_partitions.q
 
 echo "Executing DDL via Hive"
-hive -f ${LOCAL_OUTPUT_DIR}/hive_create_partitions.q
+$HIVE_CMD -f ${LOCAL_OUTPUT_DIR}/hive_create_partitions.q
 
 echo "Done! Final result in table: ${DB_NAME}.${TBL_NAME}"

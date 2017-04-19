@@ -1,10 +1,28 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # Functional tests running the TPC-DS workload
 #
-import logging
 import pytest
-from tests.common.test_vector import *
-from tests.common.impala_test_suite import *
+
+from tests.common.impala_test_suite import ImpalaTestSuite
+from tests.common.test_dimensions import (
+    create_single_exec_option_dimension,
+    is_supported_insert_format)
 
 class TestTpcdsQuery(ImpalaTestSuite):
   @classmethod
@@ -14,18 +32,18 @@ class TestTpcdsQuery(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestTpcdsQuery, cls).add_test_dimensions()
-    cls.TestMatrix.add_constraint(lambda v:\
-        v.get_value('table_format').file_format not in ['rc', 'hbase'] and\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
+        v.get_value('table_format').file_format not in ['rc', 'hbase', 'kudu'] and\
         v.get_value('table_format').compression_codec in ['none', 'snap'] and\
         v.get_value('table_format').compression_type != 'record')
 
     if cls.exploration_strategy() != 'exhaustive':
       # Cut down on the execution time for these tests in core by running only
       # against parquet.
-      cls.TestMatrix.add_constraint(lambda v:\
+      cls.ImpalaTestMatrix.add_constraint(lambda v:\
           v.get_value('table_format').file_format in ['parquet'])
 
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('exec_option')['batch_size'] == 0)
 
   @pytest.mark.execute_serially
@@ -117,14 +135,14 @@ class TestTpcdsInsert(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestTpcdsInsert, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(create_single_exec_option_dimension())
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         is_supported_insert_format(v.get_value('table_format')))
     if cls.exploration_strategy() == 'core' and not pytest.config.option.table_formats:
       # Don't run on core, unless the user explicitly wants to validate a specific table
       # format. Each test vector takes > 30s to complete and it doesn't add much
       # additional coverage on top of what's in the functional insert test suite
-      cls.TestMatrix.add_constraint(lambda v: False);
+      cls.ImpalaTestMatrix.add_constraint(lambda v: False);
 
   def test_tpcds_partitioned_insert(self, vector):
     self.run_test_case('partitioned-insert', vector)

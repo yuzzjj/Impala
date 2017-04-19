@@ -1,20 +1,27 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <udf/udf.h>
+#include <cmath>
 
 using namespace impala_udf;
+
+#define NO_INLINE __attribute__((noinline))
+#define WEAK_SYM  __attribute__((weak))
 
 // These functions are intended to test the "glue" that runs UDFs. Thus, the UDFs
 // themselves are kept very simple.
@@ -53,11 +60,7 @@ IntVal AllTypes(
 StringVal NoArgs(FunctionContext* context) {
   const char* result = "string";
   StringVal ret(context, strlen(result));
-  // TODO: llvm 3.3 seems to have a bug if we use memcpy here making
-  // the IR udf crash. This is fixed in 3.3.1. Fix this when we upgrade.
-  //memcpy(ret.ptr, result, strlen(result));
-  // IMPALA-775
-  for (int i = 0; i < strlen(result); ++i) ret.ptr[i] = result[i];
+  memcpy(ret.ptr, result, strlen(result));
   return ret;
 }
 
@@ -123,7 +126,7 @@ DecimalVal VarSum(FunctionContext* context, int n, const DecimalVal* args) {
   return DecimalVal(result);
 }
 
-DoubleVal VarSumMultiply(FunctionContext* context,
+DoubleVal NO_INLINE VarSumMultiply(FunctionContext* context,
     const DoubleVal& d, int n, const IntVal* args) {
   if (d.is_null) return DoubleVal::null();
 
@@ -136,6 +139,90 @@ DoubleVal VarSumMultiply(FunctionContext* context,
   }
   if (is_null) return DoubleVal::null();
   return DoubleVal(result * d.val);
+}
+
+// Call the non-inlined function in the same module to make sure linking works correctly.
+DoubleVal VarSumMultiply2(FunctionContext* context,
+    const DoubleVal& d, int n, const IntVal* args) {
+  return VarSumMultiply(context, d, n, args);
+}
+
+// Call a function defined in Impalad proper to make sure linking works correctly.
+extern "C" StringVal
+    _ZN6impala15StringFunctions5LowerEPN10impala_udf15FunctionContextERKNS1_9StringValE(
+        FunctionContext* context, const StringVal& str);
+
+StringVal ToLower(FunctionContext* context, const StringVal& str) {
+  // StringVal::null() doesn't inline its callee when compiled without optimization.
+  // Useful for testing cases such as IMPALA-4595.
+  if (str.is_null) return StringVal::null();
+  return
+      _ZN6impala15StringFunctions5LowerEPN10impala_udf15FunctionContextERKNS1_9StringValE(
+          context, str);
+}
+
+// Call a function defined in Impalad proper to make sure linking works correctly.
+extern "C" StringVal
+    _ZN6impala15StringFunctions5UpperEPN10impala_udf15FunctionContextERKNS1_9StringValE(
+        FunctionContext* context, const StringVal& str);
+
+typedef StringVal (*ToUpperFn)(FunctionContext* context, const StringVal& str);
+
+StringVal ToUpperWork(FunctionContext* context, const StringVal& str, ToUpperFn fn) {
+  return fn(context, str);
+}
+
+StringVal ToUpper(FunctionContext* context, const StringVal& str) {
+  // StringVal::null() doesn't inline its callee when compiled without optimization.
+  // Useful for testing cases such as IMPALA-4595.
+  if (str.is_null) return StringVal::null();
+  // Test for IMPALA-4705: pass a function as argument and make sure it's materialized.
+  return ToUpperWork(context, str,
+      _ZN6impala15StringFunctions5UpperEPN10impala_udf15FunctionContextERKNS1_9StringValE);
+}
+
+typedef DoubleVal (*TestFn)(const DoubleVal& base, const DoubleVal& exp);
+
+// This function is dropped upon linking when tested as IR UDF as it has internal linkage
+// and its only caller Pow() will be overriden upon linking.
+static DoubleVal NO_INLINE PrivateFn1(const DoubleVal& base, const DoubleVal& exp) {
+#ifdef IR_COMPILE
+  return DoubleVal::null();
+#else
+  return DoubleVal(std::pow(base.val, exp.val));
+#endif
+}
+
+// This function is referenced in global variable 'global_array_2' even though it
+// has no caller. This is to exercise IMPALA-4595 which verifies that this function
+// still exists after linking.
+static DoubleVal PrivateFn2(const DoubleVal& base, const DoubleVal& exp) {
+  return DoubleVal(base.val + exp.val);
+}
+
+// This is a constant array with internal linkage type. Its only reference is from Pow()
+// which will be overridden during linking. This array will essentially not be in the
+// module after linking. Used to exercise IMPALA-4595 when testing IR UDF.
+static volatile const TestFn global_array[1] = {PrivateFn1};
+
+volatile const TestFn global_array_2[1] = {PrivateFn2};
+
+namespace impala {
+  class MathFunctions {
+    static DoubleVal Pow(FunctionContext* ctx, const DoubleVal& base,
+        const DoubleVal& exp);
+  };
+}
+
+// This function has the same signature as a built-in function (pow()) in Impalad.
+// It has a weak linkage type so it can be overridden at linking when tested as IR UDF.
+DoubleVal WEAK_SYM impala::MathFunctions::Pow(FunctionContext* context,
+    const DoubleVal& base, const DoubleVal& exp) {
+  // Just references 'global_array' to stop the compiler from complaining.
+  // This function will be overridden after linking so 'global_array' is dead
+  // when tested as an IR UDF.
+  if (base.is_null || exp.is_null || global_array[0] == NULL) return DoubleVal::null();
+  return PrivateFn1(base, exp);
 }
 
 BooleanVal TestError(FunctionContext* context) {
@@ -312,4 +399,33 @@ IntVal EightArgs(FunctionContext* context, const IntVal& v1, const IntVal& v2,
     const IntVal& v3, const IntVal& v4, const IntVal& v5, const IntVal& v6,
     const IntVal& v7, const IntVal& v8) {
   return IntVal(v1.val + v2.val + v3.val + v4.val + v5.val + v6.val + v7.val + v8.val);
+}
+
+IntVal NineArgs(FunctionContext* context, const IntVal& v1, const IntVal& v2,
+    const IntVal& v3, const IntVal& v4, const IntVal& v5, const IntVal& v6,
+    const IntVal& v7, const IntVal& v8, const IntVal& v9) {
+  return IntVal(v1.val + v2.val + v3.val + v4.val + v5.val + v6.val + v7.val + v8.val +
+      v9.val);
+}
+
+IntVal TwentyArgs(FunctionContext* context, const IntVal& v1, const IntVal& v2,
+    const IntVal& v3, const IntVal& v4, const IntVal& v5, const IntVal& v6,
+    const IntVal& v7, const IntVal& v8, const IntVal& v9, const IntVal& v10,
+    const IntVal& v11, const IntVal& v12, const IntVal& v13, const IntVal& v14,
+    const IntVal& v15, const IntVal& v16, const IntVal& v17, const IntVal& v18,
+    const IntVal& v19, const IntVal& v20) {
+  return IntVal(v1.val + v2.val + v3.val + v4.val + v5.val + v6.val + v7.val + v8.val +
+      v9.val + v10.val + v11.val + v12.val + v13.val + v14.val + v15.val + v16.val +
+      v17.val + v18.val + v19.val + v20.val);
+}
+
+IntVal TwentyOneArgs(FunctionContext* context, const IntVal& v1, const IntVal& v2,
+    const IntVal& v3, const IntVal& v4, const IntVal& v5, const IntVal& v6,
+    const IntVal& v7, const IntVal& v8, const IntVal& v9, const IntVal& v10,
+    const IntVal& v11, const IntVal& v12, const IntVal& v13, const IntVal& v14,
+    const IntVal& v15, const IntVal& v16, const IntVal& v17, const IntVal& v18,
+    const IntVal& v19, const IntVal& v20, const IntVal& v21) {
+  return IntVal(v1.val + v2.val + v3.val + v4.val + v5.val + v6.val + v7.val + v8.val +
+      v9.val + v10.val + v11.val + v12.val + v13.val + v14.val + v15.val + v16.val +
+      v17.val + v18.val + v19.val + v20.val + v21.val);
 }

@@ -1,5 +1,21 @@
 #!/usr/bin/env impala-python
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 # This script generates the "CREATE TABLE", "INSERT", and "LOAD" statements for loading
 # test data and writes them to create-*-generated.sql and
@@ -27,8 +43,8 @@
 import collections
 import csv
 import glob
-import math
 import json
+import math
 import os
 import random
 import re
@@ -73,11 +89,12 @@ if options.workload is None:
   parser.print_help()
   sys.exit(1)
 
-DATA_LOAD_DIR = '/tmp/data-load-files'
 WORKLOAD_DIR = os.path.join(os.environ['IMPALA_HOME'], 'testdata', 'workloads')
 DATASET_DIR = os.path.join(os.environ['IMPALA_HOME'], 'testdata', 'datasets')
+SQL_OUTPUT_DIR = os.environ['IMPALA_DATA_LOADING_SQL_DIR']
 AVRO_SCHEMA_DIR = "avro_schemas"
-IMPALA_SUPPORTED_INSERT_FORMATS = ['parquet', 'hbase', 'text']
+DEFAULT_FS=os.environ['DEFAULT_FS']
+IMPALA_SUPPORTED_INSERT_FORMATS = ['parquet', 'hbase', 'text', 'kudu']
 
 COMPRESSION_TYPE = "SET mapred.output.compression.type=%s;"
 COMPRESSION_ENABLED = "SET hive.exec.compress.output=%s;"
@@ -116,7 +133,8 @@ FILE_FORMAT_MAP = {
     "\nINPUTFORMAT 'com.hadoop.mapred.DeprecatedLzoTextInputFormat'" +
     "\nOUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'",
   'avro': 'AVRO',
-  'hbase': "'org.apache.hadoop.hive.hbase.HBaseStorageHandler'"
+  'hbase': "'org.apache.hadoop.hive.hbase.HBaseStorageHandler'",
+  'kudu': "KUDU",
   }
 
 HIVE_TO_AVRO_TYPE_MAP = {
@@ -146,6 +164,7 @@ WITH SERDEPROPERTIES (
   "hbase.columns.mapping" =
   "{hbase_column_mapping}")
 {tbl_properties}{{hdfs_location}}"""
+
 KNOWN_EXPLORATION_STRATEGIES = ['core', 'pairwise', 'exhaustive', 'lzo']
 
 def build_create_statement(table_template, table_name, db_name, db_suffix,
@@ -155,9 +174,13 @@ def build_create_statement(table_template, table_name, db_name, db_suffix,
     create_stmt += 'DROP TABLE IF EXISTS %s%s.%s;\n' % (db_name, db_suffix, table_name)
   if compression == 'lzo':
     file_format = '%s_%s' % (file_format, compression)
-  # hbase tables are external, and not read from hdfs. We don't need an hdfs_location.
-  if file_format == 'hbase':
+  # hbase / kudu tables are external, and not read from hdfs. We don't need an
+  # hdfs_location.
+  if file_format in ['hbase', 'kudu']:
     hdfs_location = str()
+    # Remove location part from the format string
+    table_template = table_template.replace("LOCATION '{hdfs_location}'", "")
+
   create_stmt += table_template.format(db_name=db_name,
                                        db_suffix=db_suffix,
                                        table_name=table_name,
@@ -166,41 +189,91 @@ def build_create_statement(table_template, table_name, db_name, db_suffix,
   return create_stmt
 
 def build_table_template(file_format, columns, partition_columns, row_format,
-                         avro_schema_dir, table_name):
+                         avro_schema_dir, table_name, table_properties):
   if file_format == 'hbase':
     return build_hbase_create_stmt_in_hive(columns, partition_columns, table_name)
+
+  primary_keys_clause = ""
 
   partitioned_by = str()
   if partition_columns:
     partitioned_by = 'PARTITIONED BY (%s)' % ', '.join(partition_columns.split('\n'))
 
   row_format_stmt = str()
-  if row_format:
+  if row_format and file_format != 'kudu':
     row_format_stmt = 'ROW FORMAT ' + row_format
 
-  tblproperties = str()
+  file_format_string = "STORED AS {file_format}"
+
+  tblproperties_clause = "TBLPROPERTIES (\n{0}\n)"
+  tblproperties = {}
+
+  external = "EXTERNAL"
+
   if file_format == 'avro':
-    tblproperties = "TBLPROPERTIES ('avro.schema.url'=" \
-        "'hdfs://%s/%s/%s/{table_name}.json')" \
+    # TODO Is this flag ever used?
+    if options.hdfs_namenode is None:
+      tblproperties["avro.schema.url"] = "%s/%s/%s/{table_name}.json" \
+        % (DEFAULT_FS, options.hive_warehouse_dir, avro_schema_dir)
+    else:
+      tblproperties["avro.schema.url"] = "hdfs://%s/%s/%s/{table_name}.json" \
         % (options.hdfs_namenode, options.hive_warehouse_dir, avro_schema_dir)
-  elif file_format == 'parquet':
+  elif file_format in 'parquet':
     row_format_stmt = str()
+  elif file_format == 'kudu':
+    # Use partitioned_by to set a trivial hash distribution
+    assert not partitioned_by, "Kudu table shouldn't have partition cols defined"
+    partitioned_by = "partition by hash partitions 3"
+
+    # Fetch KUDU host and port from environment
+    kudu_master = os.getenv("KUDU_MASTER_HOSTS", "127.0.0.1")
+    kudu_master_port = os.getenv("KUDU_MASTER_PORT", "7051")
+    row_format_stmt = str()
+    tblproperties["kudu.master_addresses"] = \
+      "{0}:{1}".format(kudu_master, kudu_master_port)
+    primary_keys_clause = ", PRIMARY KEY (%s)" % columns.split("\n")[0].split(" ")[0]
+    # Kudu's test tables are managed.
+    external = ""
+
+  # Read the properties specified in the TABLE_PROPERTIES section. When the specified
+  # properties have the same key as a default property, the value for the specified
+  # property is used.
+  if table_properties:
+    for table_property in table_properties.split("\n"):
+      format_prop = table_property.split(":")
+      if format_prop[0] == file_format:
+        key_val = format_prop[1].split("=");
+        tblproperties[key_val[0]] = key_val[1]
+
+  all_tblproperties = []
+  for key, value in tblproperties.iteritems():
+    all_tblproperties.append("'{0}' = '{1}'".format(key, value))
+
+  # If there are no properties to set avoid the TBLPROPERTIES clause altogether.
+  if not all_tblproperties:
+    tblproperties_clause = ""
+  else:
+    tblproperties_clause = tblproperties_clause.format(",\n".join(all_tblproperties))
 
   # Note: columns are ignored but allowed if a custom serde is specified
   # (e.g. Avro)
   stmt = """
-CREATE EXTERNAL TABLE IF NOT EXISTS {{db_name}}{{db_suffix}}.{{table_name}} (
-{columns})
+CREATE {external} TABLE IF NOT EXISTS {{db_name}}{{db_suffix}}.{{table_name}} (
+{columns}
+{primary_keys})
 {partitioned_by}
 {row_format}
-STORED AS {{file_format}}
+{file_format_string}
 LOCATION '{{hdfs_location}}'
 {tblproperties}
 """.format(
+    external=external,
     row_format=row_format_stmt,
     columns=',\n'.join(columns.split('\n')),
+    primary_keys=primary_keys_clause,
     partitioned_by=partitioned_by,
-    tblproperties=tblproperties
+    tblproperties=tblproperties_clause,
+    file_format_string=file_format_string
     ).strip()
 
   # Remove empty lines from the stmt string.  There is an empty line for
@@ -287,6 +360,12 @@ def build_insert_into_statement(insert, db_name, db_suffix, table_name, file_for
                                    db_suffix=db_suffix,
                                    table_name=table_name,
                                    hdfs_location=hdfs_path)
+
+  # Kudu tables are managed and don't support OVERWRITE, so we replace OVERWRITE
+  # with INTO to make this a regular INSERT.
+  if file_format == 'kudu':
+    insert_statement = insert_statement.replace("OVERWRITE", "INTO")
+
   if for_impala:
     return insert_statement
 
@@ -329,10 +408,11 @@ def build_load_statement(load_template, db_name, db_suffix, table_name):
                                          db_name=db_name,
                                          db_suffix=db_suffix)
   else:
+    base_load_dir = os.getenv("REMOTE_LOAD", os.getenv("IMPALA_HOME"))
     load_template = load_template.format(table_name=table_name,
                                          db_name=db_name,
                                          db_suffix=db_suffix,
-                                         impala_home = os.environ['IMPALA_HOME'])
+                                         impala_home = base_load_dir)
   return load_template
 
 def build_hbase_create_stmt(db_name, table_name, column_families):
@@ -400,7 +480,8 @@ def eval_section(section_str):
   return stdout.strip()
 
 def generate_statements(output_name, test_vectors, sections,
-                        schema_include_constraints, schema_exclude_constraints):
+                        schema_include_constraints, schema_exclude_constraints,
+                        schema_only_constraints):
   # TODO: This method has become very unwieldy. It has to be re-factored sooner than
   # later.
   # Parquet statements to be executed separately by Impala
@@ -419,39 +500,56 @@ def generate_statements(output_name, test_vectors, sections,
         [row.file_format, row.dataset, row.compression_codec, row.compression_type]
     table_format = '%s/%s/%s' % (file_format, codec, compression_type)
     for section in sections:
-      table_name = section['BASE_TABLE_NAME']
+      table_name = section['BASE_TABLE_NAME'].strip()
       db_suffix = build_db_suffix(file_format, codec, compression_type)
       db_name = '{0}{1}'.format(data_set, options.scale_factor)
       db = '{0}{1}'.format(db_name, db_suffix)
 
+
       if table_names and (table_name.lower() not in table_names):
-        print 'Skipping table: %s.%s' % (db, table_name)
+        print 'Skipping table: %s.%s, table is not in specified table list' % (db, table_name)
+        continue
+
+      if table_format in schema_only_constraints and \
+         table_name.lower() not in schema_only_constraints[table_format]:
+        print ('Skipping table: %s.%s, \'only\' constraint for format did not '
+               'include this table.') % (db, table_name)
         continue
 
       if schema_include_constraints[table_name.lower()] and \
          table_format not in schema_include_constraints[table_name.lower()]:
-        print 'Skipping \'%s.%s\' due to include constraint match' % (db, table_name)
+        print 'Skipping \'%s.%s\' due to include constraint match.' % (db, table_name)
         continue
 
       if schema_exclude_constraints[table_name.lower()] and\
          table_format in schema_exclude_constraints[table_name.lower()]:
-        print 'Skipping \'%s.%s\' due to exclude constraint match' % (db, table_name)
+        print 'Skipping \'%s.%s\' due to exclude constraint match.' % (db, table_name)
         continue
 
       alter = section.get('ALTER')
       create = section['CREATE']
       create_hive = section['CREATE_HIVE']
+
+      table_properties = section['TABLE_PROPERTIES']
       insert = eval_section(section['DEPENDENT_LOAD'])
       load = eval_section(section['LOAD'])
+
+      if file_format == 'kudu':
+        create_kudu = section["CREATE_KUDU"]
+        if section['DEPENDENT_LOAD_KUDU']:
+          insert = eval_section(section['DEPENDENT_LOAD_KUDU'])
+      else:
+        create_kudu = None
+
       # For some datasets we may want to use a different load strategy when running local
       # tests versus tests against large scale factors. The most common reason is to
       # reduce he number of partitions for the local test environment
       if not options.scale_factor and section['LOAD_LOCAL']:
         load = section['LOAD_LOCAL']
 
-      columns = eval_section(section['COLUMNS'])
-      partition_columns = section['PARTITION_COLUMNS']
-      row_format = section['ROW_FORMAT']
+      columns = eval_section(section['COLUMNS']).strip()
+      partition_columns = section['PARTITION_COLUMNS'].strip()
+      row_format = section['ROW_FORMAT'].strip()
 
       # Force reloading of the table if the user specified the --force option or
       # if the table is partitioned and there was no ALTER section specified. This is to
@@ -491,14 +589,22 @@ def generate_statements(output_name, test_vectors, sections,
         # Impala CREATE TABLE doesn't allow INPUTFORMAT.
         output = hive_output
 
+      # TODO: Currently, Kudu does not support partitioned tables via Impala.
+      # If a CREATE_KUDU section was provided, assume it handles the partition columns
+      if file_format == 'kudu' and partition_columns != '' and not create_kudu:
+        print "Ignore partitions on Kudu table: %s.%s" % (db_name, table_name)
+        continue
+
       # If a CREATE section is provided, use that. Otherwise a COLUMNS section
       # must be provided (and optionally PARTITION_COLUMNS and ROW_FORMAT
       # sections), which is used to generate the create table statement.
       if create_hive:
         table_template = create_hive
+      elif create_kudu:
+        table_template = create_kudu
       elif create:
         table_template = create
-        if file_format in ['avro', 'hbase']:
+        if file_format in ['avro', 'hbase', 'kudu']:
           # We don't know how to generalize CREATE sections to Avro and hbase.
           print ("CREATE section not supported with %s, "
                  "skipping: '%s'" % (file_format, table_name))
@@ -507,7 +613,7 @@ def generate_statements(output_name, test_vectors, sections,
         avro_schema_dir = "%s/%s" % (AVRO_SCHEMA_DIR, data_set)
         table_template = build_table_template(
           create_file_format, columns, partition_columns,
-          row_format, avro_schema_dir, table_name)
+          row_format, avro_schema_dir, table_name, table_properties)
         # Write Avro schema to local file
         if file_format == 'avro':
           if not os.path.exists(avro_schema_dir):
@@ -533,7 +639,7 @@ def generate_statements(output_name, test_vectors, sections,
       # used for adding partitions.
       # TODO: Consider splitting the ALTER subsection into specific components. At the
       # moment, it assumes we're only using ALTER for partitioning the table.
-      if alter and file_format != "hbase":
+      if alter and file_format not in ("hbase", "kudu"):
         use_db = 'USE {db_name};\n'.format(db_name=db)
         if output == hive_output and codec == 'lzo':
           # Hive ALTER TABLE ADD PARTITION doesn't handle null partitions, so
@@ -564,13 +670,13 @@ def generate_statements(output_name, test_vectors, sections,
                                                               db_suffix, table_name))
           else:
             print 'Empty base table load for %s. Skipping load generation' % table_name
-        elif file_format == 'parquet':
+        elif file_format in ['kudu', 'parquet']:
           if insert:
             impala_load.load.append(build_insert_into_statement(insert, db_name,
-                db_suffix, table_name, 'parquet', data_path, for_impala=True))
+                db_suffix, table_name, file_format, data_path, for_impala=True))
           else:
-            print \
-                'Empty parquet load for table %s. Skipping insert generation' % table_name
+            print 'Empty parquet/kudu load for table %s. Skipping insert generation' \
+              % table_name
         else:
           if insert:
             hive_output.load.append(build_insert(insert, db_name, db_suffix, file_format,
@@ -593,8 +699,9 @@ def generate_statements(output_name, test_vectors, sections,
 
 def parse_schema_template_file(file_name):
   VALID_SECTION_NAMES = ['DATASET', 'BASE_TABLE_NAME', 'COLUMNS', 'PARTITION_COLUMNS',
-                         'ROW_FORMAT', 'CREATE', 'CREATE_HIVE', 'DEPENDENT_LOAD', 'LOAD',
-                         'LOAD_LOCAL', 'ALTER', 'HBASE_COLUMN_FAMILIES']
+                         'ROW_FORMAT', 'CREATE', 'CREATE_HIVE', 'CREATE_KUDU',
+                         'DEPENDENT_LOAD', 'DEPENDENT_LOAD_KUDU', 'LOAD',
+                         'LOAD_LOCAL', 'ALTER', 'HBASE_COLUMN_FAMILIES', 'TABLE_PROPERTIES']
   return parse_test_file(file_name, VALID_SECTION_NAMES, skip_unknown_sections=False)
 
 if __name__ == "__main__":
@@ -614,7 +721,7 @@ if __name__ == "__main__":
 
   target_dataset = test_vectors[0].dataset
   print 'Target Dataset: ' + target_dataset
-  dataset_load_dir = os.path.join(DATA_LOAD_DIR, target_dataset)
+  dataset_load_dir = os.path.join(SQL_OUTPUT_DIR, target_dataset)
   # If the directory containing the sql files does not exist, create it. Else nuke all the
   # files corresponding to the current workload.
   try:
@@ -639,7 +746,8 @@ if __name__ == "__main__":
     sys.exit(1)
 
   constraints_file = os.path.join(DATASET_DIR, target_dataset, 'schema_constraints.csv')
-  include_constraints, exclude_constraints = parse_table_constraints(constraints_file)
+  include_constraints, exclude_constraints, only_constraints = \
+      parse_table_constraints(constraints_file)
   sections = parse_schema_template_file(schema_template_file)
   generate_statements('%s-%s' % (options.workload, options.exploration_strategy),
-      test_vectors, sections, include_constraints, exclude_constraints)
+      test_vectors, sections, include_constraints, exclude_constraints, only_constraints)

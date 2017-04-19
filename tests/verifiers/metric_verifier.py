@@ -1,23 +1,28 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # Verfier for common impalad metrics
 
-import pytest
-
 # List of metrics that should be equal to zero when there are no outstanding queries.
-METRIC_LIST = ["impala-server.backends.client-cache.clients-in-use",
+METRIC_LIST = [
+               # TODO (IMPALA-3377): Re-enable
+               # "impala-server.backends.client-cache.clients-in-use", disabled as a
+               # work-around due to IMPALA-3327.
+               #"impala-server.backends.client-cache.clients-in-use",
                "impala-server.hash-table.total-bytes",
                "impala-server.io-mgr.num-open-files",
                # Disable checking of mem-pool.total-bytes DUE TO IMPALA-1057

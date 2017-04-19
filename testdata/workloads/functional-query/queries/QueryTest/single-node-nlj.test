@@ -149,3 +149,77 @@ group by id) v2;
 ---- TYPES
 TINYINT,INT,BIGINT
 ====
+---- QUERY
+# Regression test for IMPALA-561: Multiple scan nodes in a plan fragment.
+select count(*)
+from functional.alltypes a1
+left join functional.alltypes a2 on a2.tinyint_col >= 1
+---- RESULTS
+47961000
+---- TYPES
+BIGINT
+====
+---- QUERY
+# Regression test for IMPALA-4180: a single node plan with blocking join node
+# and multiple top-n + scan nodes to trigger concurrent Close() on scan nodes.
+with t as (select int_col x from functional.alltypestiny order by id limit 2)
+select * from t t1 left join t t2 on t1.x > 0
+---- RESULTS
+0,NULL
+1,0
+1,1
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Right non-equi-join with empty build.
+select straight_join at.id
+from alltypes at
+  right join functional.alltypestiny att on at.id < att.id
+where att.int_col = 999
+---- RESULTS
+---- TYPES
+INT
+====
+---- QUERY
+# Full outer non-equi-join with empty build.
+select straight_join at.id
+from alltypes at
+  full outer join (
+    select * from functional.alltypestiny where int_col = 999) att on at.id < att.id
+order by at.id desc
+limit 5
+---- RESULTS
+7299
+7298
+7297
+7296
+7295
+---- TYPES
+INT
+====
+---- QUERY
+# Right semi non-equi-join with empty build.
+select straight_join at.id
+from (select * from functional.alltypestiny att where int_col = 999) att
+  right semi join alltypes at on at.id < att.id
+---- RESULTS
+---- TYPES
+INT
+====
+---- QUERY
+# Right anti non-equi-join with empty build.
+select straight_join at.id
+from (select * from functional.alltypestiny att where int_col = 999) att
+  right anti join alltypes at on at.id < att.id
+order by at.id desc
+limit 5
+---- RESULTS
+7299
+7298
+7297
+7296
+7295
+---- TYPES
+INT
+====

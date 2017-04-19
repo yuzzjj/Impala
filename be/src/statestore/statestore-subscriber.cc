@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "statestore/statestore-subscriber.h"
 
@@ -18,7 +21,6 @@
 #include <utility>
 
 #include <boost/algorithm/string/join.hpp>
-#include <boost/foreach.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/thread/shared_mutex.hpp>
 #include <gutil/strings/substitute.h>
@@ -100,7 +102,7 @@ StatestoreSubscriber::StatestoreSubscriber(const std::string& subscriber_id,
       client_cache_(new StatestoreClientCache(FLAGS_statestore_subscriber_cnxn_attempts,
           FLAGS_statestore_subscriber_cnxn_retry_interval_ms, 0, 0, "",
           !FLAGS_ssl_client_ca_certificate.empty())),
-      metrics_(metrics->GetChildGroup("statestore-subscriber")) {
+      metrics_(metrics->GetOrCreateChildGroup("statestore-subscriber")) {
   connected_to_statestore_metric_ =
       metrics_->AddProperty("statestore-subscriber.connected", false);
   last_recovery_duration_metric_ = metrics_->AddGauge(
@@ -141,7 +143,7 @@ Status StatestoreSubscriber::Register() {
 
   TRegisterSubscriberRequest request;
   request.topic_registrations.reserve(update_callbacks_.size());
-  BOOST_FOREACH(const UpdateCallbacks::value_type& topic, update_callbacks_) {
+  for (const UpdateCallbacks::value_type& topic: update_callbacks_) {
     TTopicRegistration thrift_topic;
     thrift_topic.topic_name = topic.first;
     thrift_topic.is_transient = topic_registrations_[topic.first];
@@ -179,8 +181,9 @@ Status StatestoreSubscriber::Start() {
     LOG(INFO) << "Starting statestore subscriber";
 
     // Backend must be started before registration
-    shared_ptr<TProcessor> processor(new StatestoreSubscriberProcessor(thrift_iface_));
-    shared_ptr<TProcessorEventHandler> event_handler(
+    boost::shared_ptr<TProcessor> processor(
+        new StatestoreSubscriberProcessor(thrift_iface_));
+    boost::shared_ptr<TProcessorEventHandler> event_handler(
         new RpcEventHandler("statestore-subscriber", metrics_));
     processor->setEventHandler(event_handler);
 
@@ -314,7 +317,7 @@ Status StatestoreSubscriber::UpdateState(const TopicDeltaMap& incoming_topic_del
     // to this subscriber. If any invalid ranges are found, request new update(s) with
     // version ranges applicable to this subscriber.
     bool found_unexpected_delta = false;
-    BOOST_FOREACH(const TopicDeltaMap::value_type& delta, incoming_topic_deltas) {
+    for (const TopicDeltaMap::value_type& delta: incoming_topic_deltas) {
       TopicVersionMap::const_iterator itr = current_topic_versions_.find(delta.first);
       if (itr != current_topic_versions_.end()) {
         if (delta.second.is_delta && delta.second.from_version != itr->second) {
@@ -337,10 +340,10 @@ Status StatestoreSubscriber::UpdateState(const TopicDeltaMap& incoming_topic_del
 
     // Skip calling the callbacks when an unexpected delta update is found.
     if (!found_unexpected_delta) {
-      BOOST_FOREACH(const UpdateCallbacks::value_type& callbacks, update_callbacks_) {
+      for (const UpdateCallbacks::value_type& callbacks: update_callbacks_) {
         MonotonicStopWatch sw;
         sw.Start();
-        BOOST_FOREACH(const UpdateCallback& callback, callbacks.second.callbacks) {
+        for (const UpdateCallback& callback: callbacks.second.callbacks) {
           // TODO: Consider filtering the topics to only send registered topics to
           // callbacks
           callback(incoming_topic_deltas, subscriber_topic_updates);

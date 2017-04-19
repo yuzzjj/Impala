@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_SCANNER_CONTEXT_INLINE_H
@@ -20,7 +23,7 @@
 #include "exec/read-write-util.h"
 #include "runtime/string-buffer.h"
 
-using namespace impala;
+namespace impala {
 
 /// Macro to return false if condition is false. Only defined for this file.
 #define RETURN_IF_FALSE(x) if (UNLIKELY(!(x))) return false
@@ -146,19 +149,24 @@ inline bool ScannerContext::Stream::ReadVLong(int64_t* value, Status* status) {
 }
 
 inline bool ScannerContext::Stream::ReadZLong(int64_t* value, Status* status) {
-  uint64_t zlong = 0;
-  int shift = 0;
-  uint8_t* byte;
-  do {
-    DCHECK_LE(shift, 64);
-    RETURN_IF_FALSE(ReadBytes(1, &byte, status));
-    zlong |= static_cast<uint64_t>(*byte & 0x7f) << shift;
-    shift += 7;
-  } while (*byte & 0x80);
-  *value = (zlong >> 1) ^ -(zlong & 1);
+  uint8_t* bytes;
+  int64_t bytes_len;
+  RETURN_IF_FALSE(
+      GetBytes(ReadWriteUtil::MAX_ZLONG_LEN, &bytes, &bytes_len, status, true));
+
+  uint8_t* new_bytes = bytes;
+  ReadWriteUtil::ZLongResult r = ReadWriteUtil::ReadZLong(&new_bytes, bytes + bytes_len);
+  if (UNLIKELY(!r.ok)) {
+    *status = ReportInvalidInt();
+    return false;
+  }
+  *value = r.val;
+  int64_t bytes_read = new_bytes - bytes;
+  RETURN_IF_FALSE(SkipBytes(bytes_read, status));
   return true;
 }
 
 #undef RETURN_IF_FALSE
 
+} // namespace impala
 #endif

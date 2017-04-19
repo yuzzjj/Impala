@@ -1,26 +1,31 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <algorithm>
 #include <cstring>
-#include <vector>
 #include <boost/assign/list_of.hpp>
-#include <gtest/gtest.h>
+#include <boost/date_time/gregorian/gregorian.hpp>
+#include <boost/date_time/posix_time/posix_time.hpp>
 
-#include "common/init.h"
-#include "runtime/raw-value.h"
+#include "common/status.h"
+#include "runtime/raw-value.inline.h"
+#include "runtime/timestamp-parse-util.h"
 #include "runtime/timestamp-value.h"
+#include "testutil/gtest-util.h"
 #include "util/string-parser.h"
 
 #include "common/names.h"
@@ -585,21 +590,23 @@ TEST(TimestampTest, Basic) {
   TimestampValue min_date = TimestampValue("1400-01-01", 10);
   EXPECT_TRUE(min_date.HasDate());
   EXPECT_TRUE(min_date.HasTime());
-  EXPECT_EQ(-17987443200, min_date.ToUnixTime());
+  time_t tm_min;
+  EXPECT_TRUE(min_date.ToUnixTime(&tm_min));
+  EXPECT_EQ(-17987443200, tm_min);
   EXPECT_EQ("1400-01-01 00:00:00", TimestampValue(-17987443200).DebugString());
   TimestampValue too_early(-17987443201);
   EXPECT_FALSE(too_early.HasDate());
   EXPECT_FALSE(too_early.HasTime());
-  // Apparently 5 digit years don't parse (at least by default) but can be printed.
-  // Boost's documented says the max year supported is 9,999 but 10K seems to be
-  // the actual limit.
+  // Boost's max supported year is 9999.
   TimestampValue max_date =
-      TimestampValue(date(10000, Dec, 31), time_duration(23, 59, 59));
+      TimestampValue(date(9999, Dec, 31), time_duration(23, 59, 59));
   EXPECT_TRUE(max_date.HasDate());
   EXPECT_TRUE(max_date.HasTime());
-  EXPECT_EQ(253433923199, max_date.ToUnixTime());
-  EXPECT_EQ("10000-12-31 23:59:59", TimestampValue(253433923199).DebugString());
-  TimestampValue too_late(253433923200);
+  time_t tm_max;
+  EXPECT_TRUE(max_date.ToUnixTime(&tm_max));
+  EXPECT_EQ(253402300799, tm_max);
+  EXPECT_EQ("9999-12-31 23:59:59", TimestampValue(253402300799).DebugString());
+  TimestampValue too_late(253402300800);
   EXPECT_FALSE(too_late.HasDate());
   EXPECT_FALSE(too_late.HasTime());
 
@@ -608,15 +615,12 @@ TEST(TimestampTest, Basic) {
   EXPECT_EQ("2038-01-19 03:14:09", TimestampValue(2147483649).DebugString());
 
   // Test Unix time as a float
-  EXPECT_EQ(1382337792.07,
-      TimestampValue("2013-10-21 06:43:12.07", 22).ToSubsecondUnixTime());
+  double result;
+  EXPECT_TRUE(TimestampValue("2013-10-21 06:43:12.07", 22).ToSubsecondUnixTime(&result));
+  EXPECT_EQ(1382337792.07, result);
   EXPECT_EQ("1970-01-01 00:00:00.008000000", TimestampValue(0.008).DebugString());
 }
 
 }
 
-int main(int argc, char **argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  impala::InitCommonRuntime(argc, argv, false);
-  return RUN_ALL_TESTS();
-}
+IMPALA_TEST_MAIN();

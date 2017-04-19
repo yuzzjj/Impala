@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_HASH_JOIN_NODE_H
@@ -51,7 +54,8 @@ class HashJoinNode : public BlockingJoinNode {
 
   virtual Status Init(const TPlanNode& tnode, RuntimeState* state);
   virtual Status Prepare(RuntimeState* state);
-  // Open() implemented in BlockingJoinNode
+  virtual void Codegen(RuntimeState* state);
+  virtual Status Open(RuntimeState* state);
   virtual Status GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos);
   virtual Status Reset(RuntimeState* state);
   virtual void Close(RuntimeState* state);
@@ -60,12 +64,14 @@ class HashJoinNode : public BlockingJoinNode {
 
  protected:
   virtual void AddToDebugString(int indentation_level, std::stringstream* out) const;
-  virtual Status InitGetNext(TupleRow* first_probe_row);
-  virtual Status ConstructBuildSide(RuntimeState* state);
+  virtual Status ProcessBuildInput(RuntimeState* state);
 
  private:
   boost::scoped_ptr<OldHashTable> hash_tbl_;
   OldHashTable::Iterator hash_tbl_iterator_;
+
+  /// holds everything referenced from build side
+  boost::scoped_ptr<MemPool> build_pool_;
 
   /// our equi-join predicates "<lhs> = <rhs>" are separated into
   /// build_exprs_ (over child(1)) and probe_exprs_ (over child(0))
@@ -113,6 +119,9 @@ class HashJoinNode : public BlockingJoinNode {
   RuntimeProfile::Counter* build_buckets_counter_;   // num buckets in hash table
   RuntimeProfile::Counter* hash_tbl_load_factor_counter_;
 
+  /// Prepares for the first call to GetNext(). Must be called after GetFirstProbeRow().
+  void InitGetNext();
+
   /// GetNext helper function for the common join cases: Inner join, left semi and left
   /// outer
   Status LeftJoinGetNext(RuntimeState* state, RowBatch* row_batch, bool* eos);
@@ -135,13 +144,13 @@ class HashJoinNode : public BlockingJoinNode {
   /// hash_fn is the codegen'd function for computing hashes over tuple rows in the
   /// hash table.
   /// Returns NULL if codegen was not possible.
-  llvm::Function* CodegenProcessBuildBatch(RuntimeState* state, llvm::Function* hash_fn);
+  llvm::Function* CodegenProcessBuildBatch(LlvmCodeGen* codegen, llvm::Function* hash_fn);
 
   /// Codegen processing probe batches.  Identical signature to ProcessProbeBatch.
   /// hash_fn is the codegen'd function for computing hashes over tuple rows in the
   /// hash table.
   /// Returns NULL if codegen was not possible.
-  llvm::Function* CodegenProcessProbeBatch(RuntimeState* state, llvm::Function* hash_fn);
+  llvm::Function* CodegenProcessProbeBatch(LlvmCodeGen* codegen, llvm::Function* hash_fn);
 };
 
 }

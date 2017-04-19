@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_SERVICE_FRONTEND_H
 #define IMPALA_SERVICE_FRONTEND_H
@@ -35,10 +38,10 @@ class Frontend {
   /// or if there is any further exception, the constructor will terminate the process.
   Frontend();
 
-  /// Request to update the Impalad catalog cache. The TUpdateCatalogCacheRequest contains
-  /// a list of objects that should be added/removed from the Catalog. Returns a response
-  /// that contains details such as the new max catalog version.
-  Status UpdateCatalogCache(const TUpdateCatalogCacheRequest& req,
+  /// Request to update the Impalad catalog cache. The req argument contains a vector of
+  /// updates that each contain objects that should be added/removed from the Catalog.
+  /// Returns a response that contains details such as the new max catalog version.
+  Status UpdateCatalogCache(const vector<TUpdateCatalogCacheRequest>& req,
       TUpdateCatalogCacheResponse *resp);
 
   /// Request to update the Impalad frontend cluster membership snapshot.  The
@@ -165,17 +168,21 @@ class Frontend {
   /// Call FE to get files info for a table or partition.
   Status GetTableFiles(const TShowFilesParams& params, TResultSet* result);
 
+  /// Creates a thrift descriptor table for testing.
+  Status BuildTestDescriptorTable(const TBuildTestDescriptorTableParams& params,
+      TDescriptorTable* result);
+
  private:
   /// Descriptor of Java Frontend class itself, used to create a new instance.
   jclass fe_class_;
 
-  jobject fe_;  // instance of com.cloudera.impala.service.JniFrontend
+  jobject fe_;  // instance of org.apache.impala.service.JniFrontend
   jmethodID create_exec_request_id_;  // JniFrontend.createExecRequest()
   jmethodID get_explain_plan_id_;  // JniFrontend.getExplainPlan()
   jmethodID get_hadoop_config_id_;  // JniFrontend.getHadoopConfig(byte[])
   jmethodID get_hadoop_configs_id_;  // JniFrontend.getAllHadoopConfigs()
   jmethodID check_config_id_; // JniFrontend.checkConfiguration()
-  jmethodID update_catalog_cache_id_; // JniFrontend.updateCatalogCache()
+  jmethodID update_catalog_cache_id_; // JniFrontend.updateCatalogCache(byte[][])
   jmethodID update_membership_id_; // JniFrontend.updateMembership()
   jmethodID get_table_names_id_; // JniFrontend.getTableNames
   jmethodID describe_db_id_; // JniFrontend.describeDb
@@ -193,6 +200,10 @@ class Frontend {
   jmethodID set_catalog_initialized_id_; // JniFrontend.setCatalogInitialized
   jmethodID get_table_files_id_; // JniFrontend.getTableFiles
   jmethodID show_create_function_id_; // JniFrontend.showCreateFunction
+
+  // Only used for testing.
+  jmethodID build_test_descriptor_table_id_; // JniFrontend.buildTestDescriptorTable()
+
   jmethodID fe_ctor_;
 };
 

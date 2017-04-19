@@ -1,16 +1,19 @@
-// Copyright 2015 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/tuple-row-compare.h"
 
@@ -19,17 +22,38 @@
 #include "codegen/codegen-anyval.h"
 #include "codegen/llvm-codegen.h"
 #include "runtime/runtime-state.h"
+#include "util/runtime-profile-counters.h"
 
 using namespace impala;
 using namespace llvm;
 using namespace strings;
 
+int TupleRowComparator::CompareInterpreted(
+    const TupleRow* lhs, const TupleRow* rhs) const {
+  DCHECK_EQ(key_expr_ctxs_lhs_.size(), key_expr_ctxs_rhs_.size());
+  for (int i = 0; i < key_expr_ctxs_lhs_.size(); ++i) {
+    void* lhs_value = key_expr_ctxs_lhs_[i]->GetValue(lhs);
+    void* rhs_value = key_expr_ctxs_rhs_[i]->GetValue(rhs);
+
+    // The sort order of NULLs is independent of asc/desc.
+    if (lhs_value == NULL && rhs_value == NULL) continue;
+    if (lhs_value == NULL && rhs_value != NULL) return nulls_first_[i];
+    if (lhs_value != NULL && rhs_value == NULL) return -nulls_first_[i];
+
+    int result =
+        RawValue::Compare(lhs_value, rhs_value, key_expr_ctxs_lhs_[i]->root()->type());
+    if (!is_asc_[i]) result = -result;
+    if (result != 0) return result;
+    // Otherwise, try the next Expr
+  }
+  return 0; // fully equivalent key
+}
+
 Status TupleRowComparator::Codegen(RuntimeState* state) {
   Function* fn;
-  RETURN_IF_ERROR(CodegenCompare(state, &fn));
-  LlvmCodeGen* codegen;
-  bool got_codegen = state->GetCodegen(&codegen).ok();
-  DCHECK(got_codegen);
+  LlvmCodeGen* codegen = state->codegen();
+  DCHECK(codegen != NULL);
+  RETURN_IF_ERROR(CodegenCompare(codegen, &fn));
   codegend_compare_fn_ = state->obj_pool()->Add(new CompareFn);
   codegen->AddFunctionToJit(fn, reinterpret_cast<void**>(codegend_compare_fn_));
   return Status::OK();
@@ -150,9 +174,7 @@ Status TupleRowComparator::Codegen(RuntimeState* state) {
 // next_key2:                                        ; preds = %rhs_non_null12, %next_key
 //   ret i32 0
 // }
-Status TupleRowComparator::CodegenCompare(RuntimeState* state, Function** fn) {
-  LlvmCodeGen* codegen;
-  RETURN_IF_ERROR(state->GetCodegen(&codegen));
+Status TupleRowComparator::CodegenCompare(LlvmCodeGen* codegen, Function** fn) {
   SCOPED_TIMER(codegen->codegen_timer());
   LLVMContext& context = codegen->context();
 
@@ -163,9 +185,9 @@ Status TupleRowComparator::CodegenCompare(RuntimeState* state, Function** fn) {
   Function* key_fns[key_expr_ctxs_lhs_.size()];
   for (int i = 0; i < key_expr_ctxs_lhs_.size(); ++i) {
     Status status =
-        key_expr_ctxs_lhs_[i]->root()->GetCodegendComputeFn(state, &key_fns[i]);
+        key_expr_ctxs_lhs_[i]->root()->GetCodegendComputeFn(codegen, &key_fns[i]);
     if (!status.ok()) {
-      return Status(Substitute("Could not codegen TupleRowComparator::Compare(): %s",
+      return Status(Substitute("Could not codegen TupleRowComparator::Compare(): $0",
           status.GetDetail()));
     }
   }
@@ -183,7 +205,7 @@ Status TupleRowComparator::CodegenCompare(RuntimeState* state, Function** fn) {
   prototype.AddArgument("lhs", tuple_row_type);
   prototype.AddArgument("rhs", tuple_row_type);
 
-  LlvmCodeGen::LlvmBuilder builder(context);
+  LlvmBuilder builder(context);
   Value* args[4];
   *fn = prototype.GeneratePrototype(&builder, args);
   Value* lhs_ctxs_arg = args[0];

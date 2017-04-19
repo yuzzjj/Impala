@@ -1,42 +1,27 @@
-# Copyright 2012 Cloudera Inc.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
-cmake_minimum_required(VERSION 2.6)
-
-if (NOT $ENV{DISABLE_IMPALA_TOOLCHAIN})
-  # Enable toolchain variable if the environment is setup
-  set(IMPALA_TOOLCHAIN ON)
-  message(STATUS "Toolchain build.")
-  # Download any missing toolchain dependencies. If this fails, fail the build.
-  set(BOOTSTRAP_CMD "$ENV{IMPALA_HOME}/bin/bootstrap_toolchain.py")
-  # Download and unpack the dependencies
-  message(STATUS "Downloading and extracting dependencies.")
-  execute_process(COMMAND ${BOOTSTRAP_CMD} RESULT_VARIABLE BOOTSTRAP_RESULT)
-  if (${BOOTSTRAP_RESULT} EQUAL 0)
-    message(STATUS "Toolchain bootstrap complete.")
-  else()
-    message(FATAL_ERROR "Toolchain bootstrap failed.")
-  endif()
-else()
-  set(IMPALA_TOOLCHAIN OFF)
-  message(STATUS "Impala toolchain was explicitly disabled using DISABLE_IMPALA_TOOLCHAIN.")
-  message(STATUS "Assuming system search path for dependencies.")
-endif()
+cmake_minimum_required(VERSION 3.2.3)
 
 # Explicitly define project() to allow modifying the compiler before the project is
 # initialized.
 project(Impala)
+
+include(cmake_modules/kudu_cmake_fns.txt)
 
 if (NOT DEFINED BUILD_SHARED_LIBS)
   set(BUILD_SHARED_LIBS OFF)
@@ -80,64 +65,60 @@ function(set_dep_root NAME)
   set(${NAME}_ROOT $ENV{IMPALA_TOOLCHAIN}/${NAME_LOWER}-$ENV{${VAL_NAME}} PARENT_SCOPE)
 endfunction()
 
-set(Boost_USE_MULTITHREADED ON)
+# Define root path for all dependencies, this is in the form of
+# set_dep_root(PACKAGE) ->
+#   PACKAGE_ROOT set to $ENV{IMPALA_TOOLCHAIN}/PACKAGE-$ENV{IMPALA_PACKAGE_VERSION}
+set_dep_root(AVRO)
+set_dep_root(BOOST)
+set_dep_root(BREAKPAD)
+set_dep_root(BZIP2)
+set_dep_root(CRCUTIL)
+set_dep_root(FLATBUFFERS)
+set_dep_root(GCC)
+set_dep_root(GFLAGS)
+set_dep_root(GLOG)
+set_dep_root(GPERFTOOLS)
+set_dep_root(GTEST)
+set_dep_root(LIBEV)
+set_dep_root(LLVM)
+set(LLVM_DEBUG_ROOT $ENV{IMPALA_TOOLCHAIN}/llvm-$ENV{IMPALA_LLVM_DEBUG_VERSION})
+set_dep_root(LZ4)
+set_dep_root(OPENLDAP)
+set_dep_root(PROTOBUF)
+set_dep_root(RE2)
+set_dep_root(RAPIDJSON)
+set_dep_root(SNAPPY)
+set_dep_root(THRIFT)
+set_dep_root(ZLIB)
+if (APPLE)
+  set_dep_root(OPENSSL)
+endif()
 
-if (IMPALA_TOOLCHAIN)
-  message(STATUS "Found Impala Toolchain, enabling toolchain boost")
-  set(ENV{BOOST_ROOT} "$ENV{IMPALA_TOOLCHAIN}/boost-$ENV{IMPALA_BOOST_VERSION}")
-  set(Boost_USE_STATIC_LIBS NOT ${BUILD_SHARED_LIBS})
-  set(Boost_USE_STATIC_RUNTIME ON)
+# The boost-cmake project hasn't been maintained for years. Let's make sure we
+# don't accidentally use it if it can be found.
+set(Boost_NO_BOOST_CMAKE ON)
 
-  # Newer versions of boost (including the version in toolchain) don't build separate
-  # multithreaded versions (they always are). Make sure to pick those up.
-  set(Boost_USE_MULTITHREADED OFF)
+set(Boost_USE_STATIC_LIBS NOT ${BUILD_SHARED_LIBS})
+set(Boost_USE_STATIC_RUNTIME ON)
 
-  # Define root path for all dependencies, this is in the form of
-  # set_dep_root(PACKAGE) ->
-  #   PACKAGE_ROOT set to $ENV{IMPALA_TOOLCHAIN}/PACKAGE-$ENV{IMPALA_PACKAGE_VERSION}
-  set_dep_root(GCC)
-  set_dep_root(AVRO)
-  set_dep_root(BZIP2)
-  set_dep_root(GFLAGS)
-  set_dep_root(GLOG)
-  set_dep_root(GPERFTOOLS)
-  set_dep_root(GTEST)
-  set_dep_root(LLVM)
-  set(LLVM_DEBUG_ROOT $ENV{IMPALA_TOOLCHAIN}/llvm-$ENV{IMPALA_LLVM_DEBUG_VERSION})
-  set_dep_root(LZ4)
-  set_dep_root(OPENLDAP)
-  set_dep_root(RE2)
-  set_dep_root(RAPIDJSON)
-  set_dep_root(SNAPPY)
-  set_dep_root(THRIFT)
-  set_dep_root(ZLIB)
-  if (APPLE)
-    set_dep_root(OPENSSL)
-  endif()
-endif ()
+# Newer versions of boost (including the version in toolchain) don't build separate
+# multithreaded versions (they always are). Make sure to pick those up.
+# TODO: understand the consequence of leaving this ON (the default value).
+set(Boost_USE_MULTITHREADED OFF)
 
-# find libraries that will be statically linked if they were compiled with -fPIC
-find_package(PICLibs REQUIRED)
-
-# find boost headers and libs
-IF (DEFINED ENV{BOOST_ROOT})
-    # The casing and underscoring expected for these properties varies between
-    # versions of CMake. Multiple inconsistent versions may be present here
-    # intentionally to provide what a wide range of versions expects.
-    set(Boost_NO_SYSTEM_PATHS true)
-    set(BOOST_ROOT $ENV{BOOST_ROOT})
-    set(BOOST_LIBRARYDIR $ENV{BOOST_ROOT}/lib)
-    set(BOOST_INCLUDEDIR $ENV{BOOST_ROOT}/include)
-    set(Boost_INCLUDE_DIR ${BOOST_INCLUDEDIR})
-ENDIF (DEFINED ENV{BOOST_ROOT})
+# The casing and underscoring expected for these properties varies between
+# versions of CMake. Multiple inconsistent versions may be present here
+# intentionally to provide what a wide range of versions expects.
+set(Boost_NO_SYSTEM_PATHS true)
+set(BOOST_LIBRARYDIR ${BOOST_ROOT}/lib)
+set(BOOST_INCLUDEDIR ${BOOST_ROOT}/include)
+set(Boost_INCLUDE_DIR ${BOOST_INCLUDEDIR})
 
 if (CMAKE_DEBUG)
   set(Boost_DEBUG TRUE)
 endif()
 
-
-find_package(Boost $ENV{IMPALA_MIN_BOOST_VERSION} REQUIRED
-  COMPONENTS thread regex system filesystem date_time)
+find_package(Boost REQUIRED COMPONENTS thread regex filesystem system date_time)
 include_directories(${Boost_INCLUDE_DIRS})
 set(LIBS ${LIBS} ${Boost_LIBRARIES})
 message(STATUS "Boost include dir: " ${Boost_INCLUDE_DIRS})
@@ -153,22 +134,20 @@ include_directories(${BZIP2_INCLUDE_DIR})
 
 find_package(Zlib REQUIRED)
 include_directories(${ZLIB_INCLUDE_DIR})
+message(STATUS "zlib: Static -> ${ZLIB_STATIC}, Other -> ${ZLIB_LIBRARIES}")
 
 if(NOT BUILD_SHARED_LIBS)
-  # It might be the case that bzip2 and zlib are not available as static libs in the non
-  # toolchain case
-  # TODO remove this when moving to toolchain only
+  # Panic if we cannot find the static libraries as they are supposed to be
+  # in the toolchain.
   if (NOT BZIP2_STATIC_FOUND)
-    set(LIBBZ2 ${BZIP2_LIBRARIES})
-  else()
-    set(LIBBZ2 BZIP2_STATIC)
+    message(FATAL_ERROR "bzip2 static library libbz2.a not found in $ENV{IMPALA_TOOLCHAIN}")
+  endif()
+  if (NOT ZLIB_STATIC_FOUND)
+    message(FATAL_ERROR "zlib static library libz.a not found in $ENV{IMPALA_TOOLCHAIN}")
   endif()
 
-  if (NOT ZLIB_STATIC_FOUND)
-    set(LIBZ ${ZLIB_LIBRARIES})
-  else()
-    set(LIBZ ZLIB_STATIC)
-  endif()
+  set(LIBBZ2 BZIP2_STATIC)
+  set(LIBZ ZLIB_STATIC)
 else()
   set(LIBBZ2 ${BZIP2_LIBRARIES})
   set(LIBZ ${ZLIB_LIBRARIES})
@@ -185,14 +164,6 @@ else()
   set(LIBS ${LIBS} HDFS_STATIC)
   set(HDFS_LIB HDFS_STATIC)
 endif()
-
-# find the Squeasel webserver library
-find_package(Squeasel REQUIRED)
-include_directories(${SQUEASEL_INCLUDE_DIR})
-
-# find the Mustache template library
-find_package(Mustache REQUIRED)
-include_directories(${MUSTACHE_INCLUDE_DIR})
 
 # find GLog headers and libs.  Must include glog headers before the other
 # google libraries.  They all have a config.h and we want glog's to be picked
@@ -229,8 +200,10 @@ set(LLVM_BINARIES_ROOT ${LLVM_ROOT})
 find_package(LlvmBinaries REQUIRED)
 
 # Find LLVM libraries to link against.
-if (IMPALA_TOOLCHAIN AND ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG"
-      OR "${CMAKE_BUILD_TYPE}" STREQUAL "ADDRESS_SANITIZER"))
+if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG"
+    OR "${CMAKE_BUILD_TYPE}" STREQUAL "ADDRESS_SANITIZER"
+    OR "${CMAKE_BUILD_TYPE}" STREQUAL "TIDY"
+    OR "${CMAKE_BUILD_TYPE}" STREQUAL "UBSAN")
   # Use the LLVM libaries with assertions for debug builds.
   set(LLVM_ROOT ${LLVM_DEBUG_ROOT})
 endif()
@@ -256,6 +229,12 @@ set(LDAP_LIBRARY ldapstatic)
 set(LBER_LIBRARY lberstatic)
 message(STATUS "LDAP: ${LDAP_INCLUDE_DIR}")
 
+# The environment variable $THRIFT_HOME is set in impala-config.sh
+# Make sure it's consistent with $THRIFT_ROOT.
+if (NOT ($ENV{THRIFT_HOME} STREQUAL ${THRIFT_ROOT}))
+  message(FATAL_ERROR "THRIFT_ROOT (${THRIFT_ROOT}) differs from environment "
+      "variable THRIFT_HOME ($ENV{THRIFT_HOME}).")
+endif()
 # find thrift headers and libs
 find_package(Thrift REQUIRED)
 include_directories(${THRIFT_INCLUDE_DIR})
@@ -265,6 +244,14 @@ message(STATUS "Thrift contrib dir: ${THRIFT_CONTRIB_DIR}")
 message(STATUS "Thrift library path: ${THRIFT_LIBS}")
 message(STATUS "Thrift static library: ${THRIFT_STATIC_LIB}")
 message(STATUS "Thrift compiler: ${THRIFT_COMPILER}")
+
+# find flatbuffers headers, lib and compiler
+find_package(FlatBuffers REQUIRED)
+include_directories(${FLATBUFFERS_INCLUDE_DIR})
+set(LIBS ${LIBS} ${FLATBUFFERS_LIBS})
+message(STATUS "FlatBuffers include dir: ${FLATBUFFERS_INCLUDE_DIR}")
+message(STATUS "FlatBuffers library path: ${FLATBUFFERS_LIBS}")
+message(STATUS "FlatBuffers compiler: ${FLATBUFFERS_COMPILER}")
 
 # find Snappy headers and libs
 find_package(Snappy REQUIRED)
@@ -292,19 +279,80 @@ find_package(RapidJson REQUIRED)
 include_directories(${RAPIDJSON_INCLUDE_DIR})
 message(STATUS "RapidJson include dir: " ${RAPIDJSON_INCLUDE_DIR})
 
-# find boost multi precision headers
-if (Boost_VERSION LESS 105300)
-  find_package(BoostMultiPrecision REQUIRED)
-  include_directories(${BOOST_MULTI_PRECISION_INCLUDE_DIR})
-  message(STATUS "BoostMultiPrecision include dir: " ${BOOST_MULTI_PRECISION_INCLUDE_DIR})
-endif ()
-
 # find Avro headers and libs
 find_package(Avro REQUIRED)
 include_directories(${AVRO_INCLUDE_DIR})
 set(LIBS ${LIBS} ${AVRO_STATIC_LIB})
 message(STATUS "Avro include dir: " ${AVRO_INCLUDE_DIR})
 message(STATUS "Avro static library: " ${AVRO_STATIC_LIB})
+
+###################################################################
+# These dependencies use Kudu's CMake functions
+
+ADD_THIRDPARTY_LIB(glog
+  STATIC_LIB ${GLOG_STATIC_LIB})
+ADD_THIRDPARTY_LIB(gflags
+  STATIC_LIB ${GFLAGS_STATIC_LIB})
+ADD_THIRDPARTY_LIB(zlib
+  STATIC_LIB ${ZLIB_STATIC_LIBRARIES})
+ADD_THIRDPARTY_LIB(cyrus_sasl
+  SHARED_LIB ${SASL_SHARED_LIB})
+
+if (NOT APPLE)
+  find_library(RT_LIB_PATH rt)
+  if(NOT RT_LIB_PATH)
+    message(FATAL_ERROR "Could not find librt on the system path")
+  endif()
+  ADD_THIRDPARTY_LIB(rt
+    SHARED_LIB "${RT_LIB_PATH}")
+
+  find_library(DL_LIB_PATH dl)
+  if(NOT DL_LIB_PATH)
+    message(FATAL_ERROR "Could not find libdl on the system path")
+  endif()
+  ADD_THIRDPARTY_LIB(dl
+    SHARED_LIB "${DL_LIB_PATH}")
+endif()
+
+# find protobuf headers, libs and compiler
+find_package(Protobuf REQUIRED)
+include_directories(SYSTEM ${PROTOBUF_INCLUDE_DIR})
+message(STATUS "Protobuf include dir: " ${PROTOBUF_INCLUDE_DIR})
+
+ADD_THIRDPARTY_LIB(protobuf
+  STATIC_LIB "${PROTOBUF_STATIC_LIBRARY}")
+ADD_THIRDPARTY_LIB(protoc
+  STATIC_LIB "${PROTOBUF_PROTOC_STATIC_LIBRARY}"
+  DEPS protobuf)
+
+find_package(LibEv REQUIRED)
+include_directories(SYSTEM ${LIBEV_INCLUDE_DIR})
+ADD_THIRDPARTY_LIB(libev
+  STATIC_LIB "${LIBEV_STATIC_LIB}")
+
+find_package(Crcutil REQUIRED)
+include_directories(SYSTEM ${CRCUTIL_INCLUDE_DIR})
+ADD_THIRDPARTY_LIB(crcutil
+  STATIC_LIB "${CRCUTIL_STATIC_LIB}")
+
+###################################################################
+
+# KuduClient can use GLOG
+add_definitions(-DKUDU_HEADERS_USE_GLOG)
+if(NOT $ENV{KUDU_CLIENT_DIR} EQUAL "")
+  set(kuduClient_DIR "$ENV{KUDU_CLIENT_DIR}/usr/local/share/kuduClient/cmake")
+else()
+  set(kuduClient_DIR "$ENV{IMPALA_TOOLCHAIN}/kudu-$ENV{IMPALA_KUDU_VERSION}")
+  if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG")
+    set(kuduClient_DIR "${kuduClient_DIR}/debug/share/kuduClient/cmake")
+  else()
+    set(kuduClient_DIR "${kuduClient_DIR}/release/share/kuduClient/cmake")
+  endif()
+endif()
+# When KUDU_IS_SUPPORTED is false, the Kudu client is expected to be a non-functional
+# stub. It's still needed to link though.
+find_package(kuduClient REQUIRED NO_DEFAULT_PATH)
+include_directories(SYSTEM ${KUDU_CLIENT_INCLUDE_DIR})
 
 # find jni headers and libs
 find_package(JNI REQUIRED)
@@ -313,24 +361,44 @@ set(LIBS ${LIBS} ${JNI_LIBRARIES})
 message(STATUS "JNI_INCLUDE_DIRS: ${JNI_INCLUDE_DIRS}")
 message(STATUS "JNI_LIBRARIES: ${JNI_LIBRARIES}")
 
+# find breakpad headers and libs
+find_package(Breakpad REQUIRED)
+include_directories(${BREAKPAD_INCLUDE_DIR})
+set(LIBS ${LIBS} ${BREAKPAD_LIBRARIES})
+message(STATUS "Breakpad include dir: " ${BREAKPAD_INCLUDE_DIR})
+message(STATUS "Breakpad library: " ${BREAKPAD_STATIC_LIB})
+
 # compile these subdirs using their own CMakeLists.txt
 add_subdirectory(common/function-registry)
 add_subdirectory(common/thrift)
 add_subdirectory(be)
+add_subdirectory(fe)
+add_subdirectory(ext-data-source)
 
-# Run FE and BE tests
-add_custom_target(testall
-  COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_SOURCE_DIR}/fe mvn test
-  COMMAND ${CMAKE_SOURCE_DIR}/bin/runbackendtests.sh
+add_custom_target(tarballs ALL DEPENDS shell_tarball)
+
+add_custom_target(shell_tarball DEPENDS thrift-deps
+  COMMAND "${CMAKE_SOURCE_DIR}/shell/make_shell_tarball.sh"
 )
 
-# Load test data
-add_custom_target(loadtestdata
-  COMMAND ${CMAKE_SOURCE_DIR}/bin/load-test-data.sh
+add_custom_target(cscope ALL
+  COMMAND "${CMAKE_SOURCE_DIR}/bin/gen-cscope.sh"
 )
 
-add_custom_target(benchmark_run
-  COMMAND ${CMAKE_SOURCE_DIR}/be/bin/run_hive_benchmark.py
-)
+if (DEFINED ENV{IMPALA_LZO} AND EXISTS $ENV{IMPALA_LZO})
+  add_custom_target(impala-lzo ALL DEPENDS thrift-deps
+    COMMAND $ENV{IMPALA_LZO}/build.sh ${CMAKE_BUILD_TYPE} ${CMAKE_SOURCE_DIR}
+    $ENV{IMPALA_TOOLCHAIN}
+  )
+endif()
+
+# Dump include paths to a file
+if (DUMP_INCLUDE_PATHS)
+  file(REMOVE "${DUMP_INCLUDE_PATHS}")
+  get_property(dirs DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY INCLUDE_DIRECTORIES)
+  foreach(dir ${dirs})
+    file(APPEND "${DUMP_INCLUDE_PATHS}" "${dir}\n")
+  endforeach()
+endif(DUMP_INCLUDE_PATHS)
 
 SET(CMAKE_EXE_LINKER_FLAGS  "${CMAKE_EXE_LINKER_FLAGS} -stdlib=libstdc++")

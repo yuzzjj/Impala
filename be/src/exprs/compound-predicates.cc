@@ -1,27 +1,34 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+#include <sstream>
 
 #include "exprs/compound-predicates.h"
 #include "codegen/codegen-anyval.h"
 #include "codegen/llvm-codegen.h"
 #include "runtime/runtime-state.h"
 
+#include "common/names.h"
+
 using namespace impala;
 using namespace llvm;
 
 // (<> && false) is false, (true && NULL) is NULL
-BooleanVal AndPredicate::GetBooleanVal(ExprContext* context, TupleRow* row) {
+BooleanVal AndPredicate::GetBooleanVal(ExprContext* context, const TupleRow* row) {
   DCHECK_EQ(children_.size(), 2);
   BooleanVal val1 = children_[0]->GetBooleanVal(context, row);
   if (!val1.is_null && !val1.val) return BooleanVal(false); // short-circuit
@@ -33,8 +40,14 @@ BooleanVal AndPredicate::GetBooleanVal(ExprContext* context, TupleRow* row) {
   return BooleanVal(true);
 }
 
+string AndPredicate::DebugString() const {
+  stringstream out;
+  out << "AndPredicate(" << Expr::DebugString() << ")";
+  return out.str();
+}
+
 // (<> || true) is true, (false || NULL) is NULL
-BooleanVal OrPredicate::GetBooleanVal(ExprContext* context, TupleRow* row) {
+BooleanVal OrPredicate::GetBooleanVal(ExprContext* context, const TupleRow* row) {
   DCHECK_EQ(children_.size(), 2);
   BooleanVal val1 = children_[0]->GetBooleanVal(context, row);
   if (!val1.is_null && val1.val) return BooleanVal(true); // short-circuit
@@ -46,8 +59,14 @@ BooleanVal OrPredicate::GetBooleanVal(ExprContext* context, TupleRow* row) {
   return BooleanVal(false);
 }
 
-// IR codegen for compound and/or predicates.  Compound predicate has non trivial 
-// null handling as well as many branches so this is pretty complicated.  The IR 
+string OrPredicate::DebugString() const {
+  stringstream out;
+  out << "OrPredicate(" << Expr::DebugString() << ")";
+  return out.str();
+}
+
+// IR codegen for compound and/or predicates.  Compound predicate has non trivial
+// null handling as well as many branches so this is pretty complicated.  The IR
 // for x && y is:
 //
 // define i16 @CompoundPredicate(%"class.impala::ExprContext"* %context,
@@ -67,30 +86,30 @@ BooleanVal OrPredicate::GetBooleanVal(ExprContext* context, TupleRow* row) {
 //   %val2 = trunc i8 %3 to i1
 //   %tmp_and = and i1 %val, %val2
 //   br i1 %is_null, label %lhs_null, label %lhs_not_null
-// 
+//
 // lhs_null:                                         ; preds = %entry
 //   br i1 %is_null1, label %null_block, label %lhs_null_rhs_not_null
-// 
+//
 // lhs_not_null:                                     ; preds = %entry
 //   br i1 %is_null1, label %lhs_not_null_rhs_null, label %not_null_block
-// 
+//
 // lhs_null_rhs_not_null:                            ; preds = %lhs_null
 //   br i1 %val2, label %null_block, label %not_null_block
-// 
+//
 // lhs_not_null_rhs_null:                            ; preds = %lhs_not_null
 //   br i1 %val, label %null_block, label %not_null_block
-// 
+//
 // null_block:                                       ; preds = %lhs_null_rhs_not_null,
 //                                                     %lhs_not_null_rhs_null, %lhs_null
 //   br label %ret
-// 
+//
 // not_null_block:                                   ; preds = %lhs_null_rhs_not_null,
 //                                                   %lhs_not_null_rhs_null, %lhs_not_null
 //   %4 = phi i1 [ false, %lhs_null_rhs_not_null ],
 //               [ false, %lhs_not_null_rhs_null ],
 //               [ %tmp_and, %lhs_not_null ]
 //   br label %ret
-// 
+//
 // ret:                                              ; preds = %not_null_block, %null_block
 //   %ret3 = phi i1 [ false, %null_block ], [ %4, %not_null_block ]
 //   %5 = zext i1 %ret3 to i16
@@ -99,23 +118,20 @@ BooleanVal OrPredicate::GetBooleanVal(ExprContext* context, TupleRow* row) {
 //   ret i16 %7
 // }
 Status CompoundPredicate::CodegenComputeFn(
-    bool and_fn, RuntimeState* state, Function** fn) {
+    bool and_fn, LlvmCodeGen* codegen, Function** fn) {
   if (ir_compute_fn_ != NULL) {
     *fn = ir_compute_fn_;
     return Status::OK();
   }
 
   DCHECK_EQ(GetNumChildren(), 2);
-
   Function* lhs_function;
-  RETURN_IF_ERROR(children()[0]->GetCodegendComputeFn(state, &lhs_function));
+  RETURN_IF_ERROR(children()[0]->GetCodegendComputeFn(codegen, &lhs_function));
   Function* rhs_function;
-  RETURN_IF_ERROR(children()[1]->GetCodegendComputeFn(state, &rhs_function));
-  
-  LlvmCodeGen* codegen;
-  RETURN_IF_ERROR(state->GetCodegen(&codegen));
+  RETURN_IF_ERROR(children()[1]->GetCodegendComputeFn(codegen, &rhs_function));
+
   LLVMContext& context = codegen->context();
-  LlvmCodeGen::LlvmBuilder builder(context);
+  LlvmBuilder builder(context);
   Value* args[2];
   Function* function = CreateIrFunctionPrototype(codegen, "CompoundPredicate", &args);
 
@@ -124,11 +140,10 @@ Status CompoundPredicate::CodegenComputeFn(
 
   // Control blocks for aggregating results
   BasicBlock* lhs_null_block = BasicBlock::Create(context, "lhs_null", function);
-  BasicBlock* lhs_not_null_block = 
-      BasicBlock::Create(context, "lhs_not_null", function);
-  BasicBlock* lhs_null_rhs_not_null_block = 
+  BasicBlock* lhs_not_null_block = BasicBlock::Create(context, "lhs_not_null", function);
+  BasicBlock* lhs_null_rhs_not_null_block =
       BasicBlock::Create(context, "lhs_null_rhs_not_null", function);
-  BasicBlock* lhs_not_null_rhs_null_block = 
+  BasicBlock* lhs_not_null_rhs_null_block =
       BasicBlock::Create(context, "lhs_not_null_rhs_null", function);
   BasicBlock* null_block = BasicBlock::Create(context, "null_block", function);
   BasicBlock* not_null_block = BasicBlock::Create(context, "not_null_block", function);
@@ -140,7 +155,7 @@ Status CompoundPredicate::CodegenComputeFn(
   // Call rhs
   CodegenAnyVal rhs_result = CodegenAnyVal::CreateCallWrapped(
       codegen, &builder, TYPE_BOOLEAN, rhs_function, args, "rhs_call");
-  
+
   Value* lhs_is_null = lhs_result.GetIsNull();
   Value* rhs_is_null = rhs_result.GetIsNull();
   Value* lhs_value = lhs_result.GetVal();
@@ -216,7 +231,7 @@ Status CompoundPredicate::CodegenComputeFn(
   CodegenAnyVal ret(codegen, &builder, TYPE_BOOLEAN, NULL, "ret");
   ret.SetIsNull(is_null_phi);
   ret.SetVal(val_phi);
-  builder.CreateRet(ret.value());
+  builder.CreateRet(ret.GetLoweredValue());
 
   *fn = codegen->FinalizeFunction(function);
   DCHECK(*fn != NULL);

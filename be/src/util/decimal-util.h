@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UTIL_DECIMAL_UTIL_H
@@ -20,8 +23,8 @@
 #include <string>
 #include <boost/cstdint.hpp>
 
-#include "runtime/types.h"
 #include "runtime/multi-precision.h"
+#include "runtime/types.h"
 #include "util/bit-util.h"
 
 namespace impala {
@@ -29,16 +32,15 @@ namespace impala {
 class DecimalUtil {
  public:
   /// Maximum absolute value of a valid Decimal4Value. This is 9 digits of 9's.
-  static const int32_t MAX_UNSCALED_DECIMAL4;
+  static const int32_t MAX_UNSCALED_DECIMAL4 = 999999999;
 
   /// Maximum absolute value of a valid Decimal8Value. This is 18 digits of 9's.
-  static const int64_t MAX_UNSCALED_DECIMAL8;
+  static const int64_t MAX_UNSCALED_DECIMAL8 = 999999999999999999;
 
   /// Maximum absolute value a valid Decimal16Value. This is 38 digits of 9's.
-  static int128_t MAX_UNSCALED_DECIMAL16;
-
-  /// Initializes MAX_UNSCALED_DECIMAL16. Must be called once before using it.
-  static void InitMaxUnscaledDecimal16();
+  static const int128_t MAX_UNSCALED_DECIMAL16 = 99 + 100 *
+      (MAX_UNSCALED_DECIMAL8 + (1 + MAX_UNSCALED_DECIMAL8) *
+       static_cast<int128_t>(MAX_UNSCALED_DECIMAL8));
 
   /// TODO: do we need to handle overflow here or at a higher abstraction.
   template<typename T>

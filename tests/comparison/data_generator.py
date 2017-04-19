@@ -1,18 +1,22 @@
 #!/usr/bin/env impala-python
 
-# Copyright (c) 2014 Cloudera, Inc. All rights reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 '''This module provides random data generation and database population.
 
@@ -28,13 +32,13 @@ from logging import getLogger
 from random import choice, randint, seed
 from time import time
 
-from data_generator_mapred_common import (
+from tests.comparison.data_generator_mapred_common import (
     estimate_rows_per_reducer,
     MB_PER_REDUCER,
     serialize,
     TextTableDataGenerator)
-from common import Column, Table
-from db_types import (
+from tests.comparison.common import Column, Table
+from tests.comparison.db_types import (
     Char,
     Decimal,
     EXACT_TYPES,
@@ -45,6 +49,7 @@ from db_types import (
     Timestamp,
     TYPES,
     VarChar)
+from tests.comparison import db_connection
 
 LOG = getLogger(__name__)
 
@@ -83,15 +88,17 @@ class DbPopulator(object):
 
   '''
 
-  def __init__(self):
+  def __init__(self, db_engine=db_connection.IMPALA):
     self.cluster = None
     self.db_name = None
+    self.db_engine = db_engine
 
     self.min_col_count = None
     self.max_col_count = None
     self.min_row_count = None
     self.max_row_count = None
     self.allowed_storage_formats = None
+    self.randomization_seed = None
 
   def populate_db(self, table_count, postgresql_conn=None):
     '''Create tables with a random number of cols.
@@ -119,6 +126,7 @@ class DbPopulator(object):
         text_table.schema_location = None
         self._prepare_table_storage(text_table, self.db_name)
       table_data_generator = TextTableDataGenerator()
+      table_data_generator.randomization_seed = self.randomization_seed
       table_data_generator.table = text_table
       table_data_generator.row_count = randint(self.min_row_count, self.max_row_count)
       table_and_generators.append((table, table_data_generator))
@@ -141,9 +149,17 @@ class DbPopulator(object):
           cursor.execute('INSERT INTO %s SELECT * FROM %s'
               % (table.name, text_table.name))
           cursor.drop_table(text_table.name)
-    with self.cluster.impala.cursor(db_name=self.db_name) as cursor:
-      cursor.invalidate_metadata()
-      cursor.compute_stats()
+    if self.db_engine is db_connection.IMPALA:
+      with self.cluster.impala.cursor(db_name=self.db_name) as cursor:
+        cursor.invalidate_metadata()
+        cursor.compute_stats()
+    elif self.db_engine is db_connection.HIVE:
+      with self.cluster.hive.cursor(db_name=self.db_name) as cursor:
+        cursor.invalidate_metadata()
+        cursor.compute_stats()
+    else:
+      raise ValueError("db_engine must be of type %s or %s", db_connection.IMPALA,
+                       db_connection.HIVE)
     if postgresql_conn:
       with postgresql_conn.cursor() as postgresql_cursor:
         index_tables_in_db_if_possible(postgresql_cursor)
@@ -231,7 +247,7 @@ class DbPopulator(object):
 if __name__ == '__main__':
   from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 
-  import cli_options
+  from tests.comparison import cli_options
 
   parser = ArgumentParser(
       usage='usage: \n'
@@ -292,8 +308,9 @@ if __name__ == '__main__':
 
   cluster = cli_options.create_cluster(args)
 
-  populator = DbPopulator()
+  populator = DbPopulator(db_connection.HIVE if args.use_hive else db_connection.IMPALA)
   if command == 'populate':
+    populator.randomization_seed = args.randomization_seed
     populator.cluster = cluster
     populator.db_name = args.db_name
     populator.min_col_count = args.min_column_count
@@ -301,10 +318,17 @@ if __name__ == '__main__':
     populator.min_row_count = args.min_row_count
     populator.max_row_count = args.max_row_count
     populator.allowed_storage_formats = args.storage_file_formats.split(',')
-    with cluster.impala.connect() as conn:
-      with conn.cursor() as cursor:
-        cursor.invalidate_metadata()
-        cursor.ensure_empty_db(args.db_name)
+
+    if args.use_hive:
+      with cluster.hive.connect() as conn:
+        with conn.cursor() as cursor:
+          cursor.ensure_empty_db(args.db_name)
+    else:
+      with cluster.impala.connect() as conn:
+        with conn.cursor() as cursor:
+          cursor.invalidate_metadata()
+          cursor.ensure_empty_db(args.db_name)
+
     if args.use_postgresql:
       with cli_options.create_connection(args) as postgresql_conn:
         with postgresql_conn.cursor() as cursor:

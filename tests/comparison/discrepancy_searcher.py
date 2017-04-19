@@ -1,23 +1,29 @@
 #!/usr/bin/env impala-python
 
-# Copyright (c) 2014 Cloudera, Inc. All rights reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 '''This module will run random queries against existing databases and compare the
    results.
 
 '''
+# TODO: IMPALA-4600: refactor this module
+
 from copy import deepcopy
 from decimal import Decimal
 from itertools import izip
@@ -25,26 +31,36 @@ from logging import getLogger
 from math import isinf, isnan
 from os import getenv, symlink, unlink
 from os.path import join as join_path
-from random import choice
+from random import choice, randint
 from string import ascii_lowercase, digits
 from subprocess import call
 from tempfile import gettempdir
 from threading import current_thread, Thread
 from time import time
 
-from db_types import BigInt
-from db_connection import (
+from tests.comparison.db_types import BigInt
+from tests.comparison.db_connection import (
     DbCursor,
     IMPALA,
     HIVE,
     MYSQL,
     ORACLE,
     POSTGRESQL)
-from model_translator import SqlWriter
-from query_flattener import QueryFlattener
-from query_generator import QueryGenerator
+from tests.comparison.model_translator import SqlWriter
+from tests.comparison.query import (
+    FromClause,
+    InsertClause,
+    InsertStatement,
+    Query,
+    StatementExecutionMode,
+    SelectClause,
+    SelectItem)
+from tests.comparison.query_flattener import QueryFlattener
+from tests.comparison.statement_generator import get_generator
+from tests.comparison import db_connection
 
 LOG = getLogger(__name__)
+
 
 class QueryResultComparator(object):
   '''Used for comparing the results of a Query across two databases'''
@@ -74,6 +90,10 @@ class QueryResultComparator(object):
         flatten_dialect=flatten_dialect)
 
   @property
+  def test_db_type(self):
+    return self.test_conn.db_type
+
+  @property
   def ref_db_type(self):
     return self.ref_conn.db_type
 
@@ -81,7 +101,7 @@ class QueryResultComparator(object):
     '''Execute the query, compare the data, and return a ComparisonResult, which
        summarizes the outcome.
     '''
-    comparison_result = ComparisonResult(query, self.ref_db_type)
+    comparison_result = ComparisonResult(query, self.test_db_type, self.ref_db_type)
     (ref_sql, ref_exception, ref_data_set, ref_cursor_description), (test_sql,
         test_exception, test_data_set, test_cursor_description) = \
             self.query_executor.fetch_query_results(query)
@@ -92,7 +112,7 @@ class QueryResultComparator(object):
     if ref_exception:
       comparison_result.exception = ref_exception
       error_message = str(ref_exception)
-      if 'Year is out of valid range: 1400..10000' in error_message:
+      if 'Year is out of valid range: 1400..9999' in error_message:
         # This comes from Postgresql. Overflow errors will be ignored.
         comparison_result.exception = TypeOverflow(error_message)
       LOG.debug('%s encountered an error running query: %s',
@@ -103,23 +123,35 @@ class QueryResultComparator(object):
       # "known errors" will be ignored
       error_message = str(test_exception)
       known_error = None
-      if 'Expressions in the ORDER BY clause must not be constant' in error_message \
-          or 'Expressions in the PARTITION BY clause must not be consta' in error_message:
-        # It's too much work to avoid this bug. Just ignore it if it comes up.
-        known_error = KnownError('https://issues.cloudera.org/browse/IMPALA-1354')
-      elif 'GROUP BY expression must not contain aggregate functions' in error_message \
-          or 'select list expression not produced by aggregation output' in error_message:
-        known_error = KnownError('https://issues.cloudera.org/browse/IMPALA-1423')
-      elif ('max(' in error_message or 'min(' in error_message) \
-          and 'only supported with an UNBOUNDED PRECEDING start bound' in error_message:
-        # This analytic isn't supported and ignoring this here is much easier than not
-        # generating the query...
-        known_error = KnownError('MAX UNBOUNDED PRECISION')
-      elif 'IN and/or EXISTS subquery predicates are not supported in binary predicates' \
-          in error_message:
-        known_error = KnownError('https://issues.cloudera.org/browse/IMPALA-1418')
-      elif 'Unsupported predicate with subquery' in error_message:
-        known_error = KnownError('https://issues.cloudera.org/browse/IMPALA-1950')
+
+      if self.test_db_type is db_connection.IMPALA:
+        if 'Expressions in the ORDER BY clause must not be constant' in error_message \
+            or 'Expressions in the PARTITION BY clause must not be consta' in error_message:
+          # It's too much work to avoid this bug. Just ignore it if it comes up.
+          known_error = KnownError('https://issues.cloudera.org/browse/IMPALA-1354')
+        elif 'GROUP BY expression must not contain aggregate functions' in error_message \
+            or 'select list expression not produced by aggregation output' in error_message:
+          known_error = KnownError('https://issues.cloudera.org/browse/IMPALA-1423')
+        elif ('max(' in error_message or 'min(' in error_message) \
+            and 'only supported with an UNBOUNDED PRECEDING start bound' in error_message:
+          # This analytic isn't supported and ignoring this here is much easier than not
+          # generating the query...
+          known_error = KnownError('MAX UNBOUNDED PRECISION')
+        elif 'IN and/or EXISTS subquery predicates are not supported in binary predicates' \
+            in error_message:
+          known_error = KnownError('https://issues.cloudera.org/browse/IMPALA-1418')
+        elif 'Unsupported predicate with subquery' in error_message:
+          known_error = KnownError('https://issues.cloudera.org/browse/IMPALA-1950')
+        elif 'RIGHT OUTER JOIN type with no equi-join' in error_message:
+          known_error = KnownError('https://issues.cloudera.org/browse/IMPALA-3063')
+        elif 'Operation is in ERROR_STATE' in error_message:
+          known_error = KnownError('Mem limit exceeded')
+      elif self.test_db_type is db_connection.HIVE:
+        if 'ParseException line' in error_message and 'missing ) at' in \
+              error_message and query.select_clause and \
+              query.select_clause.analytic_items:
+          known_error = KnownError("https://issues.apache.org/jira/browse/HIVE-14871")
+
       if known_error:
         comparison_result.exception = known_error
       else:
@@ -130,8 +162,8 @@ class QueryResultComparator(object):
 
     comparison_result.ref_row_count = len(ref_data_set)
     comparison_result.test_row_count = len(test_data_set)
-    comparison_result.query_resulted_in_data = (comparison_result.test_row_count > 0
-        or comparison_result.ref_row_count > 0)
+    comparison_result.query_resulted_in_data = (comparison_result.test_row_count > 0 or
+                                                comparison_result.ref_row_count > 0)
     if comparison_result.ref_row_count != comparison_result.test_row_count:
       return comparison_result
 
@@ -170,6 +202,10 @@ class QueryResultComparator(object):
         comparison_result.mismatch_at_col_number = col_idx + 1
         return comparison_result
     comparison_result.query_resulted_in_data = found_data
+
+    # If we're here, it means ref and test data sets are equal for a DML statement.
+    if isinstance(query, (InsertStatement,)):
+      comparison_result.modified_rows_count = test_data_set[0][0]
 
     return comparison_result
 
@@ -226,6 +262,10 @@ class QueryResultComparator(object):
 class QueryExecutor(object):
   '''Concurrently executes queries'''
 
+  # TODO: Set to false while IMPALA-3336 is a problem. Disabling random query options
+  # seems to reduce IMPALA-3336 occurances.
+  ENABLE_RANDOM_QUERY_OPTIONS = False
+
   # If the number of rows * cols is greater than this val, then the comparison will
   # be aborted. Raising this value also raises the risk of python being OOM killed. At
   # 10M python would get OOM killed occasionally even on a physical machine with 32GB
@@ -254,7 +294,7 @@ class QueryExecutor(object):
       try:
         unlink(link)
       except OSError as e:
-        if not 'No such file' in str(e):
+        if 'No such file' not in str(e):
           raise e
       try:
         symlink(query_log_path, link)
@@ -267,6 +307,50 @@ class QueryExecutor(object):
     # "CREATE VIEW <name> AS ...", this will be the value of "<name>".
     self._table_or_view_name = None
 
+  def set_impala_query_options(self, cursor):
+    opts = """
+        SET MEM_LIMIT={mem_limit};
+        SET BATCH_SIZE={batch_size};
+        SET DISABLE_CODEGEN={disable_codegen};
+        SET DISABLE_OUTERMOST_TOPN={disable_outermost_topn};
+        SET DISABLE_ROW_RUNTIME_FILTERING={disable_row_runtime_filtering};
+        SET DISABLE_STREAMING_PREAGGREGATIONS={disable_streaming_preaggregations};
+        SET DISABLE_UNSAFE_SPILLS={disable_unsafe_spills};
+        SET EXEC_SINGLE_NODE_ROWS_THRESHOLD={exec_single_node_rows_threshold};
+        SET MAX_BLOCK_MGR_MEMORY={max_block_mgr_memory};
+        SET MAX_IO_BUFFERS={max_io_buffers};
+        SET MAX_SCAN_RANGE_LENGTH={max_scan_range_length};
+        SET NUM_NODES={num_nodes};
+        SET NUM_SCANNER_THREADS={num_scanner_threads};
+        SET OPTIMIZE_PARTITION_KEY_SCANS={optimize_partition_key_scans};
+        SET RUNTIME_BLOOM_FILTER_SIZE={runtime_bloom_filter_size};
+        SET RUNTIME_FILTER_MODE={runtime_filter_mode};
+        SET RUNTIME_FILTER_WAIT_TIME_MS={runtime_filter_wait_time_ms};
+        SET SCAN_NODE_CODEGEN_THRESHOLD={scan_node_codegen_threshold}""".format(
+            mem_limit=randint(1024 ** 3, 10 * 1024 ** 3),
+            batch_size=randint(1, 4096),
+            disable_codegen=choice((0, 1)),
+            disable_outermost_topn=choice((0, 1)),
+            disable_row_runtime_filtering=choice((0, 1)),
+            disable_streaming_preaggregations=choice((0, 1)),
+            disable_unsafe_spills=choice((0, 1)),
+            exec_single_node_rows_threshold=randint(1, 100000000),
+            max_block_mgr_memory=randint(1, 100000000),
+            max_io_buffers=randint(1, 100000000),
+            max_scan_range_length=randint(1, 100000000),
+            num_nodes=randint(3, 3),
+            num_scanner_threads=randint(1, 100),
+            optimize_partition_key_scans=choice((0, 1)),
+            random_replica=choice((0, 1)),
+            replica_preference=choice(("CACHE_LOCAL", "DISK_LOCAL", "REMOTE")),
+            runtime_bloom_filter_size=randint(4096, 16777216),
+            runtime_filter_mode=choice(("OFF", "LOCAL", "GLOBAL")),
+            runtime_filter_wait_time_ms=randint(1, 100000000),
+            scan_node_codegen_threshold=randint(1, 100000000))
+    LOG.debug(opts)
+    for opt in opts.strip().split(";"):
+      cursor.execute(opt)
+
   def fetch_query_results(self, query):
     '''Concurrently execute the query using each cursor and return a list of tuples
        containing the result information for each cursor. The tuple format is
@@ -278,16 +362,23 @@ class QueryExecutor(object):
 
        "query" should be an instance of query.Query.
     '''
-    if query.execution != 'RAW':
+    if query.execution in (StatementExecutionMode.CREATE_TABLE_AS,
+                           StatementExecutionMode.CREATE_VIEW_AS):
       self._table_or_view_name = self._create_random_table_name()
+    elif isinstance(query, (InsertStatement,)):
+      self._table_or_view_name = query.dml_table.name
 
     query_threads = list()
-    for sql_writer, cursor, log_file \
-        in izip(self.sql_writers, self.cursors, self.query_logs):
+    for sql_writer, cursor, log_file in izip(
+        self.sql_writers, self.cursors, self.query_logs
+    ):
+      if self.ENABLE_RANDOM_QUERY_OPTIONS and cursor.db_type == IMPALA:
+        self.set_impala_query_options(cursor)
       query_thread = Thread(
           target=self._fetch_sql_results,
           args=[query, cursor, sql_writer, log_file],
-          name='Query execution thread {0}'.format(current_thread().name))
+          name='{db_type}-exec-{id_}'.format(
+              db_type=cursor.db_type, id_=id(query)))
       query_thread.daemon = True
       query_thread.sql = ''
       query_thread.data_set = None
@@ -308,9 +399,9 @@ class QueryExecutor(object):
           cursor.conn.kill()
           LOG.debug('Kill connection')
         try:
-          # XXX: Sometimes this takes a very long time causing the program to appear to
-          #      hang. Maybe this should be done in another thread so a timeout can be
-          #      applied?
+          # TODO: Sometimes this takes a very long time causing the program to appear to
+          #       hang. Maybe this should be done in another thread so a timeout can be
+          #       applied?
           cursor.close()
         except Exception as e:
           LOG.info('Error closing cursor: %s', e)
@@ -318,10 +409,14 @@ class QueryExecutor(object):
         query_thread.exception = QueryTimeout(
             'Query timed out after %s seconds' % self.query_timeout_seconds)
 
-    return [(query_thread.sql,
-        query_thread.exception,
-        query_thread.data_set,
-        query_thread.cursor_description) for query_thread in query_threads]
+      if (query.execution in (StatementExecutionMode.CREATE_TABLE_AS,
+                              StatementExecutionMode.DML_TEST)):
+        cursor.drop_table(self._table_or_view_name)
+      elif query.execution == StatementExecutionMode.CREATE_VIEW_AS:
+        cursor.drop_view(self._table_or_view_name)
+
+    return [(query_thread.sql, query_thread.exception, query_thread.data_set,
+             query_thread.cursor_description) for query_thread in query_threads]
 
   def _fetch_sql_results(self, query, cursor, sql_writer, log_file):
     '''Execute the query using the cursor and set the result or exception on the local
@@ -334,12 +429,17 @@ class QueryExecutor(object):
         # testing of Impala nested types support.
         query = deepcopy(query)
         QueryFlattener().flatten(query)
-      if query.execution == 'CREATE_TABLE_AS':
+      if query.execution == StatementExecutionMode.CREATE_TABLE_AS:
         setup_sql = sql_writer.write_create_table_as(query, self._table_or_view_name)
         query_sql = 'SELECT * FROM ' + self._table_or_view_name
-      elif query.execution == 'VIEW':
+      elif query.execution == StatementExecutionMode.CREATE_VIEW_AS:
         setup_sql = sql_writer.write_create_view(query, self._table_or_view_name)
         query_sql = 'SELECT * FROM ' + self._table_or_view_name
+      elif isinstance(query, (InsertStatement,)):
+        setup_sql = sql_writer.write_query(query)
+        # TODO: improve validation (IMPALA-4599). This is good enough for looking for
+        # crashes on DML statements
+        query_sql = 'SELECT COUNT(*) FROM ' + self._table_or_view_name
       else:
         setup_sql = None
         query_sql = sql_writer.write_query(query)
@@ -373,13 +473,11 @@ class QueryExecutor(object):
           break
         if len(data_set) > row_limit:
           raise DataLimitExceeded('Too much data')
+      if isinstance(query, (InsertStatement,)):
+        LOG.debug('Total row count for {0}: {1}'.format(
+          cursor.db_type, str(data_set)))
     except Exception as e:
       current_thread().exception = e
-    finally:
-      if query.execution == 'CREATE_TABLE_AS':
-        cursor.drop_table(self._table_or_view_name)
-      elif query.execution == 'VIEW':
-        cursor.drop_view(self._table_or_view_name)
 
   def _create_random_table_name(self):
     char_choices = ascii_lowercase
@@ -394,8 +492,9 @@ class QueryExecutor(object):
 class ComparisonResult(object):
   '''Represents a result.'''
 
-  def __init__(self, query, ref_db_type):
+  def __init__(self, query, test_db_type, ref_db_type):
     self.query = query
+    self.test_db_type = test_db_type
     self.ref_db_type = ref_db_type
     self.ref_sql = None
     self.test_sql = None
@@ -407,6 +506,7 @@ class ComparisonResult(object):
     self.ref_row = None   # The test row where mismatch happened
     self.test_row = None   # The reference row where mismatch happened
     self.exception = None
+    self.modified_rows_count = None
     self._error_message = None
 
   @property
@@ -416,8 +516,9 @@ class ComparisonResult(object):
         self._error_message = str(self.exception)
       elif (self.ref_row_count or self.test_row_count) and \
           self.ref_row_count != self.test_row_count:
-        self._error_message = 'Row counts do not match: %s Impala rows vs %s %s rows' \
+        self._error_message = 'Row counts do not match: %s %s rows vs %s %s rows' \
             % (self.test_row_count,
+               self.test_db_type,
                self.ref_db_type,
                self.ref_row_count)
       elif self.mismatch_at_row_number is not None:
@@ -431,10 +532,11 @@ class ComparisonResult(object):
             for idx, val in enumerate(self.ref_row)
             )  + ']'
         self._error_message = \
-            'Column %s in row %s does not match: %s Impala row vs %s %s row' \
+            'Column %s in row %s does not match: %s %s row vs %s %s row' \
             % (self.mismatch_at_col_number,
                self.mismatch_at_row_number,
                test_row,
+               self.test_db_type,
                ref_row,
                self.ref_db_type)
     return self._error_message
@@ -452,11 +554,63 @@ QueryTimeout = type('QueryTimeout', (Exception, ), {})
 TypeOverflow = type('TypeOverflow', (Exception, ), {})
 DataLimitExceeded = type('DataLimitExceeded', (Exception, ), {})
 
+
 class KnownError(Exception):
 
   def __init__(self, jira_url):
     Exception.__init__(self, 'Known issue: ' + jira_url)
     self.jira_url = jira_url
+
+
+class FrontendExceptionSearcher(object):
+
+  def __init__(self, query_profile, ref_conn, test_conn):
+    '''query_profile should be an instance of one of the profiles in query_profile.py'''
+    self.query_profile = query_profile
+    self.ref_conn = ref_conn
+    self.test_conn = test_conn
+    self.ref_sql_writer = SqlWriter.create(dialect=ref_conn.db_type)
+    self.test_sql_writer = SqlWriter.create(dialect=test_conn.db_type)
+    with ref_conn.cursor() as ref_cursor:
+      with test_conn.cursor() as test_cursor:
+        self.common_tables = DbCursor.describe_common_tables([ref_cursor, test_cursor])
+        if not self.common_tables:
+          raise Exception("Unable to find a common set of tables in both databases")
+
+  def search(self, number_of_test_queries):
+
+    def on_ref_db_error(e, sql):
+      LOG.warn("Error generating explain plan for reference db:\n%s\n%s" % (e, sql))
+
+    def on_test_db_error(e, sql):
+      LOG.error("Error generating explain plan for test db:\n%s" % sql)
+      raise e
+
+    for idx in xrange(number_of_test_queries):
+      LOG.info("Explaining query #%s" % (idx + 1))
+      statement_type = self.query_profile.choose_statement()
+      statement_generator = get_generator(statement_type)(self.query_profile)
+      if issubclass(statement_type, (InsertStatement,)):
+        dml_table = self.query_profile.choose_table(self.common_tables)
+      else:
+        dml_table = None
+      query = statement_generator.generate_statement(
+          self.common_tables, dml_table=dml_table)
+      if not self._explain_query(self.ref_conn, self.ref_sql_writer, query,
+          on_ref_db_error):
+        continue
+      self._explain_query(self.test_conn, self.test_sql_writer, query,
+          on_test_db_error)
+
+  def _explain_query(self, conn, writer, query, exception_handler):
+    sql = writer.write_query(query)
+    try:
+      with conn.cursor() as cursor:
+        cursor.execute("EXPLAIN %s" % sql)
+        return True
+    except Exception as e:
+      exception_handler(e, sql)
+      return False
 
 
 class QueryResultDiffSearcher(object):
@@ -467,6 +621,8 @@ class QueryResultDiffSearcher(object):
 
   # Sometimes things get into a bad state and the same error loops forever
   ABORT_ON_REPEAT_ERROR_COUNT = 2
+
+  COPY_TABLE_SUFFIX = '__qgen_copy'
 
   def __init__(self, query_profile, ref_conn, test_conn):
     '''query_profile should be an instance of one of the profiles in query_profile.py'''
@@ -479,6 +635,46 @@ class QueryResultDiffSearcher(object):
         if not self.common_tables:
           raise Exception("Unable to find a common set of tables in both databases")
 
+  def _concurrently_copy_table(self, src_table):
+    """
+    Given a Table object, create another Table with the same schema and return the new
+    Table object.  The schema will be created in both the test and reference databases.
+
+    The data is then copied in both the ref and test databases using threads.
+    """
+    with test_conn.cursor() as test_cursor:
+      test_cursor.execute('SHOW CREATE TABLE {0}'.format(src_table.name))
+      (create_table_sql,) = test_cursor.fetchall()[0]
+      new_table_name = src_table.name + self.COPY_TABLE_SUFFIX
+      create_table_sql = create_table_sql.replace(src_table.name, new_table_name, 1)
+      test_cursor.drop_table(new_table_name)
+      test_cursor.execute(create_table_sql)
+      new_table = test_cursor.describe_table(new_table_name)
+    with ref_conn.cursor() as ref_cursor:
+      ref_cursor.drop_table(new_table_name)
+      ref_cursor.create_table(new_table)
+
+    copy_select_query = Query()
+    copy_select_query.select_clause = SelectClause(
+        [SelectItem(col) for col in src_table.cols])
+    copy_select_query.from_clause = FromClause(src_table)
+
+    if new_table.primary_keys:
+      conflict_action = InsertClause.CONFLICT_ACTION_IGNORE
+    else:
+      conflict_action = InsertClause.CONFLICT_ACTION_DEFAULT
+
+    table_copy_statement = InsertStatement(
+        insert_clause=InsertClause(new_table, conflict_action=conflict_action),
+        select_query=copy_select_query, execution=StatementExecutionMode.DML_SETUP)
+
+    result = self.query_result_comparator.compare_query_results(table_copy_statement)
+    if result.error:
+      raise Exception('setup SQL to copy table failed: {0}'.format(result.error))
+    self._dml_table_size = result.modified_rows_count
+
+    return new_table
+
   def search(self, number_of_test_queries, stop_on_result_mismatch, stop_on_crash,
              query_timeout_seconds):
     '''Returns an instance of SearchResults, which is a summary report. This method
@@ -488,9 +684,8 @@ class QueryResultDiffSearcher(object):
       to generate and execute.
     '''
     start_time = time()
-    query_result_comparator = QueryResultComparator(
+    self.query_result_comparator = QueryResultComparator(
         self.query_profile, self.ref_conn, self.test_conn, query_timeout_seconds)
-    query_generator = QueryGenerator(self.query_profile)
     query_count = 0
     queries_resulted_in_data_count = 0
     mismatch_count = 0
@@ -499,14 +694,40 @@ class QueryResultDiffSearcher(object):
     test_crash_count = 0
     last_error = None
     repeat_error_count = 0
+    count_effective_dml_statements = 0
+    count_rows_affected_by_dml = 0
+
     while number_of_test_queries > query_count:
-      query = query_generator.create_query(self.common_tables)
-      query.execution = self.query_profile.get_query_execution()
+      statement_type = self.query_profile.choose_statement()
+      statement_generator = get_generator(statement_type)(self.query_profile)
+      dml_table = None
+      if issubclass(statement_type, (InsertStatement,)):
+        dml_choice_src_table = self.query_profile.choose_table(self.common_tables)
+        # Copy the table we want to INSERT/UPSERT INTO. Do this for the following reasons:
+        #
+        # 1. If we don't copy, the tables will get larger and larger
+        # 2. If we want to avoid tables getting larger and larger, we have to come up
+        # with some threshold about when to cut and start over.
+        # 3. If we keep INSERT/UPSERTing into tables and finally find a crash, we have to
+        # replay all previous INSERT/UPSERTs again. Those INSERTs may not produce the
+        # same rows as before. To maximize the chance of bug reproduction, run every
+        # INSERT/UPSERT on a pristine table.
+        dml_table = self._concurrently_copy_table(dml_choice_src_table)
+      statement = statement_generator.generate_statement(
+          self.common_tables, dml_table=dml_table)
+      if isinstance(statement, Query):
+        # we can re-write statement execution here to possibly be a CREATE TABLE AS SELECT
+        # or CREATE VIEW AS SELECT
+        statement.execution = self.query_profile.get_query_execution()
       query_count += 1
       LOG.info('Running query #%s', query_count)
-      result = query_result_comparator.compare_query_results(query)
+      result = self.query_result_comparator.compare_query_results(statement)
       if result.query_resulted_in_data:
         queries_resulted_in_data_count += 1
+      if result.modified_rows_count:
+        count_effective_dml_statements += 1
+        count_rows_affected_by_dml += abs(
+            result.modified_rows_count - self._dml_table_size)
       if isinstance(result.exception, DataLimitExceeded) \
           or isinstance(result.exception, TypeOverflow):
         continue
@@ -542,17 +763,23 @@ class QueryResultDiffSearcher(object):
           # Assume Impala crashed and try restarting
           test_crash_count += 1
           LOG.info('Restarting Impala')
-          call([join_path(getenv('IMPALA_HOME'), 'bin/start-impala-cluster.py'),
-                          '--log_dir=%s' % getenv('LOG_DIR', "/tmp/")])
+          impalad_args = [
+              '-convert_legacy_hive_parquet_utc_timestamps=true',
+          ]
+          impala_restart_cmd = [
+              join_path(getenv('IMPALA_HOME'), 'bin/start-impala-cluster.py'),
+              '--log_dir={0}'.format(getenv('LOG_DIR', "/tmp/")),
+              '--impalad_args="{0}"'.format(' '.join(impalad_args)),
+          ]
+          call(impala_restart_cmd)
           self.test_conn.reconnect()
-          query_result_comparator.test_cursor = self.test_conn.cursor()
-          result = query_result_comparator.compare_query_results(query)
+          self.query_result_comparator.test_cursor = self.test_conn.cursor()
+          result = self.query_result_comparator.compare_query_results(statement)
           if result.error:
             LOG.info('Restarting Impala')
-            call([join_path(getenv('IMPALA_HOME'), 'bin/start-impala-cluster.py'),
-                            '--log_dir=%s' % getenv('LOG_DIR', "/tmp/")])
+            call(impala_restart_cmd)
             self.test_conn.reconnect()
-            query_result_comparator.test_cursor = self.test_conn.cursor()
+            self.query_result_comparator.test_cursor = self.test_conn.cursor()
           else:
             break
 
@@ -583,7 +810,9 @@ class QueryResultDiffSearcher(object):
         query_timeout_count,
         known_error_count,
         test_crash_count,
-        time() - start_time)
+        time() - start_time,
+        count_effective_dml_statements,
+        count_rows_affected_by_dml)
 
 
 class SearchResults(object):
@@ -596,7 +825,10 @@ class SearchResults(object):
       query_timeout_count,
       known_error_count,
       test_crash_count,
-      run_time_in_seconds):
+      run_time_in_seconds,
+      count_effective_dml_statements,
+      count_rows_affected_by_dml
+    ):
     # Approx number of queries run, some queries may have been ignored
     self.query_count = query_count
     self.queries_resulted_in_data_count = queries_resulted_in_data_count
@@ -606,6 +838,10 @@ class SearchResults(object):
     self.known_error_count = known_error_count
     self.test_crash_count = test_crash_count
     self.run_time_in_seconds = run_time_in_seconds
+    # number of DML statements that actually modified tables
+    self.count_effective_dml_statements = count_effective_dml_statements
+    # total number of rows modified by DML statemnts
+    self.count_rows_affected_by_dml = count_rows_affected_by_dml
 
   def __str__(self):
     '''Returns the string representation of the results.'''
@@ -627,6 +863,8 @@ class SearchResults(object):
         '%(run_time)s.\n'
         '%(queries_resulted_in_data_count)s of %(query_count)s queries produced results.'
         '\n'
+        '%(count_effective_dml_statements)s of %(query_count)s statements modified a '
+        'total of %(count_rows_affected_by_dml)s rows\n'
         '%(test_crash_count)s crashes occurred.\n'
         '%(known_error_count)s queries were excluded from the mismatch count because '
         'they are known errors.\n'
@@ -638,8 +876,8 @@ if __name__ == '__main__':
   import sys
   from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 
-  import cli_options
-  from query_profile import PROFILES
+  from tests.comparison import cli_options
+  from tests.comparison.query_profile import PROFILES
 
   parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
   cli_options.add_logging_options(parser)
@@ -662,6 +900,9 @@ if __name__ == '__main__':
       help='Exit after running the given number of queries.')
   parser.add_argument('--exclude-types', default='',
       help='A comma separated list of data types to exclude while generating queries.')
+  parser.add_argument('--explain-only', action='store_true',
+      help="Don't run the queries only explain them to see if there was an error in "
+      "planning.")
   profiles = dict()
   for profile in PROFILES:
     profile_name = profile.__name__
@@ -674,7 +915,8 @@ if __name__ == '__main__':
   # TODO: Seed the random query generator for repeatable queries?
 
   args = parser.parse_args()
-  cli_options.configure_logging(args.log_level, debug_log_file=args.debug_log_file)
+  cli_options.configure_logging(
+      args.log_level, debug_log_file=args.debug_log_file, log_thread_name=True)
   cluster = cli_options.create_cluster(args)
 
   ref_conn = cli_options.create_connection(args, args.ref_db_type, db_name=args.db_name)
@@ -687,9 +929,14 @@ if __name__ == '__main__':
         args, args.test_db_type, db_name=args.db_name)
   # Create an instance of profile class (e.g. DefaultProfile)
   query_profile = profiles[args.profile]()
-  diff_searcher = QueryResultDiffSearcher(query_profile, ref_conn, test_conn)
-  query_timeout_seconds = args.timeout
-  search_results = diff_searcher.search(
-      args.query_count, args.stop_on_mismatch, args.stop_on_crash, query_timeout_seconds)
-  print(search_results)
-  sys.exit(search_results.mismatch_count)
+  if args.explain_only:
+    searcher = FrontendExceptionSearcher(query_profile, ref_conn, test_conn)
+    searcher.search(args.query_count)
+  else:
+    diff_searcher = QueryResultDiffSearcher(query_profile, ref_conn, test_conn)
+    query_timeout_seconds = args.timeout
+    search_results = diff_searcher.search(
+        args.query_count, args.stop_on_mismatch, args.stop_on_crash,
+        query_timeout_seconds)
+    print(search_results)
+    sys.exit(search_results.mismatch_count)

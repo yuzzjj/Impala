@@ -1,16 +1,19 @@
-# Copyright 2012 Cloudera Inc.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 # This is a list of all the functions that are not auto-generated.
 # It contains all the meta data that describes the function.
@@ -106,6 +109,7 @@ visible_functions = [
     '_ZN6impala11UdfBuiltins9VectorGetEPN10impala_udf15FunctionContextERKNS1_9BigIntValERKNS1_9StringValE'],
 
   # Timestamp functions
+  [['next_day'], 'TIMESTAMP', ['TIMESTAMP', 'STRING'], '_ZN6impala18TimestampFunctions7NextDayEPN10impala_udf15FunctionContextERKNS1_12TimestampValERKNS1_9StringValE'],
   [['unix_timestamp'], 'BIGINT', ['STRING'], '_ZN6impala18TimestampFunctions14UnixFromStringEPN10impala_udf15FunctionContextERKNS1_9StringValE'],
   [['year'], 'INT', ['TIMESTAMP'], '_ZN6impala18TimestampFunctions4YearEPN10impala_udf15FunctionContextERKNS1_12TimestampValE'],
   [['month'], 'INT', ['TIMESTAMP'], '_ZN6impala18TimestampFunctions5MonthEPN10impala_udf15FunctionContextERKNS1_12TimestampValE'],
@@ -116,6 +120,7 @@ visible_functions = [
   [['hour'], 'INT', ['TIMESTAMP'], '_ZN6impala18TimestampFunctions4HourEPN10impala_udf15FunctionContextERKNS1_12TimestampValE'],
   [['minute'], 'INT', ['TIMESTAMP'], '_ZN6impala18TimestampFunctions6MinuteEPN10impala_udf15FunctionContextERKNS1_12TimestampValE'],
   [['second'], 'INT', ['TIMESTAMP'], '_ZN6impala18TimestampFunctions6SecondEPN10impala_udf15FunctionContextERKNS1_12TimestampValE'],
+  [['millisecond'], 'INT', ['TIMESTAMP'], '_ZN6impala18TimestampFunctions11MillisecondEPN10impala_udf15FunctionContextERKNS1_12TimestampValE'],
   [['to_date'], 'STRING', ['TIMESTAMP'], '_ZN6impala18TimestampFunctions6ToDateEPN10impala_udf15FunctionContextERKNS1_12TimestampValE'],
   [['dayname'], 'STRING', ['TIMESTAMP'], '_ZN6impala18TimestampFunctions7DayNameEPN10impala_udf15FunctionContextERKNS1_12TimestampValE'],
   [['years_add'], 'TIMESTAMP', ['TIMESTAMP', 'INT'],
@@ -402,6 +407,8 @@ visible_functions = [
    'impala::StringFunctions::Substring'],
   [['split_part'], 'STRING', ['STRING', 'STRING', 'BIGINT'],
    'impala::StringFunctions::SplitPart'],
+  [['base64encode'], 'STRING', ['STRING'], 'impala::StringFunctions::Base64Encode'],
+  [['base64decode'], 'STRING', ['STRING'], 'impala::StringFunctions::Base64Decode'],
   # left and right are key words, leave them out for now.
   [['strleft'], 'STRING', ['STRING', 'BIGINT'], 'impala::StringFunctions::Left'],
   [['strright'], 'STRING', ['STRING', 'BIGINT'], 'impala::StringFunctions::Right'],
@@ -416,6 +423,9 @@ visible_functions = [
   [['lower', 'lcase'], 'STRING', ['STRING'], 'impala::StringFunctions::Lower'],
   [['upper', 'ucase'], 'STRING', ['STRING'], 'impala::StringFunctions::Upper'],
   [['initcap'], 'STRING', ['STRING'], 'impala::StringFunctions::InitCap'],
+  [['replace'], 'STRING', ['STRING', 'STRING', 'STRING'], 'impala::StringFunctions::Replace',
+   '_ZN6impala15StringFunctions14ReplacePrepareEPN10impala_udf15FunctionContextENS2_18FunctionStateScopeE',
+   '_ZN6impala15StringFunctions12ReplaceCloseEPN10impala_udf15FunctionContextENS2_18FunctionStateScopeE'],
   [['reverse'], 'STRING', ['STRING'], 'impala::StringFunctions::Reverse'],
   [['translate'], 'STRING', ['STRING', 'STRING', 'STRING'],
    'impala::StringFunctions::Translate'],
@@ -424,6 +434,9 @@ visible_functions = [
   [['rtrim'], 'STRING', ['STRING'], 'impala::StringFunctions::Rtrim'],
   [['ascii'], 'INT', ['STRING'], 'impala::StringFunctions::Ascii'],
   [['instr'], 'INT', ['STRING', 'STRING'], 'impala::StringFunctions::Instr'],
+  [['instr'], 'INT', ['STRING', 'STRING', 'BIGINT'], 'impala::StringFunctions::Instr'],
+  [['instr'], 'INT', ['STRING', 'STRING', 'BIGINT', 'BIGINT'],
+   'impala::StringFunctions::Instr'],
   [['locate'], 'INT', ['STRING', 'STRING'], 'impala::StringFunctions::Locate'],
   [['locate'], 'INT', ['STRING', 'STRING', 'BIGINT'],
    'impala::StringFunctions::LocatePos'],
@@ -539,9 +552,10 @@ visible_functions = [
    '_ZN6impala16UtilityFunctions4UuidEPN10impala_udf15FunctionContextE',
    '_ZN6impala16UtilityFunctions11UuidPrepareEPN10impala_udf15FunctionContextENS2_18FunctionStateScopeE',
    '_ZN6impala16UtilityFunctions9UuidCloseEPN10impala_udf15FunctionContextENS2_18FunctionStateScopeE'],
-  [['current_database'], 'STRING', [], 'impala::UtilityFunctions::CurrentDatabase'],
-  [['user'], 'STRING', [], 'impala::UtilityFunctions::User'],
-  [['effective_user'], 'STRING', [], 'impala::UtilityFunctions::EffectiveUser'],
+  [['current_database', 'current_catalog'], 'STRING', [], 'impala::UtilityFunctions::CurrentDatabase'],
+  [['current_session', 'current_sid'], 'STRING', [], 'impala::UtilityFunctions::CurrentSession'],
+  [['user', 'session_user'], 'STRING', [], 'impala::UtilityFunctions::User'],
+  [['effective_user', 'current_user'], 'STRING', [], 'impala::UtilityFunctions::EffectiveUser'],
   [['sleep'], 'BOOLEAN', ['INT'], 'impala::UtilityFunctions::Sleep'],
   [['pid'], 'INT', [], 'impala::UtilityFunctions::Pid'],
   [['version'], 'STRING', [], 'impala::UtilityFunctions::Version'],

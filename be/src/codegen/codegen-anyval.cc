@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "codegen/codegen-anyval.h"
 
@@ -49,8 +52,10 @@ Type* CodegenAnyVal::GetLoweredType(LlvmCodeGen* cg, const ColumnType& type) {
       return StructType::get(cg->tinyint_type(), cg->double_type(), NULL);
     case TYPE_STRING: // { i64, i8* }
     case TYPE_VARCHAR: // { i64, i8* }
-    case TYPE_CHAR:
       return StructType::get(cg->bigint_type(), cg->ptr_type(), NULL);
+    case TYPE_CHAR:
+      DCHECK(false) << "NYI:" << type.DebugString();
+      return NULL;
     case TYPE_TIMESTAMP: // { i64, i64 }
       return StructType::get(cg->bigint_type(), cg->bigint_type(), NULL);
     case TYPE_DECIMAL: // %"struct.impala_udf::DecimalVal" (isn't lowered)
@@ -62,7 +67,7 @@ Type* CodegenAnyVal::GetLoweredType(LlvmCodeGen* cg, const ColumnType& type) {
   }
 }
 
-Type* CodegenAnyVal::GetLoweredPtrType(LlvmCodeGen* cg, const ColumnType& type) {
+PointerType* CodegenAnyVal::GetLoweredPtrType(LlvmCodeGen* cg, const ColumnType& type) {
   return GetLoweredType(cg, type)->getPointerTo();
 }
 
@@ -92,9 +97,11 @@ Type* CodegenAnyVal::GetUnloweredType(LlvmCodeGen* cg, const ColumnType& type) {
       break;
     case TYPE_STRING:
     case TYPE_VARCHAR:
-    case TYPE_CHAR:
       result = cg->GetType(LLVM_STRINGVAL_NAME);
       break;
+    case TYPE_CHAR:
+      DCHECK(false) << "NYI:" << type.DebugString();
+      return NULL;
     case TYPE_TIMESTAMP:
       result = cg->GetType(LLVM_TIMESTAMPVAL_NAME);
       break;
@@ -109,12 +116,11 @@ Type* CodegenAnyVal::GetUnloweredType(LlvmCodeGen* cg, const ColumnType& type) {
   return result;
 }
 
-Type* CodegenAnyVal::GetUnloweredPtrType(LlvmCodeGen* cg, const ColumnType& type) {
+PointerType* CodegenAnyVal::GetUnloweredPtrType(LlvmCodeGen* cg, const ColumnType& type) {
   return GetUnloweredType(cg, type)->getPointerTo();
 }
 
-Value* CodegenAnyVal::CreateCall(
-    LlvmCodeGen* cg, LlvmCodeGen::LlvmBuilder* builder, Function* fn,
+Value* CodegenAnyVal::CreateCall(LlvmCodeGen* cg, LlvmBuilder* builder, Function* fn,
     ArrayRef<Value*> args, const char* name, Value* result_ptr) {
   if (fn->getReturnType()->isVoidTy()) {
     // Void return type indicates that this function returns a DecimalVal via the first
@@ -145,20 +151,15 @@ Value* CodegenAnyVal::CreateCall(
   }
 }
 
-CodegenAnyVal CodegenAnyVal::CreateCallWrapped(
-    LlvmCodeGen* cg, LlvmCodeGen::LlvmBuilder* builder, const ColumnType& type,
-    Function* fn, ArrayRef<Value*> args, const char* name, Value* result_ptr) {
-  Value* v = CreateCall(cg, builder, fn, args, name, result_ptr);
+CodegenAnyVal CodegenAnyVal::CreateCallWrapped(LlvmCodeGen* cg, LlvmBuilder* builder,
+    const ColumnType& type, Function* fn, ArrayRef<Value*> args, const char* name) {
+  Value* v = CreateCall(cg, builder, fn, args, name);
   return CodegenAnyVal(cg, builder, type, v, name);
 }
 
-CodegenAnyVal::CodegenAnyVal(LlvmCodeGen* codegen, LlvmCodeGen::LlvmBuilder* builder,
-                             const ColumnType& type, Value* value, const char* name)
-  : type_(type),
-    value_(value),
-    name_(name),
-    codegen_(codegen),
-    builder_(builder) {
+CodegenAnyVal::CodegenAnyVal(LlvmCodeGen* codegen, LlvmBuilder* builder,
+    const ColumnType& type, Value* value, const char* name)
+  : type_(type), value_(value), name_(name), codegen_(codegen), builder_(builder) {
   Type* value_type = GetLoweredType(codegen, type);
   if (value_ == NULL) {
     // No Value* was specified, so allocate one on the stack and load it.
@@ -168,7 +169,7 @@ CodegenAnyVal::CodegenAnyVal(LlvmCodeGen* codegen, LlvmCodeGen::LlvmBuilder* bui
   DCHECK_EQ(value_->getType(), value_type);
 }
 
-Value* CodegenAnyVal::GetIsNull(const char* name) {
+Value* CodegenAnyVal::GetIsNull(const char* name) const {
   switch (type_.type) {
     case TYPE_BIGINT:
     case TYPE_DOUBLE: {
@@ -186,13 +187,15 @@ Value* CodegenAnyVal::GetIsNull(const char* name) {
     }
     case TYPE_STRING:
     case TYPE_VARCHAR:
-    case TYPE_CHAR:
     case TYPE_TIMESTAMP: {
       // Lowered type is of form { i64, *}. Get the first byte of the i64 value.
       Value* v = builder_->CreateExtractValue(value_, 0);
       DCHECK(v->getType() == codegen_->bigint_type());
       return builder_->CreateTrunc(v, codegen_->boolean_type(), name);
     }
+    case TYPE_CHAR:
+      DCHECK(false) << "NYI:" << type_.DebugString();
+      return NULL;
     case TYPE_BOOLEAN:
     case TYPE_TINYINT:
     case TYPE_SMALLINT:
@@ -228,7 +231,6 @@ void CodegenAnyVal::SetIsNull(Value* is_null) {
     }
     case TYPE_STRING:
     case TYPE_VARCHAR:
-    case TYPE_CHAR:
     case TYPE_TIMESTAMP: {
       // Lowered type is of the form { i64, * }. Set the first byte of the i64 value to
       // 'is_null'
@@ -239,6 +241,9 @@ void CodegenAnyVal::SetIsNull(Value* is_null) {
       value_ = builder_->CreateInsertValue(value_, v, 0, name_);
       break;
     }
+    case TYPE_CHAR:
+      DCHECK(false) << "NYI:" << type_.DebugString();
+      break;
     case TYPE_BOOLEAN:
     case TYPE_TINYINT:
     case TYPE_SMALLINT:
@@ -294,7 +299,6 @@ Value* CodegenAnyVal::GetVal(const char* name) {
       uint32_t idxs[] = {2, 0};
       Value* val = builder_->CreateExtractValue(value_, idxs, name);
       return builder_->CreateTrunc(val, codegen_->GetType(type_), name);
-      break;
     }
     default:
       DCHECK(false) << "Unsupported type: " << type_;
@@ -369,12 +373,8 @@ void CodegenAnyVal::SetVal(int64_t val) {
 
 void CodegenAnyVal::SetVal(int128_t val) {
   DCHECK_EQ(type_.type, TYPE_DECIMAL);
-  // TODO: is there a better way to do this?
-  // Set high bits
-  Value* ir_val = ConstantInt::get(codegen_->i128_type(), HighBits(val));
-  ir_val = builder_->CreateShl(ir_val, 64, "tmp");
-  // Set low bits
-  ir_val = builder_->CreateOr(ir_val, LowBits(val), "tmp");
+  vector<uint64_t> vals({LowBits(val), HighBits(val)});
+  Value* ir_val = ConstantInt::get(codegen_->context(), APInt(128, vals));
   SetVal(ir_val);
 }
 
@@ -442,32 +442,39 @@ void CodegenAnyVal::SetDate(Value* date) {
   value_ = builder_->CreateInsertValue(value_, v, 0, name_);
 }
 
-Value* CodegenAnyVal::GetUnloweredPtr() {
-  Value* value_ptr = codegen_->CreateEntryBlockAlloca(*builder_, value_->getType());
-  builder_->CreateStore(value_, value_ptr);
-  return builder_->CreateBitCast(value_ptr, GetUnloweredPtrType(codegen_, type_));
+Value* CodegenAnyVal::GetLoweredPtr(const string& name) const {
+  Value* lowered_ptr =
+      codegen_->CreateEntryBlockAlloca(*builder_, value_->getType(), name.c_str());
+  builder_->CreateStore(GetLoweredValue(), lowered_ptr);
+  return lowered_ptr;
 }
 
-void CodegenAnyVal::SetFromRawPtr(Value* raw_ptr) {
-  Value* val_ptr =
-      builder_->CreateBitCast(raw_ptr, codegen_->GetPtrType(type_), "val_ptr");
-  Value* val = builder_->CreateLoad(val_ptr);
-  SetFromRawValue(val);
+Value* CodegenAnyVal::GetUnloweredPtr(const string& name) const {
+  // Get an unlowered pointer by creating a lowered pointer then bitcasting it.
+  // TODO: if the original value was unlowered, this generates roundabout code that
+  // lowers the value and casts it back. Generally LLVM's optimiser can reason
+  // about what's going on and undo our shenanigans to generate sane code, but it
+  // would be nice to just emit reasonable code in the first place.
+  return builder_->CreateBitCast(
+      GetLoweredPtr(), GetUnloweredPtrType(codegen_, type_), name);
 }
 
 void CodegenAnyVal::SetFromRawValue(Value* raw_val) {
   DCHECK_EQ(raw_val->getType(), codegen_->GetType(type_))
-      << endl << LlvmCodeGen::Print(raw_val)
-      << endl << type_ << " => " << LlvmCodeGen::Print(codegen_->GetType(type_));
+      << endl
+      << LlvmCodeGen::Print(raw_val) << endl
+      << type_ << " => " << LlvmCodeGen::Print(codegen_->GetType(type_));
   switch (type_.type) {
     case TYPE_STRING:
-    case TYPE_VARCHAR:
-    case TYPE_CHAR: {
+    case TYPE_VARCHAR: {
       // Convert StringValue to StringVal
       SetPtr(builder_->CreateExtractValue(raw_val, 0, "ptr"));
       SetLen(builder_->CreateExtractValue(raw_val, 1, "len"));
       break;
     }
+    case TYPE_CHAR:
+      DCHECK(false) << "NYI:" << type_.DebugString();
+      break;
     case TYPE_TIMESTAMP: {
       // Convert TimestampValue to TimestampVal
       // TimestampValue has type
@@ -504,15 +511,24 @@ void CodegenAnyVal::SetFromRawValue(Value* raw_val) {
   }
 }
 
-Value* CodegenAnyVal::ToNativeValue() {
+Value* CodegenAnyVal::ToNativeValue(MemPool* pool) {
   Type* raw_type = codegen_->GetType(type_);
   Value* raw_val = Constant::getNullValue(raw_type);
   switch (type_.type) {
     case TYPE_STRING:
     case TYPE_VARCHAR: {
       // Convert StringVal to StringValue
-      raw_val = builder_->CreateInsertValue(raw_val, GetPtr(), 0);
-      raw_val = builder_->CreateInsertValue(raw_val, GetLen(), 1);
+      Value* len = GetLen();
+      raw_val = builder_->CreateInsertValue(raw_val, len, 1);
+      if (pool == NULL) {
+        // Set raw_val.ptr from this->ptr
+        raw_val = builder_->CreateInsertValue(raw_val, GetPtr(), 0);
+      } else {
+        // Allocate raw_val.ptr from 'pool' and copy this->ptr
+        Value* new_ptr = codegen_->CodegenAllocate(builder_, pool, len, "new_ptr");
+        codegen_->CodegenMemcpy(builder_, new_ptr, GetPtr(), len);
+        raw_val = builder_->CreateInsertValue(raw_val, new_ptr, 0);
+      }
       break;
     }
     case TYPE_TIMESTAMP: {
@@ -544,13 +560,64 @@ Value* CodegenAnyVal::ToNativeValue() {
   return raw_val;
 }
 
-Value* CodegenAnyVal::ToNativePtr(Value* native_ptr) {
-  Value* v = ToNativeValue();
+Value* CodegenAnyVal::ToNativePtr(Value* native_ptr, MemPool* pool) {
+  Value* v = ToNativeValue(pool);
   if (native_ptr == NULL) {
     native_ptr = codegen_->CreateEntryBlockAlloca(*builder_, v->getType());
   }
   builder_->CreateStore(v, native_ptr);
   return native_ptr;
+}
+
+// Example output for materializing an int slot:
+//
+//   ; [insert point starts here]
+//   %is_null = trunc i64 %src to i1
+//   br i1 %is_null, label %null, label %non_null ;
+//
+// non_null:                                         ; preds = %entry
+//   %slot = getelementptr inbounds { i8, i32, %"struct.impala::StringValue" }* %tuple,
+//       i32 0, i32 1
+//   %2 = ashr i64 %src, 32
+//   %3 = trunc i64 %2 to i32
+//   store i32 %3, i32* %slot
+//   br label %end_write
+//
+// null:                                             ; preds = %entry
+//   call void @SetNull6({ i8, i32, %"struct.impala::StringValue" }* %tuple)
+//   br label %end_write
+//
+// end_write:                                        ; preds = %null, %non_null
+//   ; [insert point ends here]
+void CodegenAnyVal::WriteToSlot(const SlotDescriptor& slot_desc, Value* tuple,
+    MemPool* pool, BasicBlock* insert_before) {
+  DCHECK(tuple->getType()->isPointerTy());
+  DCHECK(tuple->getType()->getPointerElementType()->isStructTy());
+  LLVMContext& context = codegen_->context();
+  Function* fn = builder_->GetInsertBlock()->getParent();
+
+  // Create new block that will come after conditional blocks if necessary
+  if (insert_before == NULL) insert_before = BasicBlock::Create(context, "end_write", fn);
+
+  // Create new basic blocks and br instruction
+  BasicBlock* non_null_block = BasicBlock::Create(context, "non_null", fn, insert_before);
+  BasicBlock* null_block = BasicBlock::Create(context, "null", fn, insert_before);
+  builder_->CreateCondBr(GetIsNull(), null_block, non_null_block);
+
+  // Non-null block: write slot
+  builder_->SetInsertPoint(non_null_block);
+  Value* slot = builder_->CreateStructGEP(NULL, tuple, slot_desc.llvm_field_idx(),
+      "slot");
+  ToNativePtr(slot, pool);
+  builder_->CreateBr(insert_before);
+
+  // Null block: set null bit
+  builder_->SetInsertPoint(null_block);
+  slot_desc.CodegenSetNullIndicator(codegen_, builder_, tuple, codegen_->true_value());
+  builder_->CreateBr(insert_before);
+
+  // Leave builder_ after conditional blocks
+  builder_->SetInsertPoint(insert_before);
 }
 
 Value* CodegenAnyVal::Eq(CodegenAnyVal* other) {
@@ -568,15 +635,16 @@ Value* CodegenAnyVal::Eq(CodegenAnyVal* other) {
       return builder_->CreateFCmpUEQ(GetVal(), other->GetVal(), "eq");
     case TYPE_STRING:
     case TYPE_VARCHAR: {
-      Function* eq_fn = codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_STRING_VAL_EQ);
-      return builder_->CreateCall2(
-          eq_fn, GetUnloweredPtr(), other->GetUnloweredPtr(), "eq");
+      Function* eq_fn =
+          codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_STRING_VAL_EQ, false);
+      return builder_->CreateCall(
+          eq_fn, ArrayRef<Value*>({GetUnloweredPtr(), other->GetUnloweredPtr()}), "eq");
     }
     case TYPE_TIMESTAMP: {
       Function* eq_fn =
-          codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_TIMESTAMP_VAL_EQ);
-      return builder_->CreateCall2(
-          eq_fn, GetUnloweredPtr(), other->GetUnloweredPtr(), "eq");
+          codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_TIMESTAMP_VAL_EQ, false);
+      return builder_->CreateCall(
+          eq_fn, ArrayRef<Value*>({GetUnloweredPtr(), other->GetUnloweredPtr()}), "eq");
     }
     default:
       DCHECK(false) << "NYI: " << type_.DebugString();
@@ -604,13 +672,16 @@ Value* CodegenAnyVal::EqToNativePtr(Value* native_ptr) {
       return builder_->CreateFCmpUEQ(GetVal(), val, "cmp_raw");
     case TYPE_STRING:
     case TYPE_VARCHAR: {
-      Function* eq_fn = codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_STRING_VALUE_EQ);
-      return builder_->CreateCall2(eq_fn, GetUnloweredPtr(), native_ptr, "cmp_raw");
+      Function* eq_fn =
+          codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_STRING_VALUE_EQ, false);
+      return builder_->CreateCall(eq_fn,
+          ArrayRef<Value*>({GetUnloweredPtr(), native_ptr}), "cmp_raw");
     }
     case TYPE_TIMESTAMP: {
       Function* eq_fn =
-          codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_TIMESTAMP_VALUE_EQ);
-      return builder_->CreateCall2(eq_fn, GetUnloweredPtr(), native_ptr, "cmp_raw");
+          codegen_->GetFunction(IRFunction::CODEGEN_ANYVAL_TIMESTAMP_VALUE_EQ, false);
+      return builder_->CreateCall(eq_fn,
+          ArrayRef<Value*>({GetUnloweredPtr(), native_ptr}), "cmp_raw");
     }
     default:
       DCHECK(false) << "NYI: " << type_.DebugString();
@@ -625,9 +696,17 @@ Value* CodegenAnyVal::Compare(CodegenAnyVal* other, const char* name) {
   Value* v2 = other->ToNativePtr();
   Value* void_v2 = builder_->CreateBitCast(v2, codegen_->ptr_type());
   Value* type_ptr = codegen_->GetPtrTo(builder_, type_.ToIR(codegen_), "type");
-  Function* compare_fn = codegen_->GetFunction(IRFunction::RAW_VALUE_COMPARE);
+  Function* compare_fn = codegen_->GetFunction(IRFunction::RAW_VALUE_COMPARE, false);
   Value* args[] = { void_v1, void_v2, type_ptr };
   return builder_->CreateCall(compare_fn, args, name);
+}
+
+void CodegenAnyVal::CodegenBranchIfNull(LlvmBuilder* builder, BasicBlock* null_block) {
+  Value* is_null = GetIsNull();
+  BasicBlock* not_null_block = BasicBlock::Create(
+      codegen_->context(), "not_null", builder->GetInsertBlock()->getParent());
+  builder->CreateCondBr(is_null, null_block, not_null_block);
+  builder->SetInsertPoint(not_null_block);
 }
 
 Value* CodegenAnyVal::GetHighBits(int num_bits, Value* v, const char* name) {
@@ -688,8 +767,8 @@ Value* CodegenAnyVal::GetNullVal(LlvmCodeGen* codegen, Type* val_type) {
   return ConstantInt::get(val_type, 1);
 }
 
-CodegenAnyVal CodegenAnyVal::GetNonNullVal(LlvmCodeGen* codegen,
-    LlvmCodeGen::LlvmBuilder* builder, const ColumnType& type, const char* name) {
+CodegenAnyVal CodegenAnyVal::GetNonNullVal(LlvmCodeGen* codegen, LlvmBuilder* builder,
+    const ColumnType& type, const char* name) {
   Type* val_type = GetLoweredType(codegen, type);
   // All zeros => 'is_null' = false
   Value* value = Constant::getNullValue(val_type);

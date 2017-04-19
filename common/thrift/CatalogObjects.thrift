@@ -1,19 +1,22 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 namespace cpp impala
-namespace java com.cloudera.impala.thrift
+namespace java org.apache.impala.thrift
 
 include "Exprs.thrift"
 include "Status.thrift"
@@ -42,17 +45,24 @@ enum TTableType {
   HDFS_TABLE,
   HBASE_TABLE,
   VIEW,
-  DATA_SOURCE_TABLE
+  DATA_SOURCE_TABLE,
+  KUDU_TABLE,
 }
 
+// TODO: Separate the storage engines (e.g. Kudu) from the file formats.
+// TODO: Make the names consistent with the file format keywords specified in
+// the parser.
 enum THdfsFileFormat {
   TEXT,
   RC_FILE,
   SEQUENCE_FILE,
   AVRO,
-  PARQUET
+  PARQUET,
+  KUDU
 }
 
+// TODO: Since compression is also enabled for Kudu columns, we should
+// rename this enum to not be Hdfs specific.
 enum THdfsCompression {
   NONE,
   DEFAULT,
@@ -62,7 +72,18 @@ enum THdfsCompression {
   SNAPPY,
   SNAPPY_BLOCKED,
   LZO,
-  LZ4
+  LZ4,
+  ZLIB
+}
+
+enum TColumnEncoding {
+  AUTO,
+  PLAIN,
+  PREFIX,
+  GROUP_VARINT,
+  RLE,
+  DICTIONARY,
+  BIT_SHUFFLE
 }
 
 enum THdfsSeqCompressionMode {
@@ -180,6 +201,15 @@ struct TColumn {
   7: optional string column_family
   8: optional string column_qualifier
   9: optional bool is_binary
+
+  // All the following are Kudu-specific column properties
+  10: optional bool is_kudu_column
+  11: optional bool is_key
+  12: optional bool is_nullable
+  13: optional TColumnEncoding encoding
+  14: optional THdfsCompression compression
+  15: optional Exprs.TExpr default_value
+  16: optional i32 block_size
 }
 
 // Represents a block in an HDFS file
@@ -220,6 +250,16 @@ struct THdfsFileDesc {
   5: required list<THdfsFileBlock> file_blocks
 }
 
+// Represents an HDFS partition's location in a compressed format. 'prefix_index'
+// represents the portion of the partition's location that comes before the last N
+// directories, where N is the number of partitioning columns. 'prefix_index' is an index
+// into THdfsTable.partition_prefixes, or -1 if this location has not been compressed.
+// 'suffix' is the rest of the partition location.
+struct THdfsPartitionLocation {
+  1: required i32 prefix_index = -1
+  2: required string suffix
+}
+
 // Represents an HDFS partition
 struct THdfsPartition {
   1: required byte lineDelim
@@ -231,7 +271,7 @@ struct THdfsPartition {
   7: list<Exprs.TExpr> partitionKeyExprs
   8: required i32 blockSize
   9: optional list<THdfsFileDesc> file_desc
-  10: optional string location
+  10: optional THdfsPartitionLocation location
 
   // The access level Impala has on this partition (READ_WRITE, READ_ONLY, etc).
   11: optional TAccessLevel access_level
@@ -277,6 +317,10 @@ struct THdfsTable {
   // Indicates that this table's partitions reside on more than one filesystem.
   // TODO: remove once INSERT across filesystems is supported.
   8: optional bool multiple_filesystems
+
+  // The prefixes of locations of partitions in this table. See THdfsPartitionLocation for
+  // the description of how a prefix is computed.
+  9: optional list<string> partition_prefixes
 }
 
 struct THBaseTable {
@@ -313,6 +357,45 @@ struct TDataSourceTable {
   2: required string init_string
 }
 
+// Parameters needed for hash partitioning
+struct TKuduPartitionByHashParam {
+  1: required list<string> columns
+  2: required i32 num_partitions
+}
+
+struct TRangePartition {
+  1: optional list<Exprs.TExpr> lower_bound_values
+  2: optional bool is_lower_bound_inclusive
+  3: optional list<Exprs.TExpr> upper_bound_values
+  4: optional bool is_upper_bound_inclusive
+}
+
+// A range partitioning is identified by a list of columns and a list of range partitions.
+struct TKuduPartitionByRangeParam {
+  1: required list<string> columns
+  2: optional list<TRangePartition> range_partitions
+}
+
+// Parameters for the PARTITION BY clause.
+struct TKuduPartitionParam {
+  1: optional TKuduPartitionByHashParam by_hash_param;
+  2: optional TKuduPartitionByRangeParam by_range_param;
+}
+
+// Represents a Kudu table
+struct TKuduTable {
+  1: required string table_name
+
+  // Network address of a master host in the form of 0.0.0.0:port
+  2: required list<string> master_addresses
+
+  // Name of the key columns
+  3: required list<string> key_columns
+
+  // Partitioning
+  4: required list<TKuduPartitionParam> partition_by
+}
+
 // Represents a table or view.
 struct TTable {
   // Name of the parent database. Case insensitive, expected to be stored as lowercase.
@@ -327,36 +410,36 @@ struct TTable {
   // string pointing to where the metadata loading error occurred.
   3: optional Status.TStatus load_status
 
-  // Table identifier.
-  4: optional Types.TTableId id
-
   // The access level Impala has on this table (READ_WRITE, READ_ONLY, etc).
-  5: optional TAccessLevel access_level
+  4: optional TAccessLevel access_level
 
   // List of columns (excludes clustering columns)
-  6: optional list<TColumn> columns
+  5: optional list<TColumn> columns
 
   // List of clustering columns (empty list if table has no clustering columns)
-  7: optional list<TColumn> clustering_columns
+  6: optional list<TColumn> clustering_columns
 
   // Table stats data for the table.
-  8: optional TTableStats table_stats
+  7: optional TTableStats table_stats
 
   // Determines the table type - either HDFS, HBASE, or VIEW.
-  9: optional TTableType table_type
+  8: optional TTableType table_type
 
   // Set iff this is an HDFS table
-  10: optional THdfsTable hdfs_table
+  9: optional THdfsTable hdfs_table
 
   // Set iff this is an Hbase table
-  11: optional THBaseTable hbase_table
+  10: optional THBaseTable hbase_table
 
   // The Hive Metastore representation of this table. May not be set if there were
   // errors loading the table metadata
-  12: optional hive_metastore.Table metastore_table
+  11: optional hive_metastore.Table metastore_table
 
   // Set iff this is a table from an external data source
-  13: optional TDataSourceTable data_source_table
+  12: optional TDataSourceTable data_source_table
+
+  // Set iff this a kudu table
+  13: optional TKuduTable kudu_table
 }
 
 // Represents a database.

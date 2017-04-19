@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "catalog/catalog.h"
 
@@ -19,11 +22,12 @@
 
 #include "common/logging.h"
 #include "rpc/jni-thrift-util.h"
-#include "util/logging-support.h"
+#include "util/backend-gflag-util.h"
 
 #include "common/names.h"
 
 using namespace impala;
+
 
 DEFINE_bool(load_catalog_in_background, false,
     "If true, loads catalog metadata in the background. If false, metadata is loaded "
@@ -31,14 +35,15 @@ DEFINE_bool(load_catalog_in_background, false,
 DEFINE_int32(num_metadata_loading_threads, 16,
     "(Advanced) The number of metadata loading threads (degree of parallelism) to use "
     "when loading catalog metadata.");
+DEFINE_int32(initial_hms_cnxn_timeout_s, 120,
+    "Number of seconds catalogd will wait to establish an initial connection to the HMS "
+    "before exiting.");
 DEFINE_string(sentry_config, "", "Local path to a sentry-site.xml configuration "
     "file. If set, authorization will be enabled.");
 
-DECLARE_int32(non_impala_java_vlog);
-
 Catalog::Catalog() {
   JniMethodDescriptor methods[] = {
-    {"<init>", "(ZILjava/lang/String;II)V", &catalog_ctor_},
+    {"<init>", "([B)V", &catalog_ctor_},
     {"updateCatalog", "([B)[B", &update_metastore_id_},
     {"execDdl", "([B)[B", &exec_ddl_id_},
     {"resetMetadata", "([B)[B", &reset_metadata_id_},
@@ -53,22 +58,20 @@ Catalog::Catalog() {
 
   JNIEnv* jni_env = getJNIEnv();
   // Create an instance of the java class JniCatalog
-  catalog_class_ = jni_env->FindClass("com/cloudera/impala/service/JniCatalog");
+  catalog_class_ = jni_env->FindClass("org/apache/impala/service/JniCatalog");
   EXIT_IF_EXC(jni_env);
 
   uint32_t num_methods = sizeof(methods) / sizeof(methods[0]);
   for (int i = 0; i < num_methods; ++i) {
-    EXIT_IF_ERROR(JniUtil::LoadJniMethod(jni_env, catalog_class_, &(methods[i])));
+    ABORT_IF_ERROR(JniUtil::LoadJniMethod(jni_env, catalog_class_, &(methods[i])));
   }
 
-  jboolean load_in_background = FLAGS_load_catalog_in_background;
-  jint num_metadata_loading_threads = FLAGS_num_metadata_loading_threads;
-  jstring sentry_config = jni_env->NewStringUTF(FLAGS_sentry_config.c_str());
-  jobject catalog = jni_env->NewObject(catalog_class_, catalog_ctor_,
-      load_in_background, num_metadata_loading_threads, sentry_config,
-      FlagToTLogLevel(FLAGS_v), FlagToTLogLevel(FLAGS_non_impala_java_vlog));
+  jbyteArray cfg_bytes;
+  ABORT_IF_ERROR(GetThriftBackendGflags(jni_env, &cfg_bytes));
+
+  jobject catalog = jni_env->NewObject(catalog_class_, catalog_ctor_, cfg_bytes);
   EXIT_IF_EXC(jni_env);
-  EXIT_IF_ERROR(JniUtil::LocalToGlobalRef(jni_env, catalog, &catalog_));
+  ABORT_IF_ERROR(JniUtil::LocalToGlobalRef(jni_env, catalog, &catalog_));
 }
 
 Status Catalog::GetCatalogObject(const TCatalogObject& req,

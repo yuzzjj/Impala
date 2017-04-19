@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "service/impala-server.h"
 #include "service/impala-server.inline.h"
@@ -22,23 +25,26 @@
 #include <jni.h>
 #include <thrift/protocol/TDebugProtocol.h>
 #include <gtest/gtest.h>
-#include <boost/foreach.hpp>
 #include <boost/bind.hpp>
 #include <boost/algorithm/string.hpp>
-#include <google/heap-profiler.h>
-#include <google/malloc_extension.h>
+#include <gperftools/heap-profiler.h>
+#include <gperftools/malloc_extension.h>
 #include <gutil/strings/substitute.h>
 
 #include "common/logging.h"
 #include "common/version.h"
 #include "exprs/expr.h"
+#include "rpc/thrift-util.h"
 #include "runtime/raw-value.h"
+#include "runtime/exec-env.h"
+#include "service/hs2-util.h"
 #include "service/query-exec-state.h"
 #include "service/query-options.h"
+#include "service/query-result-set.h"
 #include "util/debug-util.h"
-#include "rpc/thrift-util.h"
 #include "util/impalad-metrics.h"
-#include "service/hs2-util.h"
+#include "util/runtime-profile-counters.h"
+#include "util/string-parser.h"
 
 #include "common/names.h"
 
@@ -80,322 +86,15 @@ namespace impala {
 
 const string IMPALA_RESULT_CACHING_OPT = "impala.resultset.cache.size";
 
-// Utility functions for computing the size of HS2 Thrift structs in bytes.
-static inline
-int64_t ByteSize(const thrift::TColumnValue& val) {
-  return sizeof(val) + val.stringVal.value.capacity();
-}
-
-static int64_t ByteSize(const thrift::TRow& row) {
-  int64_t bytes = sizeof(row);
-  BOOST_FOREACH(const thrift::TColumnValue& c, row.colVals) {
-    bytes += ByteSize(c);
-  }
-  return bytes;
-}
-
-// Returns the size, in bytes, of a Hive TColumn structure, only taking into account those
-// values in the range [start_idx, end_idx).
-static uint32_t TColumnByteSize(const thrift::TColumn& col, uint32_t start_idx,
-    uint32_t end_idx) {
-  DCHECK_LE(start_idx, end_idx);
-  uint32_t num_rows = end_idx - start_idx;
-  if (num_rows == 0) return 0L;
-
-  if (col.__isset.boolVal) return (num_rows * sizeof(bool)) + col.boolVal.nulls.size();
-  if (col.__isset.byteVal) return num_rows + col.byteVal.nulls.size();
-  if (col.__isset.i16Val) return (num_rows * sizeof(int16_t)) + col.i16Val.nulls.size();
-  if (col.__isset.i32Val) return (num_rows * sizeof(int32_t)) + col.i32Val.nulls.size();
-  if (col.__isset.i64Val) return (num_rows * sizeof(int64_t)) + col.i64Val.nulls.size();
-  if (col.__isset.doubleVal) {
-    return (num_rows * sizeof(double)) + col.doubleVal.nulls.size();
-  }
-  if (col.__isset.stringVal) {
-    uint32_t bytes = 0;
-    for (int i = start_idx; i < end_idx; ++i) bytes += col.stringVal.values[i].size();
-    return bytes + col.stringVal.nulls.size();
-  }
-
-  return 0;
-}
-
 // Helper function to translate between Beeswax and HiveServer2 type
 static TOperationState::type QueryStateToTOperationState(
-    const beeswax::QueryState::type& query_state);
-
-// Result set container for Hive protocol versions >= V6, where results are returned in
-// column-orientation.
-class ImpalaServer::HS2ColumnarResultSet : public ImpalaServer::QueryResultSet {
- public:
-  HS2ColumnarResultSet(const TResultSetMetadata& metadata, TRowSet* rowset = NULL)
-      : metadata_(metadata), result_set_(rowset), num_rows_(0) {
-    if (rowset == NULL) {
-      owned_result_set_.reset(new TRowSet());
-      result_set_ = owned_result_set_.get();
-    }
-    InitColumns();
-  }
-
-  virtual ~HS2ColumnarResultSet() { }
-
-  // Add a row of expr values
-  virtual Status AddOneRow(const vector<void*>& col_values, const vector<int>& scales) {
-    int num_col = col_values.size();
-    DCHECK_EQ(num_col, metadata_.columns.size());
-    for (int i = 0; i < num_col; ++i) {
-      ExprValueToHS2TColumn(col_values[i], metadata_.columns[i].columnType, num_rows_,
-          &(result_set_->columns[i]));
-    }
-    ++num_rows_;
-    return Status::OK();
-  }
-
-  // Add a row from a TResultRow
-  virtual Status AddOneRow(const TResultRow& row) {
-    int num_col = row.colVals.size();
-    DCHECK_EQ(num_col, metadata_.columns.size());
-    for (int i = 0; i < num_col; ++i) {
-      TColumnValueToHS2TColumn(row.colVals[i], metadata_.columns[i].columnType, num_rows_,
-          &(result_set_->columns[i]));
-    }
-    ++num_rows_;
-    return Status::OK();
-  }
-
-  // Copy all columns starting at 'start_idx' and proceeding for a maximum of 'num_rows'
-  // from 'other' into this result set
-  virtual int AddRows(const QueryResultSet* other, int start_idx, int num_rows) {
-    const HS2ColumnarResultSet* o = static_cast<const HS2ColumnarResultSet*>(other);
-    DCHECK_EQ(metadata_.columns.size(), o->metadata_.columns.size());
-    if (start_idx >= o->num_rows_) return 0;
-    const int rows_added = min<int64_t>(num_rows, o->num_rows_ - start_idx);
-    for (int j = 0; j < metadata_.columns.size(); ++j) {
-      thrift::TColumn* from = &o->result_set_->columns[j];
-      thrift::TColumn* to = &result_set_->columns[j];
-      switch (metadata_.columns[j].columnType.types[0].scalar_type.type) {
-        case TPrimitiveType::NULL_TYPE:
-        case TPrimitiveType::BOOLEAN:
-          StitchNulls(num_rows_, rows_added, start_idx, from->boolVal.nulls,
-              &(to->boolVal.nulls));
-          to->boolVal.values.insert(
-              to->boolVal.values.end(),
-              from->boolVal.values.begin() + start_idx,
-              from->boolVal.values.begin() + start_idx + rows_added);
-          break;
-        case TPrimitiveType::TINYINT:
-          StitchNulls(num_rows_, rows_added, start_idx, from->byteVal.nulls,
-              &(to->byteVal.nulls));
-          to->byteVal.values.insert(
-              to->byteVal.values.end(),
-              from->byteVal.values.begin() + start_idx,
-              from->byteVal.values.begin() + start_idx + rows_added);
-          break;
-        case TPrimitiveType::SMALLINT:
-          StitchNulls(num_rows_, rows_added, start_idx, from->i16Val.nulls,
-              &(to->i16Val.nulls));
-          to->i16Val.values.insert(
-              to->i16Val.values.end(),
-              from->i16Val.values.begin() + start_idx,
-              from->i16Val.values.begin() + start_idx + rows_added);
-          break;
-        case TPrimitiveType::INT:
-          StitchNulls(num_rows_, rows_added, start_idx, from->i32Val.nulls,
-              &(to->i32Val.nulls));
-          to->i32Val.values.insert(
-              to->i32Val.values.end(),
-              from->i32Val.values.begin() + start_idx,
-              from->i32Val.values.begin() + start_idx + rows_added);
-          break;
-        case TPrimitiveType::BIGINT:
-          StitchNulls(num_rows_, rows_added, start_idx, from->i64Val.nulls,
-              &(to->i64Val.nulls));
-          to->i64Val.values.insert(
-              to->i64Val.values.end(),
-              from->i64Val.values.begin() + start_idx,
-              from->i64Val.values.begin() + start_idx + rows_added);
-          break;
-        case TPrimitiveType::FLOAT:
-        case TPrimitiveType::DOUBLE:
-          StitchNulls(num_rows_, rows_added, start_idx, from->doubleVal.nulls,
-              &(to->doubleVal.nulls));
-          to->doubleVal.values.insert(
-              to->doubleVal.values.end(),
-              from->doubleVal.values.begin() + start_idx,
-              from->doubleVal.values.begin() + start_idx + rows_added);
-          break;
-        case TPrimitiveType::TIMESTAMP:
-        case TPrimitiveType::DECIMAL:
-        case TPrimitiveType::STRING:
-        case TPrimitiveType::VARCHAR:
-        case TPrimitiveType::CHAR:
-          StitchNulls(num_rows_, rows_added, start_idx, from->stringVal.nulls,
-              &(to->stringVal.nulls));
-          to->stringVal.values.insert(to->stringVal.values.end(),
-              from->stringVal.values.begin() + start_idx,
-              from->stringVal.values.begin() + start_idx + rows_added);
-          break;
-        default:
-          DCHECK(false) << "Unsupported type: " << TypeToString(ThriftToType(
-              metadata_.columns[j].columnType.types[0].scalar_type.type));
-          break;
-      }
-    }
-    num_rows_ += rows_added;
-    return rows_added;
-  }
-
-  virtual int64_t ByteSize(int start_idx, int num_rows) {
-    const int end = min(start_idx + num_rows, (int)size());
-    int64_t bytes = 0L;
-    BOOST_FOREACH(const thrift::TColumn& c, result_set_->columns) {
-      bytes += TColumnByteSize(c, start_idx, end);
-    }
-    return bytes;
-  }
-
-  virtual size_t size() { return num_rows_; }
-
- private:
-  // Metadata of the result set
-  const TResultSetMetadata& metadata_;
-
-  // Points to the TRowSet to be filled. The row set this points to may be owned by
-  // this object, in which case owned_result_set_ is set.
-  TRowSet* result_set_;
-
-  // Set to result_set_ if result_set_ is owned.
-  scoped_ptr<TRowSet> owned_result_set_;
-
-  int64_t num_rows_;
-
-  void InitColumns() {
-    result_set_->__isset.columns = true;
-    BOOST_FOREACH(const TColumn& col, metadata_.columns) {
-      DCHECK(col.columnType.types.size() == 1) <<
-          "Structured columns unsupported in HS2 interface";
-      thrift::TColumn column;
-      switch (col.columnType.types[0].scalar_type.type) {
-        case TPrimitiveType::NULL_TYPE:
-        case TPrimitiveType::BOOLEAN:
-          column.__isset.boolVal = true;
-          break;
-        case TPrimitiveType::TINYINT:
-          column.__isset.byteVal = true;
-          break;
-        case TPrimitiveType::SMALLINT:
-          column.__isset.i16Val = true;
-          break;
-        case TPrimitiveType::INT:
-          column.__isset.i32Val = true;
-          break;
-        case TPrimitiveType::BIGINT:
-          column.__isset.i64Val = true;
-          break;
-        case TPrimitiveType::FLOAT:
-        case TPrimitiveType::DOUBLE:
-          column.__isset.doubleVal = true;
-          break;
-        case TPrimitiveType::TIMESTAMP:
-        case TPrimitiveType::DECIMAL:
-        case TPrimitiveType::VARCHAR:
-        case TPrimitiveType::CHAR:
-        case TPrimitiveType::STRING:
-          column.__isset.stringVal = true;
-          break;
-        default:
-          DCHECK(false) << "Unhandled column type: "
-                        << TypeToString(
-                            ThriftToType(col.columnType.types[0].scalar_type.type));
-      }
-      result_set_->columns.push_back(column);
-    }
-  }
-};
-
-// TRow result set for HiveServer2
-class ImpalaServer::HS2RowOrientedResultSet : public ImpalaServer::QueryResultSet {
- public:
-  // Rows are added into rowset.
-  HS2RowOrientedResultSet(const TResultSetMetadata& metadata, TRowSet* rowset = NULL)
-      : metadata_(metadata), result_set_(rowset) {
-    if (rowset == NULL) {
-      owned_result_set_.reset(new TRowSet());
-      result_set_ = owned_result_set_.get();
-    }
-  }
-
-  virtual ~HS2RowOrientedResultSet() { }
-
-  // Convert expr value to HS2 TRow and store it in TRowSet.
-  virtual Status AddOneRow(const vector<void*>& col_values, const vector<int>& scales) {
-    int num_col = col_values.size();
-    DCHECK_EQ(num_col, metadata_.columns.size());
-    result_set_->rows.push_back(TRow());
-    TRow& trow = result_set_->rows.back();
-    trow.colVals.resize(num_col);
-    for (int i = 0; i < num_col; ++i) {
-      ExprValueToHS2TColumnValue(col_values[i],
-          metadata_.columns[i].columnType, &(trow.colVals[i]));
-    }
-    return Status::OK();
-  }
-
-  // Convert TResultRow to HS2 TRow and store it in TRowSet.
-  virtual Status AddOneRow(const TResultRow& row) {
-    int num_col = row.colVals.size();
-    DCHECK_EQ(num_col, metadata_.columns.size());
-    result_set_->rows.push_back(TRow());
-    TRow& trow = result_set_->rows.back();
-    trow.colVals.resize(num_col);
-    for (int i = 0; i < num_col; ++i) {
-      TColumnValueToHS2TColumnValue(row.colVals[i], metadata_.columns[i].columnType,
-          &(trow.colVals[i]));
-    }
-    return Status::OK();
-  }
-
-  virtual int AddRows(const QueryResultSet* other, int start_idx, int num_rows) {
-    const HS2RowOrientedResultSet* o = static_cast<const HS2RowOrientedResultSet*>(other);
-    if (start_idx >= o->result_set_->rows.size()) return 0;
-    const int rows_added =
-        min(static_cast<size_t>(num_rows), o->result_set_->rows.size() - start_idx);
-    for (int i = start_idx; i < start_idx + rows_added; ++i) {
-      result_set_->rows.push_back(o->result_set_->rows[i]);
-    }
-    return rows_added;
-  }
-
-  virtual int64_t ByteSize(int start_idx, int num_rows) {
-    int64_t bytes = 0;
-    const int end =
-        min(static_cast<size_t>(num_rows), result_set_->rows.size() - start_idx);
-    for (int i = start_idx; i < start_idx + end; ++i) {
-      bytes += impala::ByteSize(result_set_->rows[i]);
-    }
-    return bytes;
-  }
-
-  virtual size_t size() { return result_set_->rows.size(); }
-
- private:
-  // Metadata of the result set
-  const TResultSetMetadata& metadata_;
-
-  // Points to the TRowSet to be filled. The row set this points to may be owned by
-  // this object, in which case owned_result_set_ is set.
-  TRowSet* result_set_;
-
-  // Set to result_set_ if result_set_ is owned.
-  scoped_ptr<TRowSet> owned_result_set_;
-};
-
-ImpalaServer::QueryResultSet* ImpalaServer::CreateHS2ResultSet(
-    TProtocolVersion::type version, const TResultSetMetadata& metadata,
-    TRowSet* rowset) {
-  if (version < TProtocolVersion::HIVE_CLI_SERVICE_PROTOCOL_V6) {
-    return new HS2RowOrientedResultSet(metadata, rowset);
-  } else {
-    return new HS2ColumnarResultSet(metadata, rowset);
+    const beeswax::QueryState::type& query_state) {
+  switch (query_state) {
+    case beeswax::QueryState::CREATED: return TOperationState::INITIALIZED_STATE;
+    case beeswax::QueryState::RUNNING: return TOperationState::RUNNING_STATE;
+    case beeswax::QueryState::FINISHED: return TOperationState::FINISHED_STATE;
+    case beeswax::QueryState::EXCEPTION: return TOperationState::ERROR_STATE;
+    default: return TOperationState::UKNOWN_STATE;
   }
 }
 
@@ -441,7 +140,7 @@ void ImpalaServer::ExecuteMetadataOp(const THandleIdentifier& session_handle,
       _TMetadataOpcode_VALUES_TO_NAMES.find(request->opcode);
   const string& query_text = query_text_it == _TMetadataOpcode_VALUES_TO_NAMES.end() ?
       "N/A" : query_text_it->second;
-  query_ctx.request.stmt = query_text;
+  query_ctx.client_request.stmt = query_text;
   exec_state.reset(new QueryExecState(query_ctx, exec_env_,
       exec_env_->frontend(), this, session));
   Status register_status = RegisterQuery(session, exec_state);
@@ -461,7 +160,7 @@ void ImpalaServer::ExecuteMetadataOp(const THandleIdentifier& session_handle,
     return;
   }
 
-  exec_state->UpdateQueryState(QueryState::FINISHED);
+  exec_state->UpdateNonErrorQueryState(beeswax::QueryState::FINISHED);
 
   Status inflight_status = SetQueryInflight(session, exec_state);
   if (!inflight_status.ok()) {
@@ -481,7 +180,9 @@ void ImpalaServer::ExecuteMetadataOp(const THandleIdentifier& session_handle,
 Status ImpalaServer::FetchInternal(const TUniqueId& query_id, int32_t fetch_size,
     bool fetch_first, TFetchResultsResp* fetch_results) {
   shared_ptr<QueryExecState> exec_state = GetQueryExecState(query_id, false);
-  if (exec_state == NULL) return Status("Invalid query handle");
+  if (UNLIKELY(exec_state == nullptr)) {
+    return Status(Substitute("Invalid query handle: $0", PrintId(query_id)));
+  }
 
   // FetchResults doesn't have an associated session handle, so we presume that this
   // request should keep alive the same session that orignated the query.
@@ -515,8 +216,8 @@ Status ImpalaServer::FetchInternal(const TUniqueId& query_id, int32_t fetch_size
   bool is_child_query = exec_state->parent_query_id() != TUniqueId();
   TProtocolVersion::type version = is_child_query ?
       TProtocolVersion::HIVE_CLI_SERVICE_PROTOCOL_V1 : session->hs2_version;
-  scoped_ptr<QueryResultSet> result_set(CreateHS2ResultSet(version,
-      *(exec_state->result_metadata()), &(fetch_results->results)));
+  scoped_ptr<QueryResultSet> result_set(QueryResultSet::CreateHS2ResultSet(
+      version, *(exec_state->result_metadata()), &(fetch_results->results)));
   RETURN_IF_ERROR(exec_state->FetchRows(fetch_size, result_set.get()));
   fetch_results->__isset.results = true;
   fetch_results->__set_hasMoreRows(!exec_state->eos());
@@ -525,7 +226,7 @@ Status ImpalaServer::FetchInternal(const TUniqueId& query_id, int32_t fetch_size
 
 Status ImpalaServer::TExecuteStatementReqToTQueryContext(
     const TExecuteStatementReq execute_request, TQueryCtx* query_ctx) {
-  query_ctx->request.stmt = execute_request.statement;
+  query_ctx->client_request.stmt = execute_request.statement;
   VLOG_QUERY << "TExecuteStatementReq: " << ThriftDebugString(execute_request);
   QueryOptionsMask set_query_options_mask;
   {
@@ -538,7 +239,7 @@ Status ImpalaServer::TExecuteStatementReqToTQueryContext(
     RETURN_IF_ERROR(GetSessionState(session_id, &session_state));
     session_state->ToThrift(session_id, &query_ctx->session);
     lock_guard<mutex> l(session_state->lock);
-    query_ctx->request.query_options = session_state->default_query_options;
+    query_ctx->client_request.query_options = session_state->default_query_options;
     set_query_options_mask = session_state->set_query_options_mask;
   }
 
@@ -553,14 +254,14 @@ Status ImpalaServer::TExecuteStatementReqToTQueryContext(
         continue;
       }
       RETURN_IF_ERROR(SetQueryOption(conf_itr->first, conf_itr->second,
-          &query_ctx->request.query_options, &set_query_options_mask));
+          &query_ctx->client_request.query_options, &set_query_options_mask));
     }
   }
   // Only query options not set in the session or confOverlay can be overridden by the
   // pool options.
   AddPoolQueryOptions(query_ctx, ~set_query_options_mask);
   VLOG_QUERY << "TClientRequest.queryOptions: "
-             << ThriftDebugString(query_ctx->request.query_options);
+             << ThriftDebugString(query_ctx->client_request.query_options);
   return Status::OK();
 }
 
@@ -589,13 +290,14 @@ void ImpalaServer::OpenSession(TOpenSessionResp& return_val,
   // query options.
   // TODO: put secret in session state map and check it
   // TODO: Fix duplication of code between here and ConnectionStart().
-  shared_ptr<SessionState> state(new SessionState());
+  shared_ptr<SessionState> state = make_shared<SessionState>();
   state->closed = false;
-  state->start_time = TimestampValue::LocalTime();
+  state->start_time_ms = UnixMillis();
   state->session_type = TSessionType::HIVESERVER2;
   state->network_address = ThriftServer::GetThreadConnectionContext()->network_address;
   state->last_accessed_ms = UnixMillis();
   state->hs2_version = min(MAX_SUPPORTED_HS2_VERSION, request.client_protocol);
+  state->kudu_latest_observed_ts = 0;
 
   // If the username was set by a lower-level transport, use it.
   const ThriftServer::Username& username =
@@ -606,46 +308,42 @@ void ImpalaServer::OpenSession(TOpenSessionResp& return_val,
     state->connected_user = request.username;
   }
 
+  // Process the supplied configuration map.
   state->database = "default";
   state->session_timeout = FLAGS_idle_session_timeout;
-  typedef map<string, string> ConfigurationMap;
-  BOOST_FOREACH(const ConfigurationMap::value_type& v, request.configuration) {
-    if (iequals(v.first, "use:database")) {
-      state->database = v.second;
-    } else if (iequals(v.first, "idle_session_timeout")) {
-      int32_t requested_timeout = atoi(v.second.c_str());
-      if (requested_timeout > 0) {
-        if (FLAGS_idle_session_timeout > 0) {
-          state->session_timeout = min(FLAGS_idle_session_timeout, requested_timeout);
-        } else {
-          state->session_timeout = requested_timeout;
+  state->default_query_options = default_query_options_;
+  if (request.__isset.configuration) {
+    typedef map<string, string> ConfigurationMap;
+    for (const ConfigurationMap::value_type& v: request.configuration) {
+      if (iequals(v.first, "impala.doas.user")) {
+        // If the current user is a valid proxy user, he/she can optionally perform
+        // authorization requests on behalf of another user. This is done by setting
+        // the 'impala.doas.user' Hive Server 2 configuration property.
+        state->do_as_user = v.second;
+        Status status = AuthorizeProxyUser(state->connected_user, state->do_as_user);
+        HS2_RETURN_IF_ERROR(return_val, status, SQLSTATE_GENERAL_ERROR);
+      } else if (iequals(v.first, "use:database")) {
+        state->database = v.second;
+      } else if (iequals(v.first, "idle_session_timeout")) {
+        int32_t requested_timeout = atoi(v.second.c_str());
+        if (requested_timeout > 0) {
+          if (FLAGS_idle_session_timeout > 0) {
+            state->session_timeout = min(FLAGS_idle_session_timeout, requested_timeout);
+          } else {
+            state->session_timeout = requested_timeout;
+          }
         }
+        VLOG_QUERY << "OpenSession(): idle_session_timeout="
+                   << PrettyPrinter::Print(state->session_timeout, TUnit::TIME_S);
+      } else {
+        // Normal configuration key. Use it to set session default query options.
+        // Ignore failure (failures will be logged in SetQueryOption()).
+        SetQueryOption(v.first, v.second, &state->default_query_options,
+            &state->set_query_options_mask);
       }
-      VLOG_QUERY << "OpenSession(): idle_session_timeout="
-                 << PrettyPrinter::Print(state->session_timeout, TUnit::TIME_S);
     }
   }
   RegisterSessionTimeout(state->session_timeout);
-
-  // Convert request.configuration to session default query options.
-  state->default_query_options = default_query_options_;
-  if (request.__isset.configuration) {
-    map<string, string>::const_iterator conf_itr = request.configuration.begin();
-    for (; conf_itr != request.configuration.end(); ++conf_itr) {
-      // If the current user is a valid proxy user, he/she can optionally perform
-      // authorization requests on behalf of another user. This is done by setting the
-      // 'impala.doas.user' Hive Server 2 configuration property.
-      if (conf_itr->first == "impala.doas.user") {
-        state->do_as_user = conf_itr->second;
-        Status status = AuthorizeProxyUser(state->connected_user, state->do_as_user);
-        HS2_RETURN_IF_ERROR(return_val, status, SQLSTATE_GENERAL_ERROR);
-        continue;
-      }
-      // Ignore failure to set query options (will be logged)
-      SetQueryOption(conf_itr->first, conf_itr->second, &state->default_query_options,
-          &state->set_query_options_mask);
-    }
-  }
   TQueryOptionsToMap(state->default_query_options, &return_val.configuration);
 
   // OpenSession() should return the coordinator's HTTP server address.
@@ -704,7 +402,7 @@ void ImpalaServer::GetInfo(TGetInfoResp& return_val,
       return_val.infoValue.__set_stringValue("Impala");
       break;
     case TGetInfoType::CLI_DBMS_VER:
-      return_val.infoValue.__set_stringValue(IMPALA_BUILD_VERSION);
+      return_val.infoValue.__set_stringValue(GetDaemonBuildVersion());
       break;
     default:
       HS2_RETURN_ERROR(return_val, "Unsupported operation",
@@ -759,14 +457,16 @@ void ImpalaServer::ExecuteStatement(TExecuteStatementResp& return_val,
 
   // Optionally enable result caching on the QueryExecState.
   if (cache_num_rows > 0) {
-    status = exec_state->SetResultCache(CreateHS2ResultSet(session->hs2_version,
-            *exec_state->result_metadata()), cache_num_rows);
+    status = exec_state->SetResultCache(
+        QueryResultSet::CreateHS2ResultSet(
+            session->hs2_version, *exec_state->result_metadata(), nullptr),
+        cache_num_rows);
     if (!status.ok()) {
       UnregisterQuery(exec_state->query_id(), false, &status);
       HS2_RETURN_ERROR(return_val, status.GetDetail(), SQLSTATE_GENERAL_ERROR);
     }
   }
-  exec_state->UpdateQueryState(QueryState::RUNNING);
+  exec_state->UpdateNonErrorQueryState(beeswax::QueryState::RUNNING);
   // Start thread to wait for results to become available.
   exec_state->WaitAsync();
   // Once the query is running do a final check for session closure and add it to the
@@ -933,17 +633,32 @@ void ImpalaServer::GetOperationStatus(TGetOperationStatusResp& return_val,
       request.operationHandle.operationId, &query_id, &secret), SQLSTATE_GENERAL_ERROR);
   VLOG_ROW << "GetOperationStatus(): query_id=" << PrintId(query_id);
 
-  lock_guard<mutex> l(query_exec_state_map_lock_);
-  QueryExecStateMap::iterator entry = query_exec_state_map_.find(query_id);
-  if (entry != query_exec_state_map_.end()) {
-    QueryState::type query_state = entry->second->query_state();
-    TOperationState::type operation_state = QueryStateToTOperationState(query_state);
-    return_val.__set_operationState(operation_state);
-    return;
+  shared_ptr<QueryExecState> exec_state = GetQueryExecState(query_id, false);
+  if (UNLIKELY(exec_state.get() == nullptr)) {
+    // No handle was found
+    HS2_RETURN_ERROR(return_val,
+      Substitute("Invalid query handle: $0", PrintId(query_id)), SQLSTATE_GENERAL_ERROR);
   }
 
-  // No handle was found
-  HS2_RETURN_ERROR(return_val, "Invalid query handle", SQLSTATE_GENERAL_ERROR);
+  ScopedSessionState session_handle(this);
+  const TUniqueId session_id = exec_state->session_id();
+  shared_ptr<SessionState> session;
+  HS2_RETURN_IF_ERROR(return_val, session_handle.WithSession(session_id, &session),
+      SQLSTATE_GENERAL_ERROR);
+
+  {
+    lock_guard<mutex> l(*exec_state->lock());
+    TOperationState::type operation_state = QueryStateToTOperationState(
+        exec_state->query_state());
+    return_val.__set_operationState(operation_state);
+    if (operation_state == TOperationState::ERROR_STATE) {
+      DCHECK(!exec_state->query_status().ok());
+      return_val.__set_errorMessage(exec_state->query_status().GetDetail());
+      return_val.__set_sqlState(SQLSTATE_GENERAL_ERROR);
+    } else {
+      DCHECK(exec_state->query_status().ok());
+    }
+  }
 }
 
 void ImpalaServer::CancelOperation(TCancelOperationResp& return_val,
@@ -955,9 +670,10 @@ void ImpalaServer::CancelOperation(TCancelOperationResp& return_val,
   VLOG_QUERY << "CancelOperation(): query_id=" << PrintId(query_id);
 
   shared_ptr<QueryExecState> exec_state = GetQueryExecState(query_id, false);
-  if (exec_state.get() == NULL) {
+  if (UNLIKELY(exec_state.get() == nullptr)) {
     // No handle was found
-    HS2_RETURN_ERROR(return_val, "Invalid query handle", SQLSTATE_GENERAL_ERROR);
+    HS2_RETURN_ERROR(return_val,
+      Substitute("Invalid query handle: $0", PrintId(query_id)), SQLSTATE_GENERAL_ERROR);
   }
   ScopedSessionState session_handle(this);
   const TUniqueId session_id = exec_state->session_id();
@@ -976,9 +692,10 @@ void ImpalaServer::CloseOperation(TCloseOperationResp& return_val,
   VLOG_QUERY << "CloseOperation(): query_id=" << PrintId(query_id);
 
   shared_ptr<QueryExecState> exec_state = GetQueryExecState(query_id, false);
-  if (exec_state.get() == NULL) {
+  if (UNLIKELY(exec_state.get() == nullptr)) {
     // No handle was found
-    HS2_RETURN_ERROR(return_val, "Invalid query handle", SQLSTATE_GENERAL_ERROR);
+    HS2_RETURN_ERROR(return_val,
+      Substitute("Invalid query handle: $0", PrintId(query_id)), SQLSTATE_GENERAL_ERROR);
   }
   ScopedSessionState session_handle(this);
   const TUniqueId session_id = exec_state->session_id();
@@ -1003,18 +720,22 @@ void ImpalaServer::GetResultSetMetadata(TGetResultSetMetadataResp& return_val,
   // Look up the session ID (which takes session_state_map_lock_) before taking the query
   // exec state lock.
   TUniqueId session_id;
-  if (!GetSessionIdForQuery(query_id, &session_id)) {
-    HS2_RETURN_ERROR(return_val, "Invalid query handle", SQLSTATE_GENERAL_ERROR);
+  if (UNLIKELY(!GetSessionIdForQuery(query_id, &session_id))) {
+    // No handle was found
+    HS2_RETURN_ERROR(return_val,
+      Substitute("Unable to find session ID for query handle: $0", PrintId(query_id)),
+      SQLSTATE_GENERAL_ERROR);
   }
   ScopedSessionState session_handle(this);
   HS2_RETURN_IF_ERROR(return_val, session_handle.WithSession(session_id),
       SQLSTATE_GENERAL_ERROR);
 
   shared_ptr<QueryExecState> exec_state = GetQueryExecState(query_id, true);
-  if (exec_state.get() == NULL) {
+  if (UNLIKELY(exec_state.get() == nullptr)) {
     VLOG_QUERY << "GetResultSetMetadata(): invalid query handle";
     // No handle was found
-    HS2_RETURN_ERROR(return_val, "Invalid query handle", SQLSTATE_GENERAL_ERROR);
+    HS2_RETURN_ERROR(return_val,
+      Substitute("Invalid query handle: $0", PrintId(query_id)), SQLSTATE_GENERAL_ERROR);
   }
   {
     // make sure we release the lock on exec_state if we see any error
@@ -1086,9 +807,10 @@ void ImpalaServer::GetLog(TGetLogResp& return_val, const TGetLogReq& request) {
       request.operationHandle.operationId, &query_id, &secret), SQLSTATE_GENERAL_ERROR);
 
   shared_ptr<QueryExecState> exec_state = GetQueryExecState(query_id, false);
-  if (exec_state.get() == NULL) {
+  if (UNLIKELY(exec_state.get() == nullptr)) {
     // No handle was found
-    HS2_RETURN_ERROR(return_val, "Invalid query handle", SQLSTATE_GENERAL_ERROR);
+    HS2_RETURN_ERROR(return_val,
+      Substitute("Invalid query handle: $0", PrintId(query_id)), SQLSTATE_GENERAL_ERROR);
   }
 
   // GetLog doesn't have an associated session handle, so we presume that this request
@@ -1175,14 +897,5 @@ void ImpalaServer::RenewDelegationToken(TRenewDelegationTokenResp& return_val,
   return_val.status.__set_errorMessage("Not implemented");
 }
 
-TOperationState::type QueryStateToTOperationState(const QueryState::type& query_state) {
-  switch (query_state) {
-    case QueryState::CREATED: return TOperationState::INITIALIZED_STATE;
-    case QueryState::RUNNING: return TOperationState::RUNNING_STATE;
-    case QueryState::FINISHED: return TOperationState::FINISHED_STATE;
-    case QueryState::EXCEPTION: return TOperationState::ERROR_STATE;
-    default: return TOperationState::UKNOWN_STATE;
-  }
-}
 
 }

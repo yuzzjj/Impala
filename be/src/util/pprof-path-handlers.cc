@@ -1,25 +1,28 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/pprof-path-handlers.h"
 
 #include <boost/bind.hpp>
 #include <fstream>
 #include <sys/stat.h>
-#include <google/profiler.h>
-#include <google/heap-profiler.h>
-#include <google/malloc_extension.h>
+#include <gperftools/profiler.h>
+#include <gperftools/heap-profiler.h>
+#include <gperftools/malloc_extension.h>
 
 #include "common/logging.h"
 #include "util/webserver.h"
@@ -32,7 +35,7 @@ using namespace rapidjson;
 
 DECLARE_string(heap_profile_dir);
 
-const int PPROF_DEFAULT_SAMPLE_SECS = 30; // pprof default sample time in seconds.
+static const int PPROF_DEFAULT_SAMPLE_SECS = 30; // pprof default sample time in seconds.
 
 // pprof asks for the url /pprof/cmdline to figure out what application it's profiling.
 // The server should respond by reading the contents of /proc/self/cmdline.
@@ -52,6 +55,7 @@ void PprofCmdLineHandler(const Webserver::ArgumentMap& args, stringstream* outpu
 // seconds later, call GetHeapProfile() followed by HeapProfilerStop().
 void PprofHeapHandler(const Webserver::ArgumentMap& args, stringstream* output) {
 #ifdef ADDRESS_SANITIZER
+  (void)PPROF_DEFAULT_SAMPLE_SECS; // Avoid unused variable warning.
   (*output) << "Heap profiling is not available with address sanitizer builds.";
 #else
   Webserver::ArgumentMap::const_iterator it = args.find("seconds");
@@ -90,7 +94,7 @@ void PprofCpuProfileHandler(const Webserver::ArgumentMap& args, stringstream* ou
   ProfilerStop();
   ifstream prof_file(tmp_prof_file_name.str().c_str(), ios::in);
   if (!prof_file.is_open()) {
-    (*output) << "Unable to open cpu profile: " << tmp_prof_file_name;
+    (*output) << "Unable to open cpu profile: " << tmp_prof_file_name.str();
     return;
   }
   (*output) << prof_file.rdbuf();

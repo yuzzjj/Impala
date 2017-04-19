@@ -1,22 +1,25 @@
-# Copyright (c) 2014 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 from copy import deepcopy
 from itertools import ifilter
 
-from common import ValExpr
-from db_types import (
+from tests.comparison.common import ValExpr
+from tests.comparison.db_types import (
     Boolean,
     Char,
     DataType,
@@ -107,6 +110,11 @@ class Signature(object):
     self.func = func
     self.return_type = return_type
     self.args = list(args)
+
+  def __repr__(self):
+    return "Signature<func: {func}, returns: {rt}, args: {arg_list}>".format(
+        func=repr(self.func), rt=repr(self.return_type),
+        arg_list=", ".join([repr(arg) for arg in self.args]))
 
   @property
   def input_types(self):
@@ -450,6 +458,19 @@ def create_analytic(
   return func
 
 
+class CastFunc(Func):
+  """
+  This function is used internally by the InsertStatementGenerator to cast ValExprs into
+  the proper exact types of columns.
+
+  Arguments:
+  val_expr: ValExpr to cast
+  type_: Type to cast ValExpr
+  """
+  def __init__(self, val_expr, type_):
+    self.args = [val_expr, type_]
+
+
 create_func('IsNull', returns=Boolean, accepts=[DataType])
 create_func('IsNotNull', returns=Boolean, accepts=[DataType])
 create_func('And', returns=Boolean, accepts=[Boolean, Boolean])
@@ -477,11 +498,13 @@ for func_name in ['In', 'NotIn']:
       [Boolean, Timestamp, Timestamp, Timestamp]])
 for comparator in ['GreaterThan', 'LessThan']:
   create_func(comparator, signatures=[
+      [Boolean, Char, Char],
       [Boolean, Number, Number],
       [Boolean, Timestamp, Timestamp]])
 for comparator in ['GreaterThanOrEquals', 'LessThanOrEquals']:
   # Avoid equality comparison on FLOATs
   create_func(comparator, signatures=[
+      [Boolean, Char, Char],
       [Boolean, Decimal, Decimal],
       [Boolean, Decimal, Int],
       [Boolean, Int, Decimal],

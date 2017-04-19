@@ -1,33 +1,36 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <string>
-#include <gtest/gtest.h>
 
 #include "runtime/mem-pool.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/string-buffer.h"
+#include "testutil/gtest-util.h"
 
 #include "common/names.h"
 
 namespace impala {
 
 void ValidateString(const string& std_str, const StringBuffer& str) {
-  EXPECT_EQ(std_str.empty(), str.Empty());
-  EXPECT_EQ((int)std_str.size(), str.Size());
+  EXPECT_EQ(std_str.empty(), str.IsEmpty());
+  EXPECT_EQ(static_cast<int64_t>(std_str.size()), str.len());
   if (std_str.size() > 0) {
-    EXPECT_EQ(strncmp(std_str.c_str(), str.str().ptr, std_str.size()), 0);
+    EXPECT_EQ(strncmp(std_str.c_str(), str.buffer(), std_str.size()), 0);
   }
 }
 
@@ -55,11 +58,6 @@ TEST(StringBufferTest, Basic) {
   str.Append("World", strlen("World"));
   ValidateString(std_str, str);
 
-  // Assign
-  std_str.assign("foo");
-  str.Assign("foo", strlen("foo"));
-  ValidateString(std_str, str);
-
   // Clear
   std_str.clear();
   str.Clear();
@@ -72,23 +70,22 @@ TEST(StringBufferTest, Basic) {
 }
 
 TEST(StringBufferTest, AppendBoundary) {
-  // Test StringBuffer::Append() up to 1GB is ok
-  // TODO: Once IMPALA-1619 is fixed, we should change the test to verify
-  // append over 2GB string is supported.
+  // Test StringBuffer::Append() works beyond 1GB.
   MemTracker tracker;
   MemPool pool(&tracker);
   StringBuffer str(&pool);
   string std_str;
 
   const int64_t chunk_size = 8 * 1024 * 1024;
+  const int64_t max_data_size = 1LL << 32;
   std_str.resize(chunk_size, 'a');
   int64_t data_size = 0;
-  while (data_size + chunk_size <= StringValue::MAX_LENGTH) {
+  while (data_size + chunk_size <= max_data_size) {
     str.Append(std_str.c_str(), chunk_size);
     data_size += chunk_size;
   }
   EXPECT_EQ(str.buffer_size(), data_size);
-  std_str.resize(StringValue::MAX_LENGTH, 'a');
+  std_str.resize(max_data_size, 'a');
   ValidateString(std_str, str);
 
   pool.FreeAll();
@@ -96,8 +93,4 @@ TEST(StringBufferTest, AppendBoundary) {
 
 }
 
-int main(int argc, char **argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
-
+IMPALA_TEST_MAIN();

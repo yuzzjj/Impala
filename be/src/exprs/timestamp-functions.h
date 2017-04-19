@@ -1,32 +1,26 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXPRS_TIMESTAMP_FUNCTIONS_H
 #define IMPALA_EXPRS_TIMESTAMP_FUNCTIONS_H
 
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <boost/date_time/gregorian/gregorian.hpp>
-#include <boost/date_time/time_zone_base.hpp>
-#include <boost/date_time/local_time/local_time.hpp>
-#include <boost/thread/thread.hpp>
-
-#include "runtime/string-value.h"
-#include "runtime/timestamp-value.h"
+#include "common/status.h"
 #include "udf/udf.h"
-
-using namespace impala_udf;
 
 using namespace impala_udf;
 
@@ -34,24 +28,31 @@ namespace impala {
 
 class Expr;
 class OpcodeRegistry;
+struct StringValue;
+class TimestampValue;
 class TupleRow;
 
 /// TODO: Reconsider whether this class needs to exist.
 class TimestampFunctions {
  public:
-  // To workaround IMPALA-1675 (boost doesn't throw an error for very large intervals),
-  // define the max intervals.
-  static const int64_t MAX_YEAR;
-  static const int64_t MIN_YEAR;
-  static const int64_t MAX_YEAR_INTERVAL;
-  static const int64_t MAX_MONTH_INTERVAL;
-  static const int64_t MAX_WEEK_INTERVAL;
-  static const int64_t MAX_DAY_INTERVAL;
-  static const int64_t MAX_HOUR_INTERVAL;
-  static const int64_t MAX_MINUTE_INTERVAL;
-  static const int64_t MAX_SEC_INTERVAL;
-  static const int64_t MAX_MILLI_INTERVAL;
-  static const int64_t MAX_MICRO_INTERVAL;
+  /// To workaround a boost bug (where adding very large intervals to ptimes causes the
+  /// value to wrap around instead or throwing an exception -- the root cause of
+  /// IMPALA-1675), max interval value are defined below. Some values below are less than
+  /// the minimum interval needed to trigger IMPALA-1675 but the values are greater or
+  /// equal to the interval that would definitely result in an out of bounds value. The
+  /// min and max year are also defined for manual error checking. The min / max years
+  /// are derived from date(min_date_time).year() / date(max_date_time).year().
+  static const int64_t MAX_YEAR = 9999;
+  static const int64_t MIN_YEAR = 1400;
+  static const int64_t MAX_YEAR_INTERVAL = MAX_YEAR - MIN_YEAR;
+  static const int64_t MAX_MONTH_INTERVAL = MAX_YEAR_INTERVAL * 12;
+  static const int64_t MAX_WEEK_INTERVAL = MAX_YEAR_INTERVAL * 53;
+  static const int64_t MAX_DAY_INTERVAL = MAX_YEAR_INTERVAL * 366;
+  static const int64_t MAX_HOUR_INTERVAL = MAX_DAY_INTERVAL * 24;
+  static const int64_t MAX_MINUTE_INTERVAL = MAX_HOUR_INTERVAL * 60;
+  static const int64_t MAX_SEC_INTERVAL = MAX_MINUTE_INTERVAL * 60;
+  static const int64_t MAX_MILLI_INTERVAL = MAX_SEC_INTERVAL * 1000;
+  static const int64_t MAX_MICRO_INTERVAL = MAX_MILLI_INTERVAL * 1000;
 
   /// Parse and initialize format string if it is a constant. Raise error if invalid.
   static void UnixAndFromUnixPrepare(FunctionContext* context,
@@ -74,8 +75,8 @@ class TimestampFunctions {
   static StringVal FromTimestamp(FunctionContext* context, const TimestampVal& date,
       const StringVal& fmt);
 
-  static StringVal StringValFromTimestamp(FunctionContext* context, TimestampValue tv,
-      const StringVal& fmt);
+  static StringVal StringValFromTimestamp(FunctionContext* context,
+      const TimestampValue& tv, const StringVal& fmt);
   static BigIntVal UnixFromString(FunctionContext* context, const StringVal& sv);
 
   /// Return a timestamp string from a unix time_t
@@ -106,14 +107,15 @@ class TimestampFunctions {
   static IntVal Hour(FunctionContext* context, const TimestampVal& ts_val);
   static IntVal Minute(FunctionContext* context, const TimestampVal& ts_val);
   static IntVal Second(FunctionContext* context, const TimestampVal& ts_val);
+  static IntVal Millisecond(FunctionContext* context, const TimestampVal& ts_val);
 
   /// Date/time functions.
   static TimestampVal Now(FunctionContext* context);
   static StringVal ToDate(FunctionContext* context, const TimestampVal& ts_val);
   static IntVal DateDiff(FunctionContext* context, const TimestampVal& ts_val1,
       const TimestampVal& ts_val2);
-  static string ShortDayName(FunctionContext* context, const TimestampVal& ts);
-  static string ShortMonthName(FunctionContext* context, const TimestampVal& ts);
+  static std::string ShortDayName(FunctionContext* context, const TimestampVal& ts);
+  static std::string ShortMonthName(FunctionContext* context, const TimestampVal& ts);
 
   /// Return verbose string version of current time of day
   /// e.g. Mon Dec 01 16:25:05 2003 EST.
@@ -144,6 +146,17 @@ class TimestampFunctions {
   /// Otherwise result includes a fractional portion based on 31 day month.
   static DoubleVal MonthsBetween(FunctionContext* context,
       const TimestampVal& ts_val1, const TimestampVal& ts_val2);
+
+  /// Return the date of the weekday that follows a particular date.
+  /// The 'weekday' argument is a string literal indicating the day of the week.
+  /// Also this argument is case-insensitive. Available values are:
+  /// "Sunday"/"SUN", "Monday"/"MON", "Tuesday"/"TUE",
+  /// "Wednesday"/"WED", "Thursday"/"THU", "Friday"/"FRI", "Saturday"/"SAT".
+  /// For example, the first Saturday after Wednesday, 25 December 2013
+  /// is on 28 December 2013.
+  /// select next_day('2013-12-25','Saturday') returns '2013-12-28'
+  static TimestampVal NextDay(FunctionContext* context, const TimestampVal& date,
+      const StringVal& weekday);
 
   /// Add/sub functions on the timestamp. This handles three forms of adding/subtracting
   /// intervals to/from timestamps:
@@ -185,27 +198,10 @@ class TimestampFunctions {
   static const char* FRIDAY;
   static const char* SATURDAY;
   static const char* SUNDAY;
-};
 
-/// Functions to load and access the timestamp database.
-class TimezoneDatabase {
- public:
-   TimezoneDatabase();
-   ~TimezoneDatabase();
-
-  /// Converts the name of a timezone to a boost timezone object.
-  /// Some countries change their timezones, the tiemstamp is required to correctly
-  /// determine the timezone information.
-  static boost::local_time::time_zone_ptr FindTimezone(const std::string& tz,
-      const TimestampValue& tv);
-
-  /// Moscow Timezone No Daylight Savings Time (GMT+4), for use after March 2011
-  static const boost::local_time::time_zone_ptr TIMEZONE_MSK_PRE_2011_DST;
-
- private:
-  static const char* TIMEZONE_DATABASE_STR;
-  static boost::local_time::tz_database tz_database_;
-  static std::vector<std::string> tz_region_list_;
+  /// Static result values for ShortDayName() and ShortMonthName() functions.
+  static const std::string DAY_ARRAY[7];
+  static const std::string MONTH_ARRAY[12];
 };
 
 } // namespace impala

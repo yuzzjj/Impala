@@ -1,25 +1,30 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 namespace cpp impala
-namespace java com.cloudera.impala.thrift
+namespace java org.apache.impala.thrift
 
 typedef i64 TTimestamp
+typedef i32 TFragmentIdx
 typedef i32 TPlanNodeId
 typedef i32 TTupleId
 typedef i32 TSlotId
 typedef i32 TTableId
+typedef i32 TJoinTableId
 
 // TODO: Consider moving unrelated enums to better locations.
 
@@ -119,6 +124,14 @@ enum TRuntimeFilterMode {
   GLOBAL
 }
 
+enum TPrefetchMode {
+  // No prefetching at all.
+  NONE,
+
+  // Prefetch the hash table buckets.
+  HT_BUCKET
+}
+
 // A TNetworkAddress is the standard host, port representation of a
 // network address. The hostname field must be resolvable to an IPv4
 // address.
@@ -214,5 +227,5 @@ struct TFunction {
   10: optional TAggregateFunction aggregate_fn
 
   // True for builtins or user-defined functions persisted by the catalog
-  11: required bool is_persistent
+  11: optional bool is_persistent
 }

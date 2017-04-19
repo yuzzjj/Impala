@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <string>
 #include <boost/asio.hpp>
@@ -27,6 +30,7 @@ DECLARE_string(webserver_password_file);
 DECLARE_string(webserver_certificate_file);
 DECLARE_string(webserver_private_key_file);
 DECLARE_string(webserver_private_key_password_cmd);
+DECLARE_string(webserver_x_frame_options);
 
 #include "common/names.h"
 
@@ -288,22 +292,38 @@ TEST(Webserver, DirectoryListingDisabledTest) {
 }
 
 void FrameCallback(const Webserver::ArgumentMap& args, Document* document) {
-  const string& contents = "<frameset cols='50%,50%'><frame src='/metrics'></frameset>";
-  document->AddMember("contents", contents.c_str(), document->GetAllocator());
+  const string contents = "<frameset cols='50%,50%'><frame src='/metrics'></frameset>";
+  Value value(contents.c_str(), document->GetAllocator());
+  document->AddMember("contents", value, document->GetAllocator());
 }
 
 TEST(Webserver, NoFrameEmbeddingTest) {
   const string FRAME_TEST_PATH = "/frames_test";
   Webserver webserver(FLAGS_webserver_port);
   Webserver::UrlCallback callback = bind<void>(FrameCallback, _1, _2);
-  webserver.RegisterUrlCallback(FRAME_TEST_PATH, "raw-text.tmpl", callback);
+  webserver.RegisterUrlCallback(FRAME_TEST_PATH, "raw_text.tmpl", callback);
   ASSERT_OK(webserver.Start());
   stringstream contents;
   ASSERT_OK(HttpGet("localhost", FLAGS_webserver_port,
       FRAME_TEST_PATH, &contents, 200));
 
-  // Confirm that the embedded frame isn't rendered
-  ASSERT_TRUE(contents.str().find("Metrics") == string::npos);
+  // Confirm that there is an HTTP header to deny framing
+  ASSERT_FALSE(contents.str().find("X-Frame-Options: DENY") == string::npos);
+}
+TEST(Webserver, FrameAllowEmbeddingTest) {
+  const string FRAME_TEST_PATH = "/frames_test";
+  ScopedFlagSetter<string> webserver_x_frame_options(&FLAGS_webserver_x_frame_options,
+      "ALLOWALL");
+  Webserver webserver(FLAGS_webserver_port);
+  Webserver::UrlCallback callback = bind<void>(FrameCallback, _1, _2);
+  webserver.RegisterUrlCallback(FRAME_TEST_PATH, "raw_text.tmpl", callback);
+  ASSERT_OK(webserver.Start());
+  stringstream contents;
+  ASSERT_OK(HttpGet("localhost", FLAGS_webserver_port,
+      FRAME_TEST_PATH, &contents, 200));
+
+  // Confirm that there is an HTTP header to allow framing
+  ASSERT_FALSE(contents.str().find("X-Frame-Options: ALLOWALL") == string::npos);
 }
 
 const string STRING_WITH_NULL = "123456789\0ABCDE";
@@ -325,8 +345,8 @@ TEST(Webserver, NullCharTest) {
 
 
 int main(int argc, char **argv) {
-  InitCommonRuntime(argc, argv, false, TestInfo::BE_TEST);
   ::testing::InitGoogleTest(&argc, argv);
+  InitCommonRuntime(argc, argv, false, TestInfo::BE_TEST);
   FLAGS_webserver_port = 27890;
   return RUN_ALL_TESTS();
 }

@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "rpc/authentication.h"
 
@@ -23,6 +26,7 @@
 #include <boost/random/uniform_int.hpp>
 #include <boost/filesystem.hpp>
 #include <gutil/strings/substitute.h>
+#include <random>
 #include <string>
 #include <vector>
 #include <thrift/Thrift.h>
@@ -32,6 +36,7 @@
 
 #include <ldap.h>
 
+#include "exec/kudu-util.h"
 #include "rpc/auth-provider.h"
 #include "rpc/thrift-server.h"
 #include "transport/TSaslClientTransport.h"
@@ -52,6 +57,7 @@
 using boost::algorithm::is_any_of;
 using boost::algorithm::replace_all;
 using boost::algorithm::split;
+using boost::algorithm::trim;
 using boost::mt19937;
 using boost::uniform_int;
 using namespace apache::thrift;
@@ -90,6 +96,10 @@ DEFINE_string(ldap_bind_pattern, "", "If set, Impala will try to bind to LDAP wi
      " of <ldap_bind_pattern>, but where the string #UID is replaced by the user ID. Use"
      " to control the bind name precisely; do not set --ldap_domain or --ldap_baseDN with"
      " this option");
+DEFINE_string(internal_principals_whitelist, "hdfs", "(Advanced) Comma-separated list of "
+    " additional usernames authorized to access Impala's internal APIs. Defaults to "
+    "'hdfs' which is the system user that in certain deployments must access "
+    "catalog server APIs.");
 
 namespace impala {
 
@@ -124,7 +134,6 @@ static const string LDAPS_URI_PREFIX = "ldaps://";
 // to log messages about the start of authentication. This is that plugin's name.
 static const string IMPALA_AUXPROP_PLUGIN = "impala-auxprop";
 
-bool SaslAuthProvider::env_setup_complete_ = false;
 AuthManager* AuthManager::auth_manager_ = new AuthManager();
 
 // This Sasl callback is called when the underlying cyrus-sasl layer has
@@ -368,12 +377,11 @@ static int SaslVerifyFile(void* context, const char* file,
   return SASL_OK;
 }
 
-// This callback could be used to authorize or restrict access to certain
-// users.  Currently it is used to log a message that we successfully
-// authenticated with a user on an internal connection.
+// Authorizes authenticated users on an internal connection after validating that the
+// first components of the 'requested_user' and our principal are the same.
 //
 // conn: Sasl connection - Ignored
-// context: Ignored, always NULL
+// context: Always NULL except for testing.
 // requested_user: The identity/username to authorize
 // rlen: Length of above
 // auth_identity: "The identity associated with the secret"
@@ -382,16 +390,51 @@ static int SaslVerifyFile(void* context, const char* file,
 // urlen: Length of above
 // propctx: Auxiliary properties - Ignored
 // Return: SASL_OK
-static int SaslAuthorizeInternal(sasl_conn_t* conn, void* context,
+int SaslAuthorizeInternal(sasl_conn_t* conn, void* context,
     const char* requested_user, unsigned rlen,
     const char* auth_identity, unsigned alen,
     const char* def_realm, unsigned urlen,
     struct propctx* propctx) {
-  // We say "principal" here becase this is for internal communication, and hence
-  // ought always be --principal or --be_principal
-  VLOG(1) << "Successfully authenticated principal \"" << string(requested_user, rlen)
-          << "\" on an internal connection";
-  return SASL_OK;
+  string requested_principal(requested_user, rlen);
+  vector<string> names;
+  split(names, requested_principal, is_any_of("/@"));
+
+  if (names.size() != 3) {
+    LOG(INFO) << "Kerberos principal should be of the form: "
+              << "<service>/<hostname>@<realm> - got: " << requested_user;
+    return SASL_BADAUTH;
+  }
+  SaslAuthProvider* internal_auth_provider;
+  if (context == NULL) {
+    internal_auth_provider = static_cast<SaslAuthProvider*>(
+        AuthManager::GetInstance()->GetInternalAuthProvider());
+  } else {
+    // Branch should only be taken for testing, where context is used to inject an auth
+    // provider.
+    internal_auth_provider = static_cast<SaslAuthProvider*>(context);
+  }
+
+  vector<string> whitelist;
+  split(whitelist, FLAGS_internal_principals_whitelist, is_any_of(","));
+  whitelist.push_back(internal_auth_provider->service_name());
+  for (string& s: whitelist) {
+    trim(s);
+    if (s.empty()) continue;
+    if (names[0] == s) {
+      // We say "principal" here becase this is for internal communication, and hence
+      // ought always be --principal or --be_principal
+      VLOG(1) << "Successfully authenticated principal \"" << requested_principal
+              << "\" on an internal connection";
+      return SASL_OK;
+    }
+  }
+  string expected_names = FLAGS_internal_principals_whitelist.empty() ? "" :
+      Substitute(" or one of $0", FLAGS_internal_principals_whitelist);
+  LOG(INFO) << "Principal \"" << requested_principal << "\" not authenticated. "
+            << "Reason: 'service' does not match from <service>/<hostname>@<realm>.\n"
+            << "Got: " << names[0]
+            << ". Expected: " << internal_auth_provider->service_name() << expected_names;
+  return SASL_BADAUTH;
 }
 
 // This callback could be used to authorize or restrict access to certain
@@ -447,6 +490,10 @@ void SaslAuthProvider::RunKinit(Promise<Status>* first_kinit) {
       keytab_file_, principal_);
 
   bool first_time = true;
+  std::random_device rd;
+  mt19937 generator(rd());
+  uniform_int<> dist(0, 300);
+
   while (true) {
     LOG(INFO) << "Registering " << principal_ << ", keytab file " << keytab_file_;
     string kinit_output;
@@ -470,11 +517,35 @@ void SaslAuthProvider::RunKinit(Promise<Status>* first_kinit) {
     // Sleep for the renewal interval, minus a random time between 0-5 minutes to help
     // avoid a storm at the KDC. Additionally, never sleep less than a minute to
     // reduce KDC stress due to frequent renewals.
-    mt19937 generator;
-    uniform_int<> dist(0, 300);
     SleepForMs(1000 * max((60 * FLAGS_kerberos_reinit_interval) - dist(generator), 60));
   }
 }
+
+namespace {
+
+// SASL requires mutexes for thread safety, but doesn't implement
+// them itself. So, we have to hook them up to our mutex implementation.
+static void* SaslMutexAlloc() {
+  return static_cast<void*>(new mutex());
+}
+static void SaslMutexFree(void* m) {
+  delete static_cast<mutex*>(m);
+}
+static int SaslMutexLock(void* m) {
+  static_cast<mutex*>(m)->lock();
+  return 0; // indicates success.
+}
+static int SaslMutexUnlock(void* m) {
+  static_cast<mutex*>(m)->unlock();
+  return 0; // indicates success.
+}
+
+void SaslSetMutex() {
+  sasl_set_mutex(&SaslMutexAlloc, &SaslMutexLock, &SaslMutexUnlock, &SaslMutexFree);
+}
+
+}
+
 
 Status InitAuth(const string& appname) {
   // We only set up Sasl things if we are indeed going to be using Sasl.
@@ -556,6 +627,7 @@ Status InitAuth(const string& appname) {
       LDAP_EXT_CALLBACKS[3].id = SASL_CB_LIST_END;
     }
 
+    SaslSetMutex();
     try {
       // We assume all impala processes are both server and client.
       sasl::TSaslServer::SaslInit(GENERAL_CALLBACKS, appname);
@@ -566,6 +638,15 @@ Status InitAuth(const string& appname) {
       return Status(err_msg.str());
     }
 
+    // Kudu client shouldn't attempt to initialize SASL which would conflict with
+    // Impala's SASL initialization. This must be called before any KuduClients are
+    // created to ensure that Kudu doesn't init SASL first, and this returns an error if
+    // Kudu has already initialized SASL.
+    if (KuduIsAvailable()) {
+      KUDU_RETURN_IF_ERROR(kudu::client::DisableSaslInitialization(),
+          "Unable to disable Kudu SASL initialization.");
+    }
+
     // Add our auxprop plugin, which gives us a hook before authentication
     int rc = sasl_auxprop_add_plugin(IMPALA_AUXPROP_PLUGIN.c_str(), &ImpalaAuxpropInit);
     if (rc != SASL_OK) {
@@ -574,7 +655,14 @@ Status InitAuth(const string& appname) {
     }
   }
 
+  // Initializes OpenSSL.
   RETURN_IF_ERROR(AuthManager::GetInstance()->Init());
+
+  // Prevent Kudu from re-initializing OpenSSL.
+  if (KuduIsAvailable()) {
+    KUDU_RETURN_IF_ERROR(kudu::client::DisableOpenSSLInitialization(),
+        "Unable to disable Kudu SSL initialization.");
+  }
   return Status::OK();
 }
 
@@ -631,9 +719,6 @@ Status SaslAuthProvider::InitKerberos(const string& principal,
   hostname_ = names[1];
   realm_ = names[2];
 
-  RETURN_IF_ERROR(CheckReplayCacheDirPermissions());
-  RETURN_IF_ERROR(InitKerberosEnv());
-
   LOG(INFO) << "Using " << (is_internal_ ? "internal" : "external")
             << " kerberos principal \"" << service_name_ << "/"
             << hostname_ << "@" << realm_ << "\"";
@@ -674,20 +759,19 @@ static Status EnvAppend(const string& attr, const string& thing, const string& t
   return Status::OK();
 }
 
-Status SaslAuthProvider::InitKerberosEnv() {
-  DCHECK(!principal_.empty());
+Status AuthManager::InitKerberosEnv() {
+  DCHECK(!FLAGS_principal.empty());
 
-  // Called only during setup; no locking required.
-  if (env_setup_complete_) return Status::OK();
+  RETURN_IF_ERROR(CheckReplayCacheDirPermissions());
 
-  if (!is_regular(keytab_file_)) {
+  if (!is_regular(FLAGS_keytab_file)) {
     return Status(Substitute("Bad --keytab_file value: The file $0 is not a "
-        "regular file", keytab_file_));
+        "regular file", FLAGS_keytab_file));
   }
 
   // Set the keytab name in the environment so that Sasl Kerberos and kinit can
   // find and use it.
-  if (setenv("KRB5_KTNAME", keytab_file_.c_str(), 1)) {
+  if (setenv("KRB5_KTNAME", FLAGS_keytab_file.c_str(), 1)) {
     return Status(Substitute("Kerberos could not set KRB5_KTNAME: $0",
         GetStrErrMsg()));
   }
@@ -740,7 +824,6 @@ Status SaslAuthProvider::InitKerberosEnv() {
     }
   }
 
-  env_setup_complete_ = true;
   return Status::OK();
 }
 
@@ -789,7 +872,7 @@ Status SaslAuthProvider::Start() {
 }
 
 Status SaslAuthProvider::GetServerTransportFactory(
-    shared_ptr<TTransportFactory>* factory) {
+    boost::shared_ptr<TTransportFactory>* factory) {
   DCHECK(!principal_.empty() || has_ldap_);
 
   // This is the heart of the link between this file and thrift.  Here we
@@ -827,10 +910,10 @@ Status SaslAuthProvider::GetServerTransportFactory(
 }
 
 Status SaslAuthProvider::WrapClientTransport(const string& hostname,
-    shared_ptr<TTransport> raw_transport, const string& service_name,
-    shared_ptr<TTransport>* wrapped_transport) {
+    boost::shared_ptr<TTransport> raw_transport, const string& service_name,
+    boost::shared_ptr<TTransport>* wrapped_transport) {
 
-  shared_ptr<sasl::TSasl> sasl_client;
+  boost::shared_ptr<sasl::TSasl> sasl_client;
   const map<string, string> props; // Empty; unused by thrift
   const string auth_id; // Empty; unused by thrift
 
@@ -857,21 +940,24 @@ Status SaslAuthProvider::WrapClientTransport(const string& hostname,
   return Status::OK();
 }
 
-Status NoAuthProvider::GetServerTransportFactory(shared_ptr<TTransportFactory>* factory) {
+Status NoAuthProvider::GetServerTransportFactory(
+    boost::shared_ptr<TTransportFactory>* factory) {
   // No Sasl - yawn.  Here, have a regular old buffered transport.
   factory->reset(new ThriftServer::BufferedTransportFactory());
   return Status::OK();
 }
 
 Status NoAuthProvider::WrapClientTransport(const string& hostname,
-    shared_ptr<TTransport> raw_transport, const string& dummy_service,
-    shared_ptr<TTransport>* wrapped_transport) {
+    boost::shared_ptr<TTransport> raw_transport, const string& dummy_service,
+    boost::shared_ptr<TTransport>* wrapped_transport) {
   // No Sasl - yawn.  Don't do any transport wrapping for clients.
   *wrapped_transport = raw_transport;
   return Status::OK();
 }
 
 Status AuthManager::Init() {
+  ssl_socket_factory_.reset(new TSSLSocketFactory());
+
   bool use_ldap = false;
   const string excl_msg = "--$0 and --$1 are mutually exclusive "
       "and should not be set together";
@@ -946,8 +1032,8 @@ Status AuthManager::Init() {
     } else {
       kerberos_internal_principal = FLAGS_be_principal;
     }
+    RETURN_IF_ERROR(InitKerberosEnv());
   }
-
   // This is written from the perspective of the daemons - thus "internal"
   // means "I am used for communication with other daemons, both as a client
   // and as a server".  "External" means that "I am used when being a server

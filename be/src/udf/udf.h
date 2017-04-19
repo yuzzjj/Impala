@@ -1,24 +1,38 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UDF_UDF_H
 #define IMPALA_UDF_UDF_H
 
+// THIS FILE IS USED BY THE STANDALONE IMPALA UDF DEVELOPMENT KIT.
+// IT MUST BE BUILDABLE WITH C++98 AND WITHOUT ANY INTERNAL IMPALA HEADERS.
+
 #include <assert.h>
 #include <boost/cstdint.hpp>
 #include <string.h>
+
+// Only use noexcept if the compiler supports C++11 (some system compilers may not
+// or may have it disabled by default).
+#if __cplusplus >= 201103L
+#define NOEXCEPT noexcept
+#else
+#define NOEXCEPT
+#endif
 
 /// This is the only Impala header required to develop UDFs and UDAs. This header
 /// contains the types that need to be used and the FunctionContext object. The context
@@ -140,7 +154,8 @@ class FunctionContext {
   /// The UDF/UDA is responsible for calling Free() on all buffers returned by Allocate().
   /// If Allocate() fails or causes the memory limit to be exceeded, the error will be
   /// set in this object causing the query to fail.
-  uint8_t* Allocate(int byte_size);
+  /// TODO: 'byte_size' should be 64-bit. See IMPALA-2756.
+  uint8_t* Allocate(int byte_size) NOEXCEPT;
 
   /// Wrapper around Allocate() to allocate a buffer of the given type "T".
   template<typename T>
@@ -155,10 +170,11 @@ class FunctionContext {
   /// memory limit to be exceeded, the error will be set in this object.
   ///
   /// This should be used for buffers that constantly get appended to.
-  uint8_t* Reallocate(uint8_t* ptr, int byte_size);
+  /// TODO: 'byte_size' should be 64-bit. See IMPALA-2756.
+  uint8_t* Reallocate(uint8_t* ptr, int byte_size) NOEXCEPT;
 
   /// Frees a buffer returned from Allocate() or Reallocate()
-  void Free(uint8_t* buffer);
+  void Free(uint8_t* buffer) NOEXCEPT;
 
   /// For allocations that cannot use the Allocate() API provided by this
   /// object, TrackAllocation()/Free() can be used to just keep count of the
@@ -184,21 +200,25 @@ class FunctionContext {
   const TypeDesc& GetIntermediateType() const;
 
   /// Returns the number of arguments to this function (not including the FunctionContext*
-  /// argument).
+  /// argument or the output of a UDA).
+  /// For UDAs, returns the number of logical arguments of the aggregate function, not
+  /// the number of arguments of the C++ function being executed.
   int GetNumArgs() const;
 
   /// Returns the type information for the arg_idx-th argument (0-indexed, not including
   /// the FunctionContext* argument). Returns NULL if arg_idx is invalid.
+  /// For UDAs, returns the logical argument types of the aggregate function, not the
+  /// argument types of the C++ function being executed.
   const TypeDesc* GetArgType(int arg_idx) const;
 
-  /// Returns true if the arg_idx-th input argument (0 indexed, not including the
-  /// FunctionContext* argument) is a constant (e.g. 5, "string", 1 + 1).
+  /// Returns true if the arg_idx-th input argument (indexed in the same way as
+  /// GetArgType()) is a constant (e.g. 5, "string", 1 + 1).
   bool IsArgConstant(int arg_idx) const;
 
-  /// Returns a pointer to the value of the arg_idx-th input argument (0 indexed, not
-  /// including the FunctionContext* argument). Returns NULL if the argument is not
-  /// constant. This function can be used to obtain user-specified constants in a UDF's
-  /// Init() or Close() functions.
+  /// Returns a pointer to the value of the arg_idx-th input argument (indexed in the
+  /// same way as GetArgType()). Returns NULL if the argument is not constant. This
+  /// function can be used to obtain user-specified constants in a UDF's Init() or
+  /// Close() functions.
   AnyVal* GetConstantArg(int arg_idx) const;
 
   /// TODO: Do we need to add arbitrary key/value metadata. This would be plumbed
@@ -211,7 +231,7 @@ class FunctionContext {
 
   /// Returns the underlying opaque implementation object. The UDF/UDA should not
   /// use this. This is used internally.
-  impala::FunctionContextImpl* impl() { return impl_; }
+  impala::FunctionContextImpl* impl() const { return impl_; }
 
   ~FunctionContext();
 
@@ -384,6 +404,9 @@ typedef ResultType (*UdaFinalize)(FunctionContext* context, const IntermediateTy
 //-------------Implementation of the *Val structs ----------------------------
 //----------------------------------------------------------------------------
 struct AnyVal {
+  // Whether this value is NULL. If true, all other fields contain arbitrary values.
+  // UDF code should *not* assume that other fields of a NULL *Val struct have any
+  // particular value (e.g. 0 or -1).
   bool is_null;
   AnyVal(bool is_null = false) : is_null(is_null) {}
 };
@@ -408,9 +431,10 @@ struct BooleanVal : public AnyVal {
 };
 
 struct TinyIntVal : public AnyVal {
-  int8_t val;
+  typedef int8_t underlying_type_t;
+  underlying_type_t val;
 
-  TinyIntVal(int8_t val = 0) : val(val) { }
+  TinyIntVal(underlying_type_t val = 0) : val(val) { }
 
   static TinyIntVal null() {
     TinyIntVal result;
@@ -427,9 +451,10 @@ struct TinyIntVal : public AnyVal {
 };
 
 struct SmallIntVal : public AnyVal {
-  int16_t val;
+  typedef int16_t underlying_type_t;
+  underlying_type_t val;
 
-  SmallIntVal(int16_t val = 0) : val(val) { }
+  SmallIntVal(underlying_type_t val = 0) : val(val) { }
 
   static SmallIntVal null() {
     SmallIntVal result;
@@ -446,9 +471,10 @@ struct SmallIntVal : public AnyVal {
 };
 
 struct IntVal : public AnyVal {
-  int32_t val;
+  typedef int32_t underlying_type_t;
+  underlying_type_t val;
 
-  IntVal(int32_t val = 0) : val(val) { }
+  IntVal(underlying_type_t val = 0) : val(val) { }
 
   static IntVal null() {
     IntVal result;
@@ -465,9 +491,10 @@ struct IntVal : public AnyVal {
 };
 
 struct BigIntVal : public AnyVal {
-  int64_t val;
+  typedef int64_t underlying_type_t;
+  underlying_type_t val;
 
-  BigIntVal(int64_t val = 0) : val(val) { }
+  BigIntVal(underlying_type_t val = 0) : val(val) { }
 
   static BigIntVal null() {
     BigIntVal result;
@@ -548,7 +575,9 @@ struct TimestampVal : public AnyVal {
 /// empty string (len == 0).
 struct StringVal : public AnyVal {
 
-  static const int MAX_LENGTH = (1 << 30);
+  // It's important to keep this as unsigned to avoid comparing with negative number
+  // in case of overflow.
+  static const unsigned MAX_LENGTH = (1 << 30);
 
   int len;
   uint8_t* ptr;
@@ -558,7 +587,7 @@ struct StringVal : public AnyVal {
   StringVal(uint8_t* ptr = NULL, int len = 0) : len(len), ptr(ptr) {
     assert(len >= 0);
     if (ptr == NULL) assert(len == 0);
-  };
+  }
 
   /// Construct a StringVal from NULL-terminated c-string. Note: this does not make a
   /// copy of ptr so the underlying string must exist as long as this StringVal does.
@@ -571,7 +600,21 @@ struct StringVal : public AnyVal {
   /// If the memory allocation fails, e.g. because the intermediate value would be too
   /// large, the constructor will construct a NULL string and set an error on the function
   /// context.
-  StringVal(FunctionContext* context, int len);
+  ///
+  /// The memory backing this StringVal is a local allocation, and so doesn't need
+  /// to be explicitly freed.
+  StringVal(FunctionContext* context, int len) NOEXCEPT;
+
+  /// Reallocate a StringVal that is backed by a local allocation so that it as
+  /// at least as large as len.  May shrink or / expand the string.  If the
+  /// string is expanded, the content of the new space is undefined.
+  ///
+  /// If the resize fails, the original StringVal remains in place.  Callers do not
+  /// otherwise need to be concerned with backing storage, which is allocated from a
+  /// local allocation.
+  ///
+  /// Returns true on success, false on failure.
+  bool Resize(FunctionContext* context, int len) NOEXCEPT;
 
   /// Will create a new StringVal with the given dimension and copy the data from the
   /// parameters. In case of an error will return a NULL string and set an error on the
@@ -580,7 +623,8 @@ struct StringVal : public AnyVal {
   /// Note that the memory for the buffer of the new StringVal is managed by Impala.
   /// Impala will handle freeing it. Callers should not call Free() on the 'ptr' of
   /// the StringVal returned.
-  static StringVal CopyFrom(FunctionContext* ctx, const uint8_t* buf, size_t len);
+  static StringVal CopyFrom(FunctionContext* ctx, const uint8_t* buf, size_t len)
+      NOEXCEPT;
 
   static StringVal null() {
     StringVal sv;
@@ -599,17 +643,18 @@ struct StringVal : public AnyVal {
 
 struct DecimalVal : public impala_udf::AnyVal {
   /// Decimal data is stored as an unscaled integer value. For example, the decimal 1.00
-  /// (precison 3, scale 2) is stored as 100. The byte size necessary to store the decimal
-  /// depends on the precision, which determines which field of the union should be used to
-  /// store and manipulate the unscaled value.
-  //
+  /// (precision 3, scale 2) is stored as 100. The byte size necessary to store the
+  /// decimal depends on the precision, which determines which field of the union should
+  /// be used to store and manipulate the unscaled value.
+  ///
   ///   precision between 0-9:   val4  (4 bytes)
   ///   precision between 10-18: val8  (8 bytes)
   ///   precision between 19-38: val16 (16 bytes)
-  //
+  ///
   /// While it is always safe to use a larger field than necessary, it may result in worse
-  /// performance. For example, a UDF that only uses val16 can handle any precision but may
-  /// be slower than one that uses val4 or val8.
+  /// performance. For example, a UDF that only uses val16 can handle any precision but
+  /// may be slower than one that uses val4 or val8. This is because the least-significant
+  /// bits of all three union fields are the same (assuming a little-endian architecture).
   union {
     int32_t val4;
     int64_t val8;

@@ -1,26 +1,30 @@
-// Copyright 2014 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "service/query-options.h"
 
+#include "runtime/runtime-filter.h"
 #include "util/debug-util.h"
 #include "util/mem-info.h"
 #include "util/parse-util.h"
+#include "util/string-parser.h"
 #include "gen-cpp/ImpalaInternalService_types.h"
 
 #include <sstream>
-#include <boost/foreach.hpp>
 #include <boost/algorithm/string.hpp>
 #include <gutil/strings/substitute.h>
 
@@ -31,6 +35,7 @@ using boost::algorithm::is_any_of;
 using boost::algorithm::token_compress_on;
 using boost::algorithm::split;
 using boost::algorithm::trim;
+using std::to_string;
 using namespace impala;
 using namespace strings;
 
@@ -98,11 +103,14 @@ int GetQueryOptionForKey(const string& key) {
   return -1;
 }
 
+// Note that we allow numerical values for boolean and enum options. This is because
+// TQueryOptionsToMap() will output the numerical values, and we need to parse its output
+// configuration.
 Status impala::SetQueryOption(const string& key, const string& value,
     TQueryOptions* query_options, QueryOptionsMask* set_query_options_mask) {
   int option = GetQueryOptionForKey(key);
   if (option < 0) {
-    return Status(Substitute("Ignoring invalid configuration option: $0", key));
+    return Status(Substitute("Invalid query option: $0", key));
   } else {
     switch (option) {
       case TImpalaQueryOptions::ABORT_ON_ERROR:
@@ -129,9 +137,12 @@ Status impala::SetQueryOption(const string& key, const string& value,
       case TImpalaQueryOptions::NUM_NODES:
         query_options->__set_num_nodes(atoi(value.c_str()));
         break;
-      case TImpalaQueryOptions::MAX_SCAN_RANGE_LENGTH:
-        query_options->__set_max_scan_range_length(atol(value.c_str()));
+      case TImpalaQueryOptions::MAX_SCAN_RANGE_LENGTH: {
+        int64_t scan_length = 0;
+        RETURN_IF_ERROR(ParseMemValue(value, "scan range length", &scan_length));
+        query_options->__set_max_scan_range_length(scan_length);
         break;
+      }
       case TImpalaQueryOptions::MAX_IO_BUFFERS:
         query_options->__set_max_io_buffers(atoi(value.c_str()));
         break;
@@ -234,14 +245,6 @@ Status impala::SetQueryOption(const string& key, const string& value,
         break;
       case TImpalaQueryOptions::DISABLE_CACHED_READS:
         if (iequals(value, "true") || iequals(value, "1")) {
-          if (query_options->replica_preference == TReplicaPreference::CACHE_LOCAL ||
-              query_options->replica_preference == TReplicaPreference::CACHE_RACK) {
-            stringstream ss;
-            ss << "Conflicting settings: DISABLE_CACHED_READS = true and"
-               << " REPLICA_PREFERENCE = " << _TReplicaPreference_VALUES_TO_NAMES.at(
-                query_options->replica_preference);
-            return Status(ss.str());
-          }
           query_options->__set_disable_cached_reads(true);
         }
         break;
@@ -278,7 +281,9 @@ Status impala::SetQueryOption(const string& key, const string& value,
         query_options->__set_exec_single_node_rows_threshold(atoi(value.c_str()));
         break;
       case TImpalaQueryOptions::OPTIMIZE_PARTITION_KEY_SCANS:
-        query_options->__set_optimize_partition_key_scans(atoi(value.c_str()));
+        query_options->__set_optimize_partition_key_scans(
+            iequals(value, "true") || iequals(value, "1"));
+        break;
       case TImpalaQueryOptions::REPLICA_PREFERENCE:
         if (iequals(value, "cache_local") || iequals(value, "0")) {
           if (query_options->disable_cached_reads) {
@@ -286,32 +291,26 @@ Status impala::SetQueryOption(const string& key, const string& value,
                 " REPLICA_PREFERENCE = CACHE_LOCAL");
           }
           query_options->__set_replica_preference(TReplicaPreference::CACHE_LOCAL);
-        } else if (iequals(value, "cache_rack") || iequals(value, "1")) {
-          if (query_options->disable_cached_reads)
-            return Status("Conflicting settings: DISABLE_CACHED_READS = true and"
-                " REPLICA_PREFERENCE = CACHE_RACK");
-          query_options->__set_replica_preference(TReplicaPreference::CACHE_RACK);
         } else if (iequals(value, "disk_local") || iequals(value, "2")) {
           query_options->__set_replica_preference(TReplicaPreference::DISK_LOCAL);
-        } else if (iequals(value, "disk_rack") || iequals(value, "3")) {
-          query_options->__set_replica_preference(TReplicaPreference::DISK_RACK);
         } else if (iequals(value, "remote") || iequals(value, "4")) {
           query_options->__set_replica_preference(TReplicaPreference::REMOTE);
         } else {
-          return Status(Substitute("Invalid replica memory distance policy '$0'. Valid"
-              " values are CACHE_LOCAL(0), CACHE_RACK(1), DISK_LOCAL(2), DISK_RACK(3),"
-              " REMOTE(4)",
-              value));
+          return Status(Substitute("Invalid replica memory distance preference '$0'."
+              "Valid values are CACHE_LOCAL(0), DISK_LOCAL(2), REMOTE(4)", value));
         }
         break;
-      case TImpalaQueryOptions::RANDOM_REPLICA:
-        query_options->__set_random_replica(
+      case TImpalaQueryOptions::SCHEDULE_RANDOM_REPLICA:
+        query_options->__set_schedule_random_replica(
             iequals(value, "true") || iequals(value, "1"));
         break;
+      // TODO: remove this query option (IMPALA-4319).
       case TImpalaQueryOptions::SCAN_NODE_CODEGEN_THRESHOLD:
         query_options->__set_scan_node_codegen_threshold(atol(value.c_str()));
+        break;
       case TImpalaQueryOptions::DISABLE_STREAMING_PREAGGREGATIONS:
-        query_options->__set_disable_streaming_preaggregations(atoi(value.c_str()));
+        query_options->__set_disable_streaming_preaggregations(
+            iequals(value, "true") || iequals(value, "1"));
         break;
       case TImpalaQueryOptions::RUNTIME_FILTER_MODE:
         if (iequals(value, "off") || iequals(value, "0")) {
@@ -325,13 +324,37 @@ Status impala::SetQueryOption(const string& key, const string& value,
               " OFF(0), LOCAL(1) or GLOBAL(2).", value));
         }
         break;
+      case TImpalaQueryOptions::RUNTIME_FILTER_MAX_SIZE:
+      case TImpalaQueryOptions::RUNTIME_FILTER_MIN_SIZE:
       case TImpalaQueryOptions::RUNTIME_BLOOM_FILTER_SIZE: {
-          int32 size = atoi(value.c_str());
-          query_options->__set_runtime_bloom_filter_size(size);
-          break;
+        int64_t size;
+        RETURN_IF_ERROR(ParseMemValue(value, "Bloom filter size", &size));
+        if (size < RuntimeFilterBank::MIN_BLOOM_FILTER_SIZE ||
+            size > RuntimeFilterBank::MAX_BLOOM_FILTER_SIZE) {
+          return Status(Substitute("$0 is not a valid Bloom filter size for $1. "
+                  "Valid sizes are in [$2, $3].", value, PrintTImpalaQueryOptions(
+                      static_cast<TImpalaQueryOptions::type>(option)),
+                  RuntimeFilterBank::MIN_BLOOM_FILTER_SIZE,
+                  RuntimeFilterBank::MAX_BLOOM_FILTER_SIZE));
         }
+        if (option == TImpalaQueryOptions::RUNTIME_BLOOM_FILTER_SIZE) {
+          query_options->__set_runtime_bloom_filter_size(size);
+        } else if (option == TImpalaQueryOptions::RUNTIME_FILTER_MIN_SIZE) {
+          query_options->__set_runtime_filter_min_size(size);
+        } else if (option == TImpalaQueryOptions::RUNTIME_FILTER_MAX_SIZE) {
+          query_options->__set_runtime_filter_max_size(size);
+        }
+        break;
+      }
       case TImpalaQueryOptions::RUNTIME_FILTER_WAIT_TIME_MS: {
-        int32 time_ms = atoi(value.c_str());
+        StringParser::ParseResult result;
+        const int32_t time_ms =
+            StringParser::StringToInt<int32_t>(value.c_str(), value.length(), &result);
+        if (result != StringParser::PARSE_SUCCESS || time_ms < 0) {
+          return Status(
+              Substitute("$0 is not a valid wait time. Valid sizes are in [0, $1].",
+                  value, 0, numeric_limits<int32_t>::max()));
+        }
         query_options->__set_runtime_filter_wait_time_ms(time_ms);
         break;
       }
@@ -339,6 +362,119 @@ Status impala::SetQueryOption(const string& key, const string& value,
         query_options->__set_disable_row_runtime_filtering(
             iequals(value, "true") || iequals(value, "1"));
         break;
+      case TImpalaQueryOptions::MAX_NUM_RUNTIME_FILTERS: {
+        StringParser::ParseResult status;
+        int val = StringParser::StringToInt<int>(value.c_str(), value.size(), &status);
+        if (status != StringParser::PARSE_SUCCESS) {
+          return Status(Substitute("Invalid number of runtime filters: '$0'.",
+              value.c_str()));
+        }
+        if (val < 0) {
+          return Status(Substitute("Invalid number of runtime filters: '$0'. "
+              "Only positive values are allowed.", val));
+        }
+        query_options->__set_max_num_runtime_filters(val);
+        break;
+      }
+      case TImpalaQueryOptions::PARQUET_ANNOTATE_STRINGS_UTF8: {
+        query_options->__set_parquet_annotate_strings_utf8(
+            iequals(value, "true") || iequals(value, "1"));
+        break;
+      }
+      case TImpalaQueryOptions::PARQUET_FALLBACK_SCHEMA_RESOLUTION: {
+        if (iequals(value, "position") ||
+            iequals(value, to_string(TParquetFallbackSchemaResolution::POSITION))) {
+          query_options->__set_parquet_fallback_schema_resolution(
+              TParquetFallbackSchemaResolution::POSITION);
+        } else if (iequals(value, "name") ||
+                   iequals(value, to_string(TParquetFallbackSchemaResolution::NAME))) {
+          query_options->__set_parquet_fallback_schema_resolution(
+              TParquetFallbackSchemaResolution::NAME);
+        } else {
+          return Status(Substitute("Invalid PARQUET_FALLBACK_SCHEMA_RESOLUTION option: "
+              "'$0'. Valid options are 'POSITION' and 'NAME'.", value));
+        }
+        break;
+      }
+      case TImpalaQueryOptions::PARQUET_ARRAY_RESOLUTION: {
+        if (iequals(value, "three_level") ||
+            value == to_string(TParquetArrayResolution::THREE_LEVEL)) {
+          query_options->__set_parquet_array_resolution(
+              TParquetArrayResolution::THREE_LEVEL);
+        } else if (iequals(value, "two_level") ||
+            value == to_string(TParquetArrayResolution::TWO_LEVEL)) {
+          query_options->__set_parquet_array_resolution(
+              TParquetArrayResolution::TWO_LEVEL);
+        } else if (iequals(value, "two_level_then_three_level") ||
+            value == to_string(TParquetArrayResolution::TWO_LEVEL_THEN_THREE_LEVEL)) {
+          query_options->__set_parquet_array_resolution(
+              TParquetArrayResolution::TWO_LEVEL_THEN_THREE_LEVEL);
+        } else {
+          return Status(Substitute("Invalid PARQUET_ARRAY_RESOLUTION option: '$0'. "
+              "Valid options are 'THREE_LEVEL', 'TWO_LEVEL' and "
+              "'TWO_LEVEL_THEN_THREE_LEVEL'.", value));
+        }
+        break;
+      }
+      case TImpalaQueryOptions::MT_DOP: {
+        StringParser::ParseResult result;
+        const int32_t dop =
+            StringParser::StringToInt<int32_t>(value.c_str(), value.length(), &result);
+        if (result != StringParser::PARSE_SUCCESS || dop < 0 || dop > 64) {
+          return Status(
+              Substitute("$0 is not valid for mt_dop. Valid values are in "
+                "[0, 64].", value));
+        }
+        query_options->__set_mt_dop(dop);
+        break;
+      }
+      case TImpalaQueryOptions::S3_SKIP_INSERT_STAGING: {
+        query_options->__set_s3_skip_insert_staging(
+            iequals(value, "true") || iequals(value, "1"));
+        break;
+      }
+      case TImpalaQueryOptions::PREFETCH_MODE: {
+        if (iequals(value, "NONE") || iequals(value, "0")) {
+          query_options->__set_prefetch_mode(TPrefetchMode::NONE);
+        } else if (iequals(value, "HT_BUCKET") || iequals(value, "1")) {
+          query_options->__set_prefetch_mode(TPrefetchMode::HT_BUCKET);
+        } else {
+          return Status(Substitute("Invalid prefetch mode '$0'. Valid modes are "
+              "NONE(0) or HT_BUCKET(1)", value));
+        }
+        break;
+      }
+      case TImpalaQueryOptions::STRICT_MODE: {
+        query_options->__set_strict_mode(
+            iequals(value, "true") || iequals(value, "1"));
+        break;
+      }
+      case TImpalaQueryOptions::SCRATCH_LIMIT: {
+        // Parse the scratch limit spec and validate it.
+        if (iequals(value, "-1")) {
+          query_options->__set_scratch_limit(-1);
+        } else {
+          int64_t bytes_limit;
+          RETURN_IF_ERROR(ParseMemValue(value, "Scratch space memory limit",
+              &bytes_limit));
+          query_options->__set_scratch_limit(bytes_limit);
+        }
+        break;
+      }
+      case TImpalaQueryOptions::ENABLE_EXPR_REWRITES: {
+        query_options->__set_enable_expr_rewrites(
+            iequals(value, "true") || iequals(value, "1"));
+        break;
+      }
+      case TImpalaQueryOptions::DECIMAL_V2: {
+        query_options->__set_decimal_v2(iequals(value, "true") || iequals(value, "1"));
+        break;
+      }
+      case TImpalaQueryOptions::PARQUET_DICTIONARY_FILTERING: {
+        query_options->__set_parquet_dictionary_filtering(
+            iequals(value, "true") || iequals(value, "1"));
+        break;
+      }
       default:
         // We hit this DCHECK(false) if we forgot to add the corresponding entry here
         // when we add a new query option.
@@ -359,17 +495,22 @@ Status impala::ParseQueryOptions(const string& options, TQueryOptions* query_opt
   if (options.length() == 0) return Status::OK();
   vector<string> kv_pairs;
   split(kv_pairs, options, is_any_of(","), token_compress_on);
-  BOOST_FOREACH(string& kv_string, kv_pairs) {
+  // Construct an error status which is used to aggregate errors encountered during
+  // parsing. It is only returned if the number of error details is greater than 0.
+  Status errorStatus = Status::Expected("Errors parsing query options");
+  for (string& kv_string: kv_pairs) {
     trim(kv_string);
     if (kv_string.length() == 0) continue;
     vector<string> key_value;
     split(key_value, kv_string, is_any_of("="), token_compress_on);
     if (key_value.size() != 2) {
-      return Status(Substitute("Ignoring invalid configuration option $0: bad format "
-          "(expected 'key=value')", kv_string));
+      errorStatus.MergeStatus(
+          Status(Substitute("Invalid configuration option '$0'.", kv_string)));
+      continue;
     }
-    RETURN_IF_ERROR(SetQueryOption(key_value[0], key_value[1], query_options,
+    errorStatus.MergeStatus(SetQueryOption(key_value[0], key_value[1], query_options,
         set_query_options_mask));
   }
+  if (errorStatus.msg().details().size() > 0) return errorStatus;
   return Status::OK();
 }

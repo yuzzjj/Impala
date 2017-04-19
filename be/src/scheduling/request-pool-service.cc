@@ -1,16 +1,19 @@
-// Copyright 2014 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "scheduling/request-pool-service.h"
 
@@ -40,6 +43,7 @@ static const string DEFAULT_USER = "default";
 
 DEFINE_string(fair_scheduler_allocation_path, "", "Path to the fair scheduler "
     "allocation file (fair-scheduler.xml).");
+// TODO: Rename / cleanup now that Llama is removed (see IMPALA-4159).
 DEFINE_string(llama_site_path, "", "Path to the Llama configuration file "
     "(llama-site.xml). If set, fair_scheduler_allocation_path must also be set.");
 
@@ -48,7 +52,7 @@ DEFINE_string(llama_site_path, "", "Path to the Llama configuration file "
 // are the same as the default values for pools defined via the fair scheduler
 // allocation file and Llama configurations.
 // TODO: Remove?
-DEFINE_int64(default_pool_max_requests, 200, "Maximum number of concurrent outstanding "
+DEFINE_int64(default_pool_max_requests, -1, "Maximum number of concurrent outstanding "
     "requests allowed to run before queueing incoming requests. A negative value "
     "indicates no limit. 0 indicates no requests will be admitted. Ignored if "
     "fair_scheduler_config_path and llama_site_path are set.");
@@ -70,7 +74,6 @@ DEFINE_bool(disable_pool_mem_limits, false, "Disables all per-pool mem limits.")
 DEFINE_bool(disable_pool_max_requests, false, "Disables all per-pool limits on the "
     "maximum number of running requests.");
 
-DECLARE_bool(enable_rm);
 
 // Pool name used when the configuration files are not specified.
 static const string DEFAULT_POOL_NAME = "default-pool";
@@ -90,22 +93,15 @@ RequestPoolService::RequestPoolService(MetricGroup* metrics) :
   resolve_pool_ms_metric_ =
       StatsMetric<double>::CreateAndRegister(metrics, RESOLVE_POOL_METRIC_NAME);
 
-  if (FLAGS_fair_scheduler_allocation_path.empty() &&
-      FLAGS_llama_site_path.empty()) {
-    if (FLAGS_enable_rm) {
-      LOG(ERROR) << "If resource management is enabled, -fair_scheduler_allocation_path "
-                 << "is required.";
-      exit(1);
-    }
+  if (FLAGS_fair_scheduler_allocation_path.empty()) {
     default_pool_only_ = true;
     bool is_percent; // not used
     int64_t bytes_limit = ParseUtil::ParseMemSpec(FLAGS_default_pool_mem_limit,
         &is_percent, MemInfo::physical_mem());
     // -1 indicates an error occurred
     if (bytes_limit < 0) {
-      LOG(ERROR) << "Unable to parse default pool mem limit from '"
-                 << FLAGS_default_pool_mem_limit << "'.";
-      exit(1);
+      CLEAN_EXIT_WITH_ERROR(Substitute("Unable to parse default pool mem limit from "
+          "'$0'.", FLAGS_default_pool_mem_limit));
     }
     // 0 indicates no limit or not set
     if (bytes_limit == 0) {
@@ -126,11 +122,11 @@ RequestPoolService::RequestPoolService(MetricGroup* metrics) :
 
   JNIEnv* jni_env = getJNIEnv();
   request_pool_service_class_ =
-    jni_env->FindClass("com/cloudera/impala/util/RequestPoolService");
+    jni_env->FindClass("org/apache/impala/util/RequestPoolService");
   EXIT_IF_EXC(jni_env);
   uint32_t num_methods = sizeof(methods) / sizeof(methods[0]);
   for (int i = 0; i < num_methods; ++i) {
-    EXIT_IF_ERROR(JniUtil::LoadJniMethod(jni_env, request_pool_service_class_,
+    ABORT_IF_ERROR(JniUtil::LoadJniMethod(jni_env, request_pool_service_class_,
         &(methods[i])));
   }
 
@@ -144,7 +140,7 @@ RequestPoolService::RequestPoolService(MetricGroup* metrics) :
   jobject request_pool_service = jni_env->NewObject(request_pool_service_class_, ctor_,
       fair_scheduler_config_path, llama_site_path);
   EXIT_IF_EXC(jni_env);
-  EXIT_IF_ERROR(JniUtil::LocalToGlobalRef(jni_env, request_pool_service,
+  ABORT_IF_ERROR(JniUtil::LocalToGlobalRef(jni_env, request_pool_service,
       &request_pool_service_));
   jni_env->CallObjectMethod(request_pool_service_, start_id);
   EXIT_IF_EXC(jni_env);
@@ -164,7 +160,7 @@ Status RequestPoolService::ResolveRequestPool(const TQueryCtx& ctx,
     user = DEFAULT_USER;
   }
 
-  const string& requested_pool = ctx.request.query_options.request_pool;
+  const string& requested_pool = ctx.client_request.query_options.request_pool;
   TResolveRequestPoolParams params;
   params.__set_user(user);
   params.__set_requested_pool(requested_pool);
@@ -178,11 +174,11 @@ Status RequestPoolService::ResolveRequestPool(const TQueryCtx& ctx,
     return Status(boost::algorithm::join(result.status.error_msgs, "; "));
   }
   if (result.resolved_pool.empty()) {
-    return Status(strings::Substitute(ERROR_USER_TO_POOL_MAPPING_NOT_FOUND,
+    return Status(Substitute(ERROR_USER_TO_POOL_MAPPING_NOT_FOUND,
         user, requested_pool));
   }
   if (!result.has_access) {
-    return Status(strings::Substitute(ERROR_USER_NOT_ALLOWED_IN_POOL, user,
+    return Status(Substitute(ERROR_USER_NOT_ALLOWED_IN_POOL, user,
         requested_pool, result.resolved_pool));
   }
   *resolved_pool = result.resolved_pool;

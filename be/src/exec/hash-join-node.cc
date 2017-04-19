@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/hash-join-node.h"
 
@@ -21,21 +24,26 @@
 #include "codegen/llvm-codegen.h"
 #include "exec/old-hash-table.inline.h"
 #include "exprs/expr.h"
+#include "gutil/strings/substitute.h"
+#include "runtime/mem-tracker.h"
 #include "runtime/row-batch.h"
+#include "runtime/runtime-filter.h"
+#include "runtime/runtime-filter-bank.h"
 #include "runtime/runtime-state.h"
+#include "runtime/tuple-row.h"
 #include "util/debug-util.h"
-#include "util/runtime-profile.h"
+#include "util/bloom-filter.h"
+#include "util/runtime-profile-counters.h"
 
 #include "gen-cpp/PlanNodes_types.h"
 
 #include "common/names.h"
 
-DECLARE_string(cgroup_hierarchy_path);
-DEFINE_bool(enable_probe_side_filtering, true,
-    "Enables pushing build side filters to probe side");
+DEFINE_bool(enable_probe_side_filtering, true, "Deprecated.");
 
 using namespace impala;
 using namespace llvm;
+using namespace strings;
 
 const char* HashJoinNode::LLVM_CLASS_NAME = "class.impala::HashJoinNode";
 
@@ -58,7 +66,6 @@ HashJoinNode::HashJoinNode(
   match_one_build_ = (join_op_ == TJoinOp::LEFT_SEMI_JOIN);
   match_all_build_ =
     (join_op_ == TJoinOp::RIGHT_OUTER_JOIN || join_op_ == TJoinOp::FULL_OUTER_JOIN);
-  can_add_runtime_filters_ = FLAGS_enable_probe_side_filtering;
 }
 
 Status HashJoinNode::Init(const TPlanNode& tnode, RuntimeState* state) {
@@ -78,15 +85,15 @@ Status HashJoinNode::Init(const TPlanNode& tnode, RuntimeState* state) {
       Expr::CreateExprTrees(pool_, tnode.hash_join_node.other_join_conjuncts,
                             &other_join_conjunct_ctxs_));
 
-  BOOST_FOREACH(const TRuntimeFilterDesc& tfilter, tnode.runtime_filters) {
+  for (const TRuntimeFilterDesc& tfilter: tnode.runtime_filters) {
     // If filter propagation not enabled, only consider building broadcast joins (that may
     // be consumed by this fragment).
     if (state->query_options().runtime_filter_mode != TRuntimeFilterMode::GLOBAL &&
         !tfilter.is_broadcast_join) {
       continue;
     }
-    if (state->query_options().disable_row_runtime_filtering &&
-        !tfilter.is_bound_by_partition_columns) {
+    if (state->query_options().disable_row_runtime_filtering
+        && !tfilter.applied_on_partition_columns) {
       continue;
     }
     filters_.push_back(state->filter_bank()->RegisterFilter(tfilter, true));
@@ -116,7 +123,7 @@ Status HashJoinNode::Prepare(RuntimeState* state) {
   AddExprCtxsToFree(probe_expr_ctxs_);
   RETURN_IF_ERROR(
       Expr::Prepare(filter_expr_ctxs_, state, child(1)->row_desc(), expr_mem_tracker()));
-  AddExprCtxsToFree(probe_expr_ctxs_);
+  AddExprCtxsToFree(filter_expr_ctxs_);
 
   // other_join_conjunct_ctxs_ are evaluated in the context of rows assembled from all
   // build and probe tuples; full_row_desc is not necessarily the same as the output row
@@ -127,27 +134,33 @@ Status HashJoinNode::Prepare(RuntimeState* state) {
   AddExprCtxsToFree(other_join_conjunct_ctxs_);
 
   // TODO: default buckets
-  const bool stores_nulls = join_op_ == TJoinOp::RIGHT_OUTER_JOIN ||
-      join_op_ == TJoinOp::FULL_OUTER_JOIN ||
-      std::accumulate(is_not_distinct_from_.begin(), is_not_distinct_from_.end(), false,
-                      std::logical_or<bool>());
+  const bool stores_nulls = join_op_ == TJoinOp::RIGHT_OUTER_JOIN
+      || join_op_ == TJoinOp::FULL_OUTER_JOIN
+      || std::accumulate(is_not_distinct_from_.begin(), is_not_distinct_from_.end(),
+                                false, std::logical_or<bool>());
   hash_tbl_.reset(new OldHashTable(state, build_expr_ctxs_, probe_expr_ctxs_,
-          filter_expr_ctxs_,
-          child(1)->row_desc().tuple_descriptors().size(), stores_nulls,
-          is_not_distinct_from_, state->fragment_hash_seed(), mem_tracker(), filters_));
+      filter_expr_ctxs_, child(1)->row_desc().tuple_descriptors().size(), stores_nulls,
+      is_not_distinct_from_, state->fragment_hash_seed(), mem_tracker(), filters_));
+  build_pool_.reset(new MemPool(mem_tracker()));
+  AddCodegenDisabledMessage(state);
+  return Status::OK();
+}
 
+void HashJoinNode::Codegen(RuntimeState* state) {
+  DCHECK(state->ShouldCodegen());
+  ExecNode::Codegen(state);
+  if (IsNodeCodegenDisabled()) return;
+
+  LlvmCodeGen* codegen = state->codegen();
+  DCHECK(codegen != NULL);
   bool build_codegen_enabled = false;
   bool probe_codegen_enabled = false;
-  if (state->codegen_enabled()) {
-    LlvmCodeGen* codegen;
-    RETURN_IF_ERROR(state->GetCodegen(&codegen));
 
-    // Codegen for hashing rows
-    Function* hash_fn = hash_tbl_->CodegenHashCurrentRow(state);
-    if (hash_fn == NULL) return Status::OK();
-
+  // Codegen for hashing rows
+  Function* hash_fn = hash_tbl_->CodegenHashCurrentRow(codegen);
+  if (hash_fn != NULL) {
     // Codegen for build path
-    codegen_process_build_batch_fn_ = CodegenProcessBuildBatch(state, hash_fn);
+    codegen_process_build_batch_fn_ = CodegenProcessBuildBatch(codegen, hash_fn);
     if (codegen_process_build_batch_fn_ != NULL) {
       codegen->AddFunctionToJit(codegen_process_build_batch_fn_,
           reinterpret_cast<void**>(&process_build_batch_fn_));
@@ -156,7 +169,8 @@ Status HashJoinNode::Prepare(RuntimeState* state) {
 
     // Codegen for probe path (only for left joins)
     if (!match_all_build_) {
-      Function* codegen_process_probe_batch_fn = CodegenProcessProbeBatch(state, hash_fn);
+      Function* codegen_process_probe_batch_fn =
+          CodegenProcessProbeBatch(codegen, hash_fn);
       if (codegen_process_probe_batch_fn != NULL) {
         codegen->AddFunctionToJit(codegen_process_probe_batch_fn,
             reinterpret_cast<void**>(&process_probe_batch_fn_));
@@ -164,9 +178,8 @@ Status HashJoinNode::Prepare(RuntimeState* state) {
       }
     }
   }
-  AddCodegenExecOption(build_codegen_enabled, "", "Build Side");
-  AddCodegenExecOption(probe_codegen_enabled, "", "Probe Side");
-  return Status::OK();
+  runtime_profile()->AddCodegenMsg(build_codegen_enabled, "", "Build Side");
+  runtime_profile()->AddCodegenMsg(probe_codegen_enabled, "", "Probe Side");
 }
 
 Status HashJoinNode::Reset(RuntimeState* state) {
@@ -177,6 +190,7 @@ Status HashJoinNode::Reset(RuntimeState* state) {
 void HashJoinNode::Close(RuntimeState* state) {
   if (is_closed()) return;
   if (hash_tbl_.get() != NULL) hash_tbl_->Close();
+  if (build_pool_.get() != NULL) build_pool_->FreeAll();
   Expr::Close(build_expr_ctxs_, state);
   Expr::Close(probe_expr_ctxs_, state);
   Expr::Close(filter_expr_ctxs_, state);
@@ -184,12 +198,25 @@ void HashJoinNode::Close(RuntimeState* state) {
   BlockingJoinNode::Close(state);
 }
 
-Status HashJoinNode::ConstructBuildSide(RuntimeState* state) {
+Status HashJoinNode::Open(RuntimeState* state) {
+  SCOPED_TIMER(runtime_profile_->total_time_counter());
+  RETURN_IF_ERROR(BlockingJoinNode::Open(state));
   RETURN_IF_ERROR(Expr::Open(build_expr_ctxs_, state));
   RETURN_IF_ERROR(Expr::Open(probe_expr_ctxs_, state));
   RETURN_IF_ERROR(Expr::Open(filter_expr_ctxs_, state));
   RETURN_IF_ERROR(Expr::Open(other_join_conjunct_ctxs_, state));
 
+  // Check for errors and free local allocations before opening children.
+  RETURN_IF_CANCELLED(state);
+  RETURN_IF_ERROR(QueryMaintenance(state));
+
+  RETURN_IF_ERROR(BlockingJoinNode::ProcessBuildInputAndOpenProbe(state, NULL));
+  RETURN_IF_ERROR(BlockingJoinNode::GetFirstProbeRow(state));
+  InitGetNext();
+  return Status::OK();
+}
+
+Status HashJoinNode::ProcessBuildInput(RuntimeState* state) {
   // Do a full scan of child(1) and store everything in hash_tbl_
   // The hash join node needs to keep in memory all build tuples, including the tuple
   // row ptrs.  The row ptrs are copied into the hash table's internal structure so they
@@ -228,32 +255,30 @@ Status HashJoinNode::ConstructBuildSide(RuntimeState* state) {
     if (eos) break;
   }
 
-  // We've finished constructing the build side. Set the bitmap of the build side values
-  // so that the probe side can use this as an additional predicate.
-  // We only do this if the build side is sufficiently small.
-  // TODO: Better heuristic? Currently we simply compare the size of the HT with a
-  // constant value.
-  if (can_add_runtime_filters_) {
-    if (!state->filter_bank()->ShouldDisableFilter(hash_tbl_->size())) {
-      AddRuntimeExecOption("Build-Side Filter Built");
-      hash_tbl_->AddBloomFilters();
+  if (filters_.size() > 0) {
+    int num_enabled_filters = hash_tbl_->AddBloomFilters();
+    if (num_enabled_filters == filters_.size()) {
+      runtime_profile()->AppendExecOption(
+          Substitute("$0 of $0 Runtime Filter$1 Published", filters_.size(),
+              filters_.size() == 1 ? "" : "s"));
     } else {
-      AddRuntimeExecOption("Build-Side Runtime-Filter Disabled (FP Rate Too High)");
-      VLOG(2) << "Disabling runtime filter build because build table is too large: "
-              << hash_tbl_->size();
+      string exec_option = Substitute("$0 of $1 Runtime Filter$2 Published, $3 Disabled",
+          num_enabled_filters, filters_.size(), filters_.size() == 1 ? "" : "s",
+          filters_.size() - num_enabled_filters);
+      runtime_profile()->AppendExecOption(exec_option);
     }
   }
+
   return Status::OK();
 }
 
-Status HashJoinNode::InitGetNext(TupleRow* first_probe_row) {
-  if (first_probe_row == NULL) {
+void HashJoinNode::InitGetNext() {
+  if (current_probe_row_ == NULL) {
     hash_tbl_iterator_ = hash_tbl_->Begin();
   } else {
     matched_probe_ = false;
-    hash_tbl_iterator_ = hash_tbl_->Find(first_probe_row);
+    hash_tbl_iterator_ = hash_tbl_->Find(current_probe_row_);
   }
-  return Status::OK();
 }
 
 Status HashJoinNode::GetNext(RuntimeState* state, RowBatch* out_batch, bool* eos) {
@@ -325,7 +350,7 @@ Status HashJoinNode::GetNext(RuntimeState* state, RowBatch* out_batch, bool* eos
 
     // If a probe row exists at this point, check whether we need to output the current
     // probe row before getting a new probe batch. (IMPALA-2440)
-    bool probe_row_exists = !probe_side_eos_ || probe_batch_->num_rows() > 0;
+    bool probe_row_exists = probe_batch_->num_rows() > 0;
     if (match_all_probe_ && !matched_probe_ && probe_row_exists) {
       int row_idx = out_batch->AddRow();
       TupleRow* out_row = out_batch->GetRow(row_idx);
@@ -522,7 +547,7 @@ Function* HashJoinNode::CodegenCreateOutputRow(LlvmCodeGen* codegen) {
   prototype.AddArgument(LlvmCodeGen::NamedVariable("build_arg", tuple_row_ptr_type));
 
   LLVMContext& context = codegen->context();
-  LlvmCodeGen::LlvmBuilder builder(context);
+  LlvmBuilder builder(context);
   Value* args[4];
   Function* fn = prototype.GeneratePrototype(&builder, args);
   Value* out_row_arg = builder.CreateBitCast(args[1], tuple_row_working_type, "out");
@@ -534,8 +559,9 @@ Function* HashJoinNode::CodegenCreateOutputRow(LlvmCodeGen* codegen) {
 
   // Copy probe row
   codegen->CodegenMemcpy(&builder, out_row_arg, probe_row_arg, probe_tuple_row_size_);
-  Value* build_row_idx[] = { codegen->GetIntConstant(TYPE_INT, num_probe_tuples) };
-  Value* build_row_dst = builder.CreateGEP(out_row_arg, build_row_idx, "build_dst_ptr");
+  Value* build_row_idx[] = {codegen->GetIntConstant(TYPE_INT, num_probe_tuples)};
+  Value* build_row_dst =
+      builder.CreateInBoundsGEP(out_row_arg, build_row_idx, "build_dst_ptr");
 
   // Copy build row.
   BasicBlock* build_not_null_block = BasicBlock::Create(context, "build_not_null", fn);
@@ -552,9 +578,8 @@ Function* HashJoinNode::CodegenCreateOutputRow(LlvmCodeGen* codegen) {
     // to work.
     builder.SetInsertPoint(build_null_block);
     for (int i = 0; i < num_build_tuples; ++i) {
-      Value* array_idx[] =
-          { codegen->GetIntConstant(TYPE_INT, i + num_probe_tuples) };
-      Value* dst = builder.CreateGEP(out_row_arg, array_idx, "dst_tuple_ptr");
+      Value* array_idx[] = {codegen->GetIntConstant(TYPE_INT, i + num_probe_tuples)};
+      Value* dst = builder.CreateInBoundsGEP(out_row_arg, array_idx, "dst_tuple_ptr");
       builder.CreateStore(codegen->null_ptr_value(), dst);
     }
     builder.CreateRetVoid();
@@ -571,90 +596,80 @@ Function* HashJoinNode::CodegenCreateOutputRow(LlvmCodeGen* codegen) {
   return codegen->FinalizeFunction(fn);
 }
 
-Function* HashJoinNode::CodegenProcessBuildBatch(RuntimeState* state,
+Function* HashJoinNode::CodegenProcessBuildBatch(LlvmCodeGen* codegen,
     Function* hash_fn) {
-  LlvmCodeGen* codegen;
-  if (!state->GetCodegen(&codegen).ok()) return NULL;
-
   // Get cross compiled function
-  Function* process_build_batch_fn = codegen->GetFunction(
-      IRFunction::HASH_JOIN_PROCESS_BUILD_BATCH);
+  Function* process_build_batch_fn =
+      codegen->GetFunction(IRFunction::HASH_JOIN_PROCESS_BUILD_BATCH, true);
   DCHECK(process_build_batch_fn != NULL);
 
   // Codegen for evaluating build rows
-  Function* eval_row_fn = hash_tbl_->CodegenEvalTupleRow(state, true);
+  Function* eval_row_fn = hash_tbl_->CodegenEvalTupleRow(codegen, true);
   if (eval_row_fn == NULL) return NULL;
 
-  int replaced = 0;
-  // Replace call sites
-  process_build_batch_fn = codegen->ReplaceCallSites(process_build_batch_fn, false,
-      eval_row_fn, "EvalBuildRow", &replaced);
+  int replaced = codegen->ReplaceCallSites(process_build_batch_fn, eval_row_fn,
+      "EvalBuildRow");
   DCHECK_EQ(replaced, 1);
 
-  process_build_batch_fn = codegen->ReplaceCallSites(process_build_batch_fn, false,
-      hash_fn, "HashCurrentRow", &replaced);
+  replaced = codegen->ReplaceCallSites(process_build_batch_fn, hash_fn, "HashCurrentRow");
   DCHECK_EQ(replaced, 1);
 
-  return codegen->OptimizeFunctionWithExprs(process_build_batch_fn);
+  return codegen->FinalizeFunction(process_build_batch_fn);
 }
 
-Function* HashJoinNode::CodegenProcessProbeBatch(RuntimeState* state, Function* hash_fn) {
-  LlvmCodeGen* codegen;
-  if (!state->GetCodegen(&codegen).ok()) return NULL;
-
+Function* HashJoinNode::CodegenProcessProbeBatch(LlvmCodeGen* codegen,
+    Function* hash_fn) {
   // Get cross compiled function
   Function* process_probe_batch_fn =
-      codegen->GetFunction(IRFunction::HASH_JOIN_PROCESS_PROBE_BATCH);
+      codegen->GetFunction(IRFunction::HASH_JOIN_PROCESS_PROBE_BATCH, true);
   DCHECK(process_probe_batch_fn != NULL);
 
-  // Codegen HashTable::Equals
-  Function* equals_fn = hash_tbl_->CodegenEquals(state);
+  // Codegen HashTable::Equals()
+  Function* equals_fn = hash_tbl_->CodegenEquals(codegen);
   if (equals_fn == NULL) return NULL;
 
   // Codegen for evaluating build rows
-  Function* eval_row_fn = hash_tbl_->CodegenEvalTupleRow(state, false);
+  Function* eval_row_fn = hash_tbl_->CodegenEvalTupleRow(codegen, false);
   if (eval_row_fn == NULL) return NULL;
 
-  // Codegen CreateOutputRow
+  // Codegen CreateOutputRow()
   Function* create_output_row_fn = CodegenCreateOutputRow(codegen);
   if (create_output_row_fn == NULL) return NULL;
 
   // Codegen evaluating other join conjuncts
   Function* eval_other_conjuncts_fn;
-  Status status = ExecNode::CodegenEvalConjuncts(state, other_join_conjunct_ctxs_,
+  Status status = ExecNode::CodegenEvalConjuncts(codegen, other_join_conjunct_ctxs_,
       &eval_other_conjuncts_fn, "EvalOtherConjuncts");
   if (!status.ok()) return NULL;
 
   // Codegen evaluating conjuncts
   Function* eval_conjuncts_fn;
-  status = ExecNode::CodegenEvalConjuncts(state, conjunct_ctxs_, &eval_conjuncts_fn);
+  status = ExecNode::CodegenEvalConjuncts(codegen, conjunct_ctxs_, &eval_conjuncts_fn);
   if (!status.ok()) return NULL;
 
   // Replace all call sites with codegen version
-  int replaced = 0;
-  process_probe_batch_fn = codegen->ReplaceCallSites(process_probe_batch_fn, false,
-      hash_fn, "HashCurrentRow", &replaced);
+  int replaced = codegen->ReplaceCallSites(process_probe_batch_fn, hash_fn,
+      "HashCurrentRow");
   DCHECK_EQ(replaced, 1);
 
-  process_probe_batch_fn = codegen->ReplaceCallSites(process_probe_batch_fn, false,
-      eval_row_fn, "EvalProbeRow", &replaced);
+  replaced = codegen->ReplaceCallSites(process_probe_batch_fn, eval_row_fn,
+      "EvalProbeRow");
   DCHECK_EQ(replaced, 1);
 
-  process_probe_batch_fn = codegen->ReplaceCallSites(process_probe_batch_fn, false,
-      create_output_row_fn, "CreateOutputRow", &replaced);
+  replaced = codegen->ReplaceCallSites(process_probe_batch_fn, create_output_row_fn,
+      "CreateOutputRow");
   DCHECK_EQ(replaced, 3);
 
-  process_probe_batch_fn = codegen->ReplaceCallSites(process_probe_batch_fn, false,
-      eval_conjuncts_fn, "EvalConjuncts", &replaced);
+  replaced = codegen->ReplaceCallSites(process_probe_batch_fn, eval_conjuncts_fn,
+      "EvalConjuncts");
   DCHECK_EQ(replaced, 2);
 
-  process_probe_batch_fn = codegen->ReplaceCallSites(process_probe_batch_fn, false,
-      eval_other_conjuncts_fn, "EvalOtherJoinConjuncts", &replaced);
+  replaced = codegen->ReplaceCallSites(process_probe_batch_fn, eval_other_conjuncts_fn,
+      "EvalOtherJoinConjuncts");
   DCHECK_EQ(replaced, 2);
 
-  process_probe_batch_fn = codegen->ReplaceCallSites(process_probe_batch_fn, false,
-      equals_fn, "Equals", &replaced);
+  replaced = codegen->ReplaceCallSites(process_probe_batch_fn, equals_fn, "Equals");
   DCHECK_EQ(replaced, 2);
 
-  return codegen->OptimizeFunctionWithExprs(process_probe_batch_fn);
+  return codegen->FinalizeFunction(process_probe_batch_fn);
 }

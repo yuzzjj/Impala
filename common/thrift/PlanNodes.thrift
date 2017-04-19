@@ -1,25 +1,28 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 //
 // This file contains all structs, enums, etc., that together make up
 // a plan tree. All information recorded in struct TPlan and below is independent
 // of the execution parameters of any one of the backends on which it is running
-// (those are recorded in TPlanFragmentExecParams).
+// (those are recorded in TPlanFragmentInstanceCtx).
 
 namespace cpp impala
-namespace java com.cloudera.impala.thrift
+namespace java org.apache.impala.thrift
 
 include "CatalogObjects.thrift"
 include "ExecStats.thrift"
@@ -43,6 +46,7 @@ enum TPlanNodeType {
   SINGULAR_ROW_SRC_NODE,
   UNNEST_NODE,
   SUBPLAN_NODE,
+  KUDU_SCAN_NODE
 }
 
 // phases of an execution node
@@ -59,7 +63,9 @@ enum TExecNodePhase {
 // what to do when hitting a debug point (TImpalaQueryOptions.DEBUG_ACTION)
 enum TDebugAction {
   WAIT,
-  FAIL
+  FAIL,
+  INJECT_ERROR_LOG,
+  MEM_LIMIT_EXCEEDED,
 }
 
 // Preference for replica selection
@@ -71,31 +77,57 @@ enum TReplicaPreference {
   REMOTE
 }
 
-// Specification of a runtime filter
+// Specification of a runtime filter target.
+struct TRuntimeFilterTargetDesc {
+  // Target node id
+  1: Types.TPlanNodeId node_id
+
+  // Expr on which the filter is applied
+  2: required Exprs.TExpr target_expr
+
+  // Indicates if 'target_expr' is bound only by partition columns
+  3: required bool is_bound_by_partition_columns
+
+  // Slot ids on which 'target_expr' is bound on
+  4: required list<Types.TSlotId> target_expr_slotids
+
+  // Indicates if this target is on the same fragment as the join that
+  // produced the runtime filter
+  5: required bool is_local_target
+}
+
+// Specification of a runtime filter.
 struct TRuntimeFilterDesc {
   // Filter unique id (within a query)
   1: required i32 filter_id
 
-  // Expr on which the filter is applied; it is fully bound by a scan node.
-  2: required Exprs.TExpr target_expr
-
   // Expr on which the filter is built on a hash join.
-  3: required Exprs.TExpr src_expr
+  2: required Exprs.TExpr src_expr
 
-  // If set, indicates if the source join node of this filter is a broadcast or
+  // List of targets for this runtime filter
+  3: required list<TRuntimeFilterTargetDesc> targets
+
+  // Map of target node id to the corresponding index in 'targets'
+  4: required map<Types.TPlanNodeId, i32> planid_to_target_ndx
+
+  // Indicates if the source join node of this filter is a broadcast or
   // a partitioned join.
-  4: optional bool is_broadcast_join
+  5: required bool is_broadcast_join
 
-  // If set, indicates if filter_expr is bound only by partition columns
-  5: optional bool is_bound_by_partition_columns
+  // Indicates if there is at least one target scan node that is in the
+  // same fragment as the broadcast join that produced the runtime filter
+  6: required bool has_local_targets
 
-  // SlotIds on which the target expr is bound on
-  6: optional list<Types.TSlotId> target_expr_slotids
+  // Indicates if there is at least one target scan node that is not in the same
+  // fragment as the broadcast join that produced the runtime filter
+  7: required bool has_remote_targets
 
-  // If set, indicates that the filter should not be sent to the coordinator because it
-  // is produced by a broadcast join and the target scan node is in the same fragment
-  // as the join.
-  7: optional bool has_local_target
+  // Indicates if this filter is applied only on partition columns
+  8: required bool applied_on_partition_columns
+
+  // The estimated number of distinct values that the planner expects the filter to hold.
+  // Used to compute the size of the filter.
+  9: optional i64 ndv_estimate
 }
 
 // The information contained in subclasses of ScanNode captured in two separate
@@ -144,9 +176,10 @@ struct THBaseKeyRange {
 // Specification of an individual data range which is held in its entirety
 // by a storage server
 struct TScanRange {
-  // one of these must be set for every TScanRange2
+  // one of these must be set for every TScanRange
   1: optional THdfsFileSplit hdfs_file_split
   2: optional THBaseKeyRange hbase_key_range
+  3: optional binary kudu_scan_token
 }
 
 struct THdfsScanNode {
@@ -163,8 +196,25 @@ struct THdfsScanNode {
   // Option to control tie breaks during scan scheduling.
   4: optional bool random_replica
 
-  // Option to control whether codegen should be used for conjuncts evaluation.
-  5: optional bool codegen_conjuncts
+  // Number of header lines to skip at the beginning of each file of this table. Only set
+  // for hdfs text files.
+  5: optional i32 skip_header_line_count
+
+  // Indicates whether the MT scan node implementation should be used.
+  // If this is true then the MT_DOP query option must be > 0.
+  // TODO: Remove this option when the MT scan node supports all file formats.
+  6: optional bool use_mt_scan_node
+
+  // Conjuncts that can be evaluated against parquet::Statistics using the tuple
+  // referenced by 'min_max_tuple_id'.
+  7: optional list<Exprs.TExpr> min_max_conjuncts
+
+  // Tuple to evaluate 'min_max_conjuncts' against.
+  8: optional Types.TTupleId min_max_tuple_id
+
+  // Map from SlotIds to the indices in TPlanNode.conjuncts that are eligible
+  // for dictionary filtering.
+  9: optional map<Types.TSlotId, list<i32>> dictionary_filter_conjuncts
 }
 
 struct TDataSourceScanNode {
@@ -200,6 +250,14 @@ struct THBaseScanNode {
 
   // Suggested max value for "hbase.client.scan.setCaching"
   4: optional i32 suggested_max_caching
+}
+
+struct TKuduScanNode {
+  1: required Types.TTupleId tuple_id
+
+  // Indicates whether the MT scan node implementation should be used.
+  // If this is true, then the MT_DOP query option must be > 0.
+  2: optional bool use_mt_scan_node
 }
 
 struct TEqJoinCondition {
@@ -238,10 +296,6 @@ struct THashJoinNode {
 
   // non equi-join predicates
   3: optional list<Exprs.TExpr> other_join_conjuncts
-
-  // If true, this join node can (but may choose not to) generate slot filters
-  // after constructing the build side that can be applied to the probe side.
-  4: optional bool add_probe_filters
 }
 
 struct TNestedLoopJoinNode {
@@ -391,6 +445,8 @@ struct TUnionNode {
   2: required list<list<Exprs.TExpr>> result_expr_lists
   // Separate list of expr lists coming from a constant select stmts.
   3: required list<list<Exprs.TExpr>> const_expr_lists
+  // Index of the first child that needs to be materialized.
+  4: required i64 first_materialized_child_idx
 }
 
 struct TExchangeNode {
@@ -424,31 +480,36 @@ struct TPlanNode {
   6: required list<bool> nullable_tuples
   7: optional list<Exprs.TExpr> conjuncts
 
+  // Set to true if codegen should be disabled for this plan node. Otherwise the plan
+  // node is codegen'd if the backend supports it.
+  8: required bool disable_codegen
+
   // one field per PlanNode subclass
-  8: optional THdfsScanNode hdfs_scan_node
-  9: optional THBaseScanNode hbase_scan_node
-  10: optional TDataSourceScanNode data_source_node
-  11: optional THashJoinNode hash_join_node
-  12: optional TNestedLoopJoinNode nested_loop_join_node
-  13: optional TAggregationNode agg_node
-  14: optional TSortNode sort_node
-  15: optional TUnionNode union_node
-  16: optional TExchangeNode exchange_node
-  17: optional TAnalyticNode analytic_node
-  21: optional TUnnestNode unnest_node
+  9: optional THdfsScanNode hdfs_scan_node
+  10: optional THBaseScanNode hbase_scan_node
+  11: optional TKuduScanNode kudu_scan_node
+  12: optional TDataSourceScanNode data_source_node
+  13: optional THashJoinNode hash_join_node
+  14: optional TNestedLoopJoinNode nested_loop_join_node
+  15: optional TAggregationNode agg_node
+  16: optional TSortNode sort_node
+  17: optional TUnionNode union_node
+  18: optional TExchangeNode exchange_node
+  19: optional TAnalyticNode analytic_node
+  20: optional TUnnestNode unnest_node
 
   // Label that should be used to print this node to the user.
-  18: optional string label
+  21: optional string label
 
   // Additional details that should be printed to the user. This is node specific
   // e.g. table name, join strategy, etc.
-  19: optional string label_detail
+  22: optional string label_detail
 
   // Estimated execution stats generated by the planner.
-  20: optional ExecStats.TExecStats estimated_stats
+  23: optional ExecStats.TExecStats estimated_stats
 
   // Runtime filters assigned to this plan node
-  22: optional list<TRuntimeFilterDesc> runtime_filters
+  24: optional list<TRuntimeFilterDesc> runtime_filters
 }
 
 // A flattened representation of a tree of PlanNodes, obtained by depth-first

@@ -1,23 +1,30 @@
-# Copyright (c) 2015 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
+import glob
 import os
 import pytest
+import shutil
 import subprocess
-from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
+
+from tempfile import mkdtemp
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
+from tests.common.skip import SkipIfS3, SkipIfIsilon, SkipIfLocal
+from tests.common.test_dimensions import create_uncompressed_text_dimension
 from tests.util.filesystem_utils import get_fs_path
 
 class TestUdfPersistence(CustomClusterTestSuite):
@@ -29,6 +36,7 @@ class TestUdfPersistence(CustomClusterTestSuite):
   HIVE_IMPALA_INTEGRATION_DB = 'hive_impala_integration_db'
   HIVE_UDF_JAR = os.getenv('DEFAULT_FS') + '/test-warehouse/hive-exec.jar';
   JAVA_UDF_JAR = os.getenv('DEFAULT_FS') + '/test-warehouse/impala-hive-udfs.jar';
+  LOCAL_LIBRARY_DIR = mkdtemp(dir="/tmp")
 
   @classmethod
   def get_workload(cls):
@@ -37,7 +45,8 @@ class TestUdfPersistence(CustomClusterTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestUdfPersistence, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(create_uncompressed_text_dimension(cls.get_workload()))
+    cls.ImpalaTestMatrix.add_dimension(
+        create_uncompressed_text_dimension(cls.get_workload()))
 
   def setup_method(self, method):
     super(TestUdfPersistence, self).setup_method(method)
@@ -72,6 +81,7 @@ class TestUdfPersistence(CustomClusterTestSuite):
     self.client.execute("DROP DATABASE IF EXISTS %s CASCADE" % self.JAVA_FN_TEST_DB)
     self.client.execute("DROP DATABASE IF EXISTS %s CASCADE"
        % self.HIVE_IMPALA_INTEGRATION_DB)
+    shutil.rmtree(self.LOCAL_LIBRARY_DIR, ignore_errors=True)
 
   def run_stmt_in_hive(self, stmt):
     """
@@ -148,7 +158,32 @@ class TestUdfPersistence(CustomClusterTestSuite):
         db=self.HIVE_IMPALA_INTEGRATION_DB))
     assert stdout is not None and result in str(stdout.data)
 
+  @SkipIfIsilon.hive
+  @SkipIfS3.hive
+  @SkipIfLocal.hive
   @pytest.mark.execute_serially
+  def test_corrupt_java_udf(self):
+    """ IMPALA-3820: This tests if the Catalog server can gracefully handle
+    Java UDFs with unresolved dependencies."""
+    if self.exploration_strategy() != 'exhaustive': pytest.skip()
+    # Create a Java UDF with unresolved dependencies from Hive and
+    # restart the Catalog server. Catalog should ignore the
+    # function load.
+    self.run_stmt_in_hive("create function %s.corrupt_udf as \
+        'org.apache.impala.UnresolvedUdf' using jar '%s'"
+        % (self.JAVA_FN_TEST_DB, self.JAVA_UDF_JAR))
+    self.__restart_cluster()
+    # Make sure the function count is 0
+    self.verify_function_count(
+        "SHOW FUNCTIONS in {0}".format(self.JAVA_FN_TEST_DB), 0)
+
+
+  @SkipIfIsilon.hive
+  @SkipIfS3.hive
+  @SkipIfLocal.hive
+  @pytest.mark.execute_serially
+  @CustomClusterTestSuite.with_args(
+     catalogd_args= "--local_library_dir=%s" % LOCAL_LIBRARY_DIR)
   def test_java_udfs_hive_integration(self):
     ''' This test checks the integration between Hive and Impala on
     CREATE FUNCTION and DROP FUNCTION statements for persistent Java UDFs.
@@ -198,6 +233,8 @@ class TestUdfPersistence(CustomClusterTestSuite):
     self.client.execute("INVALIDATE METADATA")
     self.verify_function_count(
             "SHOW FUNCTIONS in {0}".format(self.HIVE_IMPALA_INTEGRATION_DB), 0)
+    # Make sure we deleted all the temporary jars we copied to the local fs
+    assert len(glob.glob(self.LOCAL_LIBRARY_DIR + "/*.jar")) == 0
 
   @pytest.mark.execute_serially
   def test_java_udfs_from_impala(self):
@@ -208,11 +245,11 @@ class TestUdfPersistence(CustomClusterTestSuite):
     # persistent Java UDF with same name
     self.client.execute("create function %s.%s(boolean) returns boolean "\
         "location '%s' symbol='%s'" % (self.JAVA_FN_TEST_DB, "identity",
-        self.JAVA_UDF_JAR, "com.cloudera.impala.TestUdf"))
+        self.JAVA_UDF_JAR, "org.apache.impala.TestUdf"))
     result = self.execute_query_expect_failure(self.client,
         self.CREATE_JAVA_UDF_TEMPLATE.format(db=self.JAVA_FN_TEST_DB,
         function="identity", location=self.JAVA_UDF_JAR,
-        symbol="com.cloudera.impala.TestUdf"))
+        symbol="org.apache.impala.TestUdf"))
     assert "Function already exists" in str(result)
     # Test the same with a NATIVE function
     self.client.execute("create function {database}.identity(int) "\
@@ -222,18 +259,18 @@ class TestUdfPersistence(CustomClusterTestSuite):
     result = self.execute_query_expect_failure(self.client,
         self.CREATE_JAVA_UDF_TEMPLATE.format(db=self.JAVA_FN_TEST_DB,
         function="identity", location=self.JAVA_UDF_JAR,
-        symbol="com.cloudera.impala.TestUdf"))
+        symbol="org.apache.impala.TestUdf"))
     assert "Function already exists" in str(result)
 
     # Test the reverse. Add a persistent Java UDF and ensure we cannot
     # add non persistent Java UDFs or NATIVE functions with the same name.
     self.client.execute(self.CREATE_JAVA_UDF_TEMPLATE.format(
         db=self.JAVA_FN_TEST_DB, function="identity_java",
-        location=self.JAVA_UDF_JAR, symbol="com.cloudera.impala.TestUdf"))
+        location=self.JAVA_UDF_JAR, symbol="org.apache.impala.TestUdf"))
     result = self.execute_query_expect_failure(self.client, "create function "\
         "%s.%s(boolean) returns boolean location '%s' symbol='%s'" % (
         self.JAVA_FN_TEST_DB, "identity_java", self.JAVA_UDF_JAR,
-        "com.cloudera.impala.TestUdf"))
+        "org.apache.impala.TestUdf"))
     assert "Function already exists" in str(result)
     result = self.execute_query_expect_failure(self.client, "create function "\
         "{database}.identity_java(int) returns int location '{location}' "\
@@ -257,7 +294,7 @@ class TestUdfPersistence(CustomClusterTestSuite):
     compatibility_fn_count = 3
     self.client.execute(self.CREATE_JAVA_UDF_TEMPLATE.format(
         db=self.JAVA_FN_TEST_DB, function="compatibility",
-        location=self.JAVA_UDF_JAR, symbol="com.cloudera.impala.JavaUdfTest"))
+        location=self.JAVA_UDF_JAR, symbol="org.apache.impala.JavaUdfTest"))
     self.verify_function_count(
         "SHOW FUNCTIONS IN %s like 'compatibility*'" % self.JAVA_FN_TEST_DB,
         compatibility_fn_count)
@@ -289,7 +326,7 @@ class TestUdfPersistence(CustomClusterTestSuite):
     # to Hive and Impala.
     result = self.execute_query_expect_failure(self.client,
         self.CREATE_JAVA_UDF_TEMPLATE.format(db=self.JAVA_FN_TEST_DB, function="badudf",
-        location=self.JAVA_UDF_JAR, symbol="com.cloudera.impala.IncompatibleUdfTest"))
+        location=self.JAVA_UDF_JAR, symbol="org.apache.impala.IncompatibleUdfTest"))
     assert "No compatible function signatures" in str(result)
     self.verify_function_count(
         "SHOW FUNCTIONS IN %s like 'badudf*'" % self.JAVA_FN_TEST_DB, 0)
@@ -299,7 +336,7 @@ class TestUdfPersistence(CustomClusterTestSuite):
     # Create the same function from hive and make sure Impala doesn't load any signatures.
     self.run_stmt_in_hive(self.CREATE_HIVE_UDF_TEMPLATE.format(
         db=self.JAVA_FN_TEST_DB, function="badudf",
-        location=self.JAVA_UDF_JAR, symbol="com.cloudera.impala.IncompatibleUdfTest"))
+        location=self.JAVA_UDF_JAR, symbol="org.apache.impala.IncompatibleUdfTest"))
     result = self.run_stmt_in_hive("DESCRIBE FUNCTION %s.%s"
         % (self.JAVA_FN_TEST_DB, "badudf"))
     assert "does not exist" not in str(result)
@@ -309,7 +346,7 @@ class TestUdfPersistence(CustomClusterTestSuite):
     # Add a function with the same name from Impala. It should fail.
     result = self.execute_query_expect_failure(self.client,
         self.CREATE_JAVA_UDF_TEMPLATE.format(db=self.JAVA_FN_TEST_DB, function="badudf",
-        location=self.JAVA_UDF_JAR, symbol="com.cloudera.impala.TestUdf"))
+        location=self.JAVA_UDF_JAR, symbol="org.apache.impala.TestUdf"))
     assert "Function badudf already exists" in str(result)
     # Drop the function and make sure the function if dropped from hive
     self.client.execute(self.DROP_JAVA_UDF_TEMPLATE.format(

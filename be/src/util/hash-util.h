@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UTIL_HASH_UTIL_H
@@ -227,14 +230,6 @@ class HashUtil {
     // Rehash32to32(hash1) is equal to the same subset of bit positions
     // Rehash32to32(hash2) is minimal.
     return (static_cast<uint64_t>(hash) * m + a) >> 32;
-  }
-
-  static inline uint64_t Rehash32to64(const uint32_t hash) {
-    static const uint64_t m1 = 0x47b6137a44974d91ull, m2 = 0x8824ad5ba2b7289cull,
-                          a1 = 0x705495c62df1424aull, a2 = 0x9efc49475c6bfb31ull;
-    const uint64_t hash1 = (static_cast<uint64_t>(hash) * m1 + a1) >> 32;
-    const uint64_t hash2 = (static_cast<uint64_t>(hash) * m2 + a2) >> 32;
-    return hash1 | (hash2 << 32);
   }
 };
 

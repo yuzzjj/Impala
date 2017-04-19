@@ -1,24 +1,29 @@
-# Copyright (c) 2015 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 import getpass
-import logging
 import pytest
-from tests.common.test_vector import *
-from tests.common.impala_test_suite import *
+
+from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.skip import SkipIfS3, SkipIfIsilon, SkipIfLocal
-from tests.common.test_dimensions import create_exec_option_dimension
+from tests.common.test_dimensions import (
+    create_single_exec_option_dimension,
+    create_uncompressed_text_dimension)
+from tests.common.test_vector import ImpalaTestDimension
 from tests.util.shell_util import exec_process
 
 TEST_DB = 'test_encryption_db'
@@ -28,7 +33,7 @@ PYWEBHDFS_TMP_DIR = 'tmp/test_encryption_load_data'
 TMP_DIR = '/%s' % (PYWEBHDFS_TMP_DIR)
 
 
-@SkipIfS3.load_data
+@SkipIfS3.hdfs_encryption
 @SkipIfIsilon.hdfs_encryption
 @SkipIfLocal.hdfs_encryption
 @pytest.mark.execute_serially
@@ -47,8 +52,9 @@ class TestHdfsEncryption(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestHdfsEncryption, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(create_single_exec_option_dimension())
-    cls.TestMatrix.add_dimension(create_uncompressed_text_dimension(cls.get_workload()))
+    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
+    cls.ImpalaTestMatrix.add_dimension(
+        create_uncompressed_text_dimension(cls.get_workload()))
 
     PARTITIONED = [True, False]
     # For 'core', just test loading from a directory that is encrypted.
@@ -59,10 +65,13 @@ class TestHdfsEncryption(ImpalaTestSuite):
       KEY_LOAD_DIR = [None, "testkey1", "testkey2"]
       KEY_TBL_DIR = [None, "testkey1", "testkey2"]
 
-    cls.TestMatrix.add_dimension(TestDimension('partitioned', *PARTITIONED))
-    cls.TestMatrix.add_dimension(TestDimension('key_load_dir', *KEY_LOAD_DIR))
-    cls.TestMatrix.add_dimension(TestDimension('key_tbl_dir', *KEY_TBL_DIR))
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('partitioned', *PARTITIONED))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('key_load_dir', *KEY_LOAD_DIR))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('key_tbl_dir', *KEY_TBL_DIR))
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('key_load_dir') is not None or\
         v.get_value('key_tbl_dir') is not None)
 
@@ -136,13 +145,12 @@ class TestHdfsEncryption(ImpalaTestSuite):
     else:
       self.client.execute('load data inpath \'%s\' into table tbl ' % (TMP_DIR))
 
-  @SkipIfS3.hdfs_client
   @SkipIfIsilon.hdfs_encryption
   @pytest.mark.execute_serially
-  def test_alter_table_drop_partition_encrypt(self):
+  def test_drop_partition_encrypt(self):
     """Verifies if alter <tbl> drop partition purge works in case
     where the Trash dir and partition dir are in different encryption
-    zones. Check CDH-31350 for details"""
+    zones. Check IMPALA-2310 for details"""
     self.client.execute("create table {0}.t1(i int) partitioned\
       by (j int)".format(TEST_DB))
     # Add three partitions (j=1), (j=2), (j=3) to table t1
@@ -187,7 +195,6 @@ class TestHdfsEncryption(ImpalaTestSuite):
     assert not self.hdfs_client.exists("test-warehouse/{0}.db/t1/j=3/j3.txt".format(TEST_DB))
     assert not self.hdfs_client.exists("test-warehouse/{0}.db/t1/j=3".format(TEST_DB))
 
-  @SkipIfS3.hdfs_client
   @SkipIfIsilon.hdfs_encryption
   @pytest.mark.execute_serially
   def test_drop_table_encrypt(self):

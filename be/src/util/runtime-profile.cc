@@ -1,36 +1,37 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
-#include "util/runtime-profile.h"
+#include "util/runtime-profile-counters.h"
 
 #include <iomanip>
 #include <iostream>
 
 #include <boost/bind.hpp>
-#include <boost/foreach.hpp>
 #include <boost/thread/locks.hpp>
 #include <boost/thread/thread.hpp>
 
 #include "common/object-pool.h"
 #include "rpc/thrift-util.h"
+#include "util/coding-util.h"
 #include "util/compress.h"
 #include "util/container-util.h"
-#include "util/cpu-info.h"
 #include "util/debug-util.h"
 #include "util/periodic-counter-updater.h"
 #include "util/redactor.h"
-#include "util/url-coding.h"
 
 #include "common/names.h"
 
@@ -119,16 +120,24 @@ RuntimeProfile* RuntimeProfile::CreateFromThrift(ObjectPool* pool,
   }
 
   if (node.__isset.event_sequences) {
-    BOOST_FOREACH(const TEventSequence& sequence, node.event_sequences) {
+    for (const TEventSequence& sequence: node.event_sequences) {
       profile->event_sequence_map_[sequence.name] =
           pool->Add(new EventSequence(sequence.timestamps, sequence.labels));
     }
   }
 
   if (node.__isset.time_series_counters) {
-    BOOST_FOREACH(const TTimeSeriesCounter& val, node.time_series_counters) {
+    for (const TTimeSeriesCounter& val: node.time_series_counters) {
       profile->time_series_counter_map_[val.name] =
           pool->Add(new TimeSeriesCounter(val.name, val.unit, val.period_ms, val.values));
+    }
+  }
+
+  if (node.__isset.summary_stats_counters) {
+    for (const TSummaryStatsCounter& val: node.summary_stats_counters) {
+      profile->summary_stats_map_[val.name] =
+          pool->Add(new SummaryStatsCounter(
+              val.unit, val.total_num_values, val.min_value, val.max_value, val.sum));
     }
   }
 
@@ -253,7 +262,7 @@ void RuntimeProfile::Update(const vector<TRuntimeProfileNode>& nodes, int* idx) 
   {
     const InfoStrings& info_strings = node.info_strings;
     lock_guard<SpinLock> l(info_strings_lock_);
-    BOOST_FOREACH(const string& key, node.info_strings_display_order) {
+    for (const string& key: node.info_strings_display_order) {
       // Look for existing info strings and update in place. If there
       // are new strings, add them to the end of the display order.
       // TODO: Is nodes.info_strings always a superset of
@@ -281,6 +290,21 @@ void RuntimeProfile::Update(const vector<TRuntimeProfileNode>& nodes, int* idx) 
         it = time_series_counter_map_.find(c.name);
       } else {
         it->second->samples_.SetSamples(c.period_ms, c.values);
+      }
+    }
+  }
+
+  {
+    lock_guard<SpinLock> l(summary_stats_map_lock_);
+    for (int i = 0; i < node.summary_stats_counters.size(); ++i) {
+      const TSummaryStatsCounter& c = node.summary_stats_counters[i];
+      SummaryStatsCounterMap::iterator it = summary_stats_map_.find(c.name);
+      if (it == summary_stats_map_.end()) {
+        summary_stats_map_[c.name] =
+            pool_->Add(new SummaryStatsCounter(
+                c.unit, c.total_num_values, c.min_value, c.max_value, c.sum));
+      } else {
+        it->second->SetStats(c);
       }
     }
   }
@@ -315,7 +339,7 @@ void RuntimeProfile::Divide(int n) {
       if (iter->second->unit() == TUnit::DOUBLE_VALUE) {
         iter->second->Set(iter->second->double_value() / n);
       } else {
-        iter->second->value_ = iter->second->value() / n;
+        iter->second->value_.Store(iter->second->value() / n);
       }
     }
   }
@@ -364,31 +388,49 @@ void RuntimeProfile::ComputeTimeInProfile(int64_t total) {
   local_time_percent_ = ::min(1.0, local_time_percent_) * 100;
 
   // Recurse on children
-  for (int i = 0; i < children_.size(); ++i) {
-    children_[i].first->ComputeTimeInProfile(total);
+  {
+    lock_guard<SpinLock> l(children_lock_);
+    for (int i = 0; i < children_.size(); ++i) {
+      children_[i].first->ComputeTimeInProfile(total);
+    }
   }
 }
 
 void RuntimeProfile::AddChild(RuntimeProfile* child, bool indent, RuntimeProfile* loc) {
-  DCHECK(child != NULL);
   lock_guard<SpinLock> l(children_lock_);
+  ChildVector::iterator insert_pos;
+  if (loc == NULL) {
+    insert_pos = children_.end();
+  } else {
+    bool found = false;
+    for (ChildVector::iterator it = children_.begin(); it != children_.end(); ++it) {
+      if (it->first == loc) {
+        insert_pos = it + 1;
+        found = true;
+        break;
+      }
+    }
+    DCHECK(found) << "Invalid loc";
+  }
+  AddChildLocked(child, indent, insert_pos);
+}
+
+void RuntimeProfile::AddChildLocked(
+    RuntimeProfile* child, bool indent, ChildVector::iterator insert_pos) {
+  children_lock_.DCheckLocked();
+  DCHECK(child != NULL);
   if (child_map_.count(child->name_) > 0) {
     // This child has already been added, so do nothing.
     // Otherwise, the map and vector will be out of sync.
     return;
   }
   child_map_[child->name_] = child;
-  if (loc == NULL) {
-    children_.push_back(make_pair(child, indent));
-  } else {
-    for (ChildVector::iterator it = children_.begin(); it != children_.end(); ++it) {
-      if (it->first == loc) {
-        children_.insert(++it, make_pair(child, indent));
-        return;
-      }
-    }
-    DCHECK(false) << "Invalid loc";
-  }
+  children_.insert(insert_pos, make_pair(child, indent));
+}
+
+void RuntimeProfile::PrependChild(RuntimeProfile* child, bool indent) {
+  lock_guard<SpinLock> l(children_lock_);
+  AddChildLocked(child, indent, children_.begin());
 }
 
 void RuntimeProfile::GetChildren(vector<RuntimeProfile*>* children) {
@@ -408,6 +450,15 @@ void RuntimeProfile::GetAllChildren(vector<RuntimeProfile*>* children) {
 }
 
 void RuntimeProfile::AddInfoString(const string& key, const string& value) {
+  return AddInfoStringInternal(key, value, false);
+}
+
+void RuntimeProfile::AppendInfoString(const string& key, const string& value) {
+  return AddInfoStringInternal(key, value, true);
+}
+
+void RuntimeProfile::AddInfoStringInternal(
+    const string& key, const string& value, bool append) {
   // Values may contain sensitive data, such as a query.
   const string& info = RedactCopy(value);
   lock_guard<SpinLock> l(info_strings_lock_);
@@ -416,7 +467,11 @@ void RuntimeProfile::AddInfoString(const string& key, const string& value) {
     info_strings_.insert(make_pair(key, info));
     info_strings_display_order_.push_back(key);
   } else {
-    it->second = info;
+    if (append) {
+      it->second += ", " + value;
+    } else {
+      it->second = info;
+    }
   }
 }
 
@@ -427,26 +482,35 @@ const string* RuntimeProfile::GetInfoString(const string& key) const {
   return &it->second;
 }
 
-#define ADD_COUNTER_IMPL(NAME, T) \
-  RuntimeProfile::T* RuntimeProfile::NAME(\
-      const string& name, TUnit::type unit, const string& parent_counter_name) {\
-    DCHECK_EQ(is_averaged_profile_, false);\
-    lock_guard<SpinLock> l(counter_map_lock_);\
-    if (counter_map_.find(name) != counter_map_.end()) {\
-      return reinterpret_cast<T*>(counter_map_[name]);\
-    }\
-    DCHECK(parent_counter_name == ROOT_COUNTER ||\
-           counter_map_.find(parent_counter_name) != counter_map_.end()); \
-    T* counter = pool_->Add(new T(unit));\
-    counter_map_[name] = counter;\
-    set<string>* child_counters =\
-        FindOrInsert(&child_counter_map_, parent_counter_name, set<string>());\
-    child_counters->insert(name);\
-    return counter;\
+void RuntimeProfile::AddCodegenMsg(
+    bool codegen_enabled, const string& extra_info, const string& extra_label) {
+  string str = codegen_enabled ? "Codegen Enabled" : "Codegen Disabled";
+  if (!extra_info.empty()) str = str + ": " + extra_info;
+  if (!extra_label.empty()) str = extra_label + " " + str;
+  AppendExecOption(str);
+}
+
+#define ADD_COUNTER_IMPL(NAME, T)                                                \
+  RuntimeProfile::T* RuntimeProfile::NAME(                                       \
+      const string& name, TUnit::type unit, const string& parent_counter_name) { \
+    DCHECK_EQ(is_averaged_profile_, false);                                      \
+    lock_guard<SpinLock> l(counter_map_lock_);                                   \
+    if (counter_map_.find(name) != counter_map_.end()) {                         \
+      return reinterpret_cast<T*>(counter_map_[name]);                           \
+    }                                                                            \
+    DCHECK(parent_counter_name == ROOT_COUNTER                                   \
+        || counter_map_.find(parent_counter_name) != counter_map_.end());        \
+    T* counter = pool_->Add(new T(unit));                                        \
+    counter_map_[name] = counter;                                                \
+    set<string>* child_counters =                                                \
+        FindOrInsert(&child_counter_map_, parent_counter_name, set<string>());   \
+    child_counters->insert(name);                                                \
+    return counter;                                                              \
   }
 
 ADD_COUNTER_IMPL(AddCounter, Counter);
 ADD_COUNTER_IMPL(AddHighWaterMarkCounter, HighWaterMarkCounter);
+ADD_COUNTER_IMPL(AddConcurrentTimerCounter, ConcurrentTimerCounter);
 
 RuntimeProfile::DerivedCounter* RuntimeProfile::AddDerivedCounter(
     const string& name, TUnit::type unit,
@@ -550,7 +614,7 @@ void RuntimeProfile::PrettyPrint(ostream* s, const string& prefix) const {
 
   {
     lock_guard<SpinLock> l(info_strings_lock_);
-    BOOST_FOREACH(const string& key, info_strings_display_order_) {
+    for (const string& key: info_strings_display_order_) {
       stream << prefix << "  " << key << ": " << info_strings_.find(key)->second << endl;
     }
   }
@@ -564,8 +628,7 @@ void RuntimeProfile::PrettyPrint(ostream* s, const string& prefix) const {
     // The times in parentheses are the time elapsed since the last event.
     vector<EventSequence::Event> events;
     lock_guard<SpinLock> l(event_sequence_lock_);
-    BOOST_FOREACH(
-        const EventSequenceMap::value_type& event_sequence, event_sequence_map_) {
+    for (const EventSequenceMap::value_type& event_sequence: event_sequence_map_) {
       // If the stopwatch has never been started (e.g. because this sequence came from
       // Thrift), look for the last element to tell us the total runtime. For
       // currently-updating sequences, it's better to use the stopwatch value because that
@@ -579,7 +642,7 @@ void RuntimeProfile::PrettyPrint(ostream* s, const string& prefix) const {
 
       int64_t prev = 0L;
       event_sequence.second->GetEvents(&events);
-      BOOST_FOREACH(const EventSequence::Event& event, events) {
+      for (const EventSequence::Event& event: events) {
         stream << prefix << "     - " << event.first << ": "
                << PrettyPrinter::Print(event.second, TUnit::TIME_NS) << " ("
                << PrettyPrinter::Print(event.second - prev, TUnit::TIME_NS) << ")"
@@ -595,7 +658,7 @@ void RuntimeProfile::PrettyPrint(ostream* s, const string& prefix) const {
     SpinLock* lock;
     int num, period;
     lock_guard<SpinLock> l(time_series_counter_map_lock_);
-    BOOST_FOREACH(const TimeSeriesCounterMap::value_type& v, time_series_counter_map_) {
+    for (const TimeSeriesCounterMap::value_type& v: time_series_counter_map_) {
       const int64_t* samples = v.second->samples_.GetSamples(&num, &period, &lock);
       if (num > 0) {
         stream << prefix << "  " << v.first << "("
@@ -611,6 +674,28 @@ void RuntimeProfile::PrettyPrint(ostream* s, const string& prefix) const {
     }
   }
 
+  {
+    lock_guard<SpinLock> l(summary_stats_map_lock_);
+    // Print all SummaryStatsCounters as following:
+    // <Name>: (Avg: <value> ; Min: <min_value> ; Max: <max_value> ;
+    // Number of samples: <total>)
+    for (const SummaryStatsCounterMap::value_type& v: summary_stats_map_) {
+      if (v.second->TotalNumValues() == 0) {
+        // No point printing all the stats if number of samples is zero.
+        stream << prefix << "  - " << v.first << ": "
+               << PrettyPrinter::Print(v.second->value(), v.second->unit(), true)
+               << " (Number of samples: " << v.second->TotalNumValues() << ")" << endl;
+      } else {
+        stream << prefix << "   - " << v.first << ": (Avg: "
+               << PrettyPrinter::Print(v.second->value(), v.second->unit(), true)
+               << " ; Min: "
+               << PrettyPrinter::Print(v.second->MinValue(), v.second->unit(), true)
+               << " ; Max: "
+               << PrettyPrinter::Print(v.second->MaxValue(), v.second->unit(), true)
+               << " ; Number of samples: " << v.second->TotalNumValues() << ")" << endl;
+      }
+    }
+  }
   RuntimeProfile::PrintChildCounters(
       prefix, ROOT_COUNTER, counter_map, child_counter_map, s);
 
@@ -705,11 +790,11 @@ void RuntimeProfile::ToThrift(vector<TRuntimeProfileNode>* nodes) const {
       node.__set_event_sequences(vector<TEventSequence>());
       node.event_sequences.resize(event_sequence_map_.size());
       int idx = 0;
-      BOOST_FOREACH(const EventSequenceMap::value_type& val, event_sequence_map_) {
+      for (const EventSequenceMap::value_type& val: event_sequence_map_) {
         TEventSequence* seq = &node.event_sequences[idx++];
         seq->name = val.first;
         val.second->GetEvents(&events);
-        BOOST_FOREACH(const EventSequence::Event& ev, events) {
+        for (const EventSequence::Event& ev: events) {
           seq->labels.push_back(ev.first);
           seq->timestamps.push_back(ev.second);
         }
@@ -720,12 +805,23 @@ void RuntimeProfile::ToThrift(vector<TRuntimeProfileNode>* nodes) const {
   {
     lock_guard<SpinLock> l(time_series_counter_map_lock_);
     if (time_series_counter_map_.size() != 0) {
-      node.__set_time_series_counters(vector<TTimeSeriesCounter>());
-      node.time_series_counters.resize(time_series_counter_map_.size());
+      node.__set_time_series_counters(
+          vector<TTimeSeriesCounter>(time_series_counter_map_.size()));
       int idx = 0;
-      BOOST_FOREACH(const TimeSeriesCounterMap::value_type& val,
-          time_series_counter_map_) {
+      for (const TimeSeriesCounterMap::value_type& val: time_series_counter_map_) {
         val.second->ToThrift(&node.time_series_counters[idx++]);
+      }
+    }
+  }
+
+  {
+    lock_guard<SpinLock> l(summary_stats_map_lock_);
+    if (summary_stats_map_.size() != 0) {
+      node.__set_summary_stats_counters(
+          vector<TSummaryStatsCounter>(summary_stats_map_.size()));
+      int idx = 0;
+      for (const SummaryStatsCounterMap::value_type& val: summary_stats_map_) {
+        val.second->ToThrift(&node.summary_stats_counters[idx++], val.first);
       }
     }
   }
@@ -845,7 +941,7 @@ void RuntimeProfile::PrintChildCounters(const string& prefix,
   ChildCounterMap::const_iterator itr = child_counter_map.find(counter_name);
   if (itr != child_counter_map.end()) {
     const set<string>& child_counters = itr->second;
-    BOOST_FOREACH(const string& child_counter, child_counters) {
+    for (const string& child_counter: child_counters) {
       CounterMap::const_iterator iter = counter_map.find(child_counter);
       if (iter == counter_map.end()) continue;
       stream << prefix << "   - " << iter->first << ": "
@@ -855,6 +951,18 @@ void RuntimeProfile::PrintChildCounters(const string& prefix,
           child_counter_map, s);
     }
   }
+}
+
+RuntimeProfile::SummaryStatsCounter* RuntimeProfile::AddSummaryStatsCounter(
+    const string& name, TUnit::type unit, const std::string& parent_counter_name) {
+  DCHECK_EQ(is_averaged_profile_, false);
+  lock_guard<SpinLock> l(summary_stats_map_lock_);
+  if (summary_stats_map_.find(name) != summary_stats_map_.end()) {
+    return summary_stats_map_[name];
+  }
+  SummaryStatsCounter* counter = pool_->Add(new SummaryStatsCounter(unit));
+  summary_stats_map_[name] = counter;
+  return counter;
 }
 
 RuntimeProfile::TimeSeriesCounter* RuntimeProfile::AddTimeSeriesCounter(
@@ -900,10 +1008,60 @@ string RuntimeProfile::TimeSeriesCounter::DebugString() const {
 }
 
 void RuntimeProfile::EventSequence::ToThrift(TEventSequence* seq) const {
-  BOOST_FOREACH(const EventSequence::Event& ev, events_) {
+  for (const EventSequence::Event& ev: events_) {
     seq->labels.push_back(ev.first);
     seq->timestamps.push_back(ev.second);
   }
+}
+
+void RuntimeProfile::SummaryStatsCounter::ToThrift(TSummaryStatsCounter* counter,
+    const std::string& name) {
+  lock_guard<SpinLock> l(lock_);
+  counter->name = name;
+  counter->unit = unit_;
+  counter->sum = sum_;
+  counter->total_num_values = total_num_values_;
+  counter->min_value = min_;
+  counter->max_value = max_;
+}
+
+void RuntimeProfile::SummaryStatsCounter::UpdateCounter(int64_t new_value) {
+  lock_guard<SpinLock> l(lock_);
+
+  ++total_num_values_;
+  sum_ += new_value;
+  value_.Store(sum_ / total_num_values_);
+
+  if (new_value < min_) min_ = new_value;
+  if (new_value > max_) max_ = new_value;
+}
+
+void RuntimeProfile::SummaryStatsCounter::SetStats(const TSummaryStatsCounter& counter) {
+  // We drop this input if it looks malformed.
+  if (counter.total_num_values < 0) return;
+  lock_guard<SpinLock> l(lock_);
+  unit_ = counter.unit;
+  sum_ = counter.sum;
+  total_num_values_ = counter.total_num_values;
+  min_ = counter.min_value;
+  max_ = counter.max_value;
+
+  value_.Store(total_num_values_ == 0 ? 0 : sum_ / total_num_values_);
+}
+
+int64_t RuntimeProfile::SummaryStatsCounter::MinValue() {
+  lock_guard<SpinLock> l(lock_);
+  return min_;
+}
+
+int64_t RuntimeProfile::SummaryStatsCounter::MaxValue() {
+  lock_guard<SpinLock> l(lock_);
+  return max_;
+}
+
+int32_t RuntimeProfile::SummaryStatsCounter::TotalNumValues() {
+  lock_guard<SpinLock> l(lock_);
+  return total_num_values_;
 }
 
 }

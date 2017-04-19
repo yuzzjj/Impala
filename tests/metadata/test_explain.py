@@ -1,12 +1,27 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # Functional tests running EXPLAIN statements.
 #
-import logging
 import pytest
 import re
-from tests.common.test_vector import *
-from tests.common.impala_test_suite import *
-from tests.common.skip import SkipIfS3, SkipIfLocal
+
+from tests.common.impala_test_suite import ImpalaTestSuite
+from tests.common.skip import SkipIfLocal
 from tests.util.filesystem_utils import WAREHOUSE
 
 # Tests the different explain levels [0-3] on a few queries.
@@ -24,32 +39,36 @@ class TestExplain(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestExplain, cls).add_test_dimensions()
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('table_format').file_format == 'text' and\
         v.get_value('table_format').compression_codec == 'none' and\
         v.get_value('exec_option')['batch_size'] == 0 and\
         v.get_value('exec_option')['disable_codegen'] == False and\
         v.get_value('exec_option')['num_nodes'] != 1)
 
-  @pytest.mark.xfail(run=False, reason="Expected per-host mem requirements inconsistent")
+  @pytest.mark.skip_if(pytest.config.option.testing_remote_cluster,
+                     reason='Resource profile depends on number of nodes')
   def test_explain_level0(self, vector):
     vector.get_value('exec_option')['num_scanner_threads'] = self.NUM_SCANNER_THREADS
     vector.get_value('exec_option')['explain_level'] = 0
     self.run_test_case('QueryTest/explain-level0', vector)
 
-  @pytest.mark.xfail(run=False, reason="Expected per-host mem requirements inconsistent")
+  @pytest.mark.skip_if(pytest.config.option.testing_remote_cluster,
+                     reason='Resource profile depends on number of nodes')
   def test_explain_level1(self, vector):
     vector.get_value('exec_option')['num_scanner_threads'] = self.NUM_SCANNER_THREADS
     vector.get_value('exec_option')['explain_level'] = 1
     self.run_test_case('QueryTest/explain-level1', vector)
 
-  @pytest.mark.xfail(run=False, reason="The test for missing table stats fails for avro")
+  @pytest.mark.skip_if(pytest.config.option.testing_remote_cluster,
+                     reason='Resource profile depends on number of nodes')
   def test_explain_level2(self, vector):
     vector.get_value('exec_option')['num_scanner_threads'] = self.NUM_SCANNER_THREADS
     vector.get_value('exec_option')['explain_level'] = 2
     self.run_test_case('QueryTest/explain-level2', vector)
 
-  @pytest.mark.xfail(run=False, reason="The test for missing table stats fails for avro")
+  @pytest.mark.skip_if(pytest.config.option.testing_remote_cluster,
+                     reason='Resource profile depends on number of nodes')
   def test_explain_level3(self, vector):
     vector.get_value('exec_option')['num_scanner_threads'] = self.NUM_SCANNER_THREADS
     vector.get_value('exec_option')['explain_level'] = 3
@@ -97,33 +116,33 @@ class TestExplainEmptyPartition(ImpalaTestSuite):
   def teardown_method(self, method):
     self.cleanup_db(self.TEST_DB_NAME)
 
-  @SkipIfS3.hdfs_client
   @SkipIfLocal.hdfs_client
   def test_non_empty_partition_0_rows(self):
     """Regression test for IMPALA-1708: if a partition has 0 rows but > 0 files after
     COMPUTE STATS, don't warn the user about missing stats. The files are probably
     corrupted, or used for something else."""
     self.client.execute("SET EXPLAIN_LEVEL=3")
-    self.client.execute(
-      "CREATE TABLE %s.empty_partition (col int) partitioned by (p int)" % self.TEST_DB_NAME);
+    self.client.execute("CREATE TABLE %s.empty_partition (col int) "
+                        "partitioned by (p int)" % self.TEST_DB_NAME)
     self.client.execute(
       "ALTER TABLE %s.empty_partition ADD PARTITION (p=NULL)" % self.TEST_DB_NAME)
     # Put an empty file in the partition so we have > 0 files, but 0 rows
-    self.hdfs_client.create_file(
-      "test-warehouse/%s.db/empty_partition/p=__HIVE_DEFAULT_PARTITION__/empty" %
-      self.TEST_DB_NAME, "")
+    self.filesystem_client.create_file(
+        "test-warehouse/%s.db/empty_partition/p=__HIVE_DEFAULT_PARTITION__/empty" %
+        self.TEST_DB_NAME, "")
     self.client.execute("REFRESH %s.empty_partition" % self.TEST_DB_NAME)
     self.client.execute("COMPUTE STATS %s.empty_partition" % self.TEST_DB_NAME)
     assert "NULL\t0\t1" in str(
-      self.client.execute("SHOW PARTITIONS %s.empty_partition" % self.TEST_DB_NAME))
+        self.client.execute("SHOW PARTITIONS %s.empty_partition" % self.TEST_DB_NAME))
     assert "missing relevant table and/or column statistics" not in str(
-      self.client.execute("EXPLAIN SELECT * FROM %s.empty_partition" % self.TEST_DB_NAME))
+        self.client.execute(
+            "EXPLAIN SELECT * FROM %s.empty_partition" % self.TEST_DB_NAME))
 
     # Now add a partition with some data (so it gets selected into the scan), to check
     # that its lack of stats is correctly identified
     self.client.execute(
       "ALTER TABLE %s.empty_partition ADD PARTITION (p=1)" % self.TEST_DB_NAME)
-    self.hdfs_client.create_file("test-warehouse/%s.db/empty_partition/p=1/rows" %
+    self.filesystem_client.create_file("test-warehouse/%s.db/empty_partition/p=1/rows" %
                                  self.TEST_DB_NAME, "1")
     self.client.execute("REFRESH %s.empty_partition" % self.TEST_DB_NAME)
     explain_result = str(

@@ -14,7 +14,7 @@ set
 'EXPLAIN_LEVEL','1'
 'HBASE_CACHE_BLOCKS','0'
 'HBASE_CACHING','0'
-'MAX_ERRORS','0'
+'MAX_ERRORS','100'
 'MAX_IO_BUFFERS','0'
 'MAX_SCAN_RANGE_LENGTH','0'
 'MEM_LIMIT','0'
@@ -46,7 +46,7 @@ set;
 'EXPLAIN_LEVEL','3'
 'HBASE_CACHE_BLOCKS','0'
 'HBASE_CACHING','0'
-'MAX_ERRORS','0'
+'MAX_ERRORS','100'
 'MAX_IO_BUFFERS','0'
 'MAX_SCAN_RANGE_LENGTH','0'
 'MEM_LIMIT','0'
@@ -78,7 +78,7 @@ set;
 'EXPLAIN_LEVEL','0'
 'HBASE_CACHE_BLOCKS','0'
 'HBASE_CACHING','0'
-'MAX_ERRORS','0'
+'MAX_ERRORS','100'
 'MAX_IO_BUFFERS','0'
 'MAX_SCAN_RANGE_LENGTH','0'
 'MEM_LIMIT','0'
@@ -111,7 +111,7 @@ set;
 'EXPLAIN_LEVEL','1'
 'HBASE_CACHE_BLOCKS','0'
 'HBASE_CACHING','0'
-'MAX_ERRORS','0'
+'MAX_ERRORS','100'
 'MAX_IO_BUFFERS','0'
 'MAX_SCAN_RANGE_LENGTH','0'
 'MEM_LIMIT','0'
@@ -135,7 +135,7 @@ The PARQUET_FILE_SIZE query option must be less than 2GB.
 ---- QUERY
 set foo=bar
 ---- CATCH
-Ignoring invalid configuration option: foo
+Invalid query option: foo
 ====
 ---- QUERY
 set parquet_compression_codec=bar
@@ -164,4 +164,95 @@ select count(string_col) from functional.alltypestiny
 8
 ---- TYPES
 BIGINT
+====
+---- QUERY
+# IMPALA-3334: 'optimize_partition_key_scans' is a boolean query option
+set explain_level=0;
+set optimize_partition_key_scans=true;
+explain select min(month), max(year), ndv(day) from functional.alltypesagg;
+---- RESULTS: VERIFY_IS_SUBSET
+'01:AGGREGATE [FINALIZE]'
+'00:UNION'
+'   constant-operands=11'
+====
+---- QUERY
+set explain_level=0;
+set optimize_partition_key_scans=1;
+explain select min(month), max(year), ndv(day) from functional.alltypesagg;
+---- RESULTS: VERIFY_IS_SUBSET
+'01:AGGREGATE [FINALIZE]'
+'00:UNION'
+'   constant-operands=11'
+====
+---- QUERY
+set explain_level=0;
+set optimize_partition_key_scans=false;
+explain select min(month), max(year), ndv(day) from functional.alltypesagg;
+---- RESULTS: VERIFY_IS_SUBSET
+'03:AGGREGATE [FINALIZE]'
+'02:EXCHANGE [UNPARTITIONED]'
+'01:AGGREGATE'
+'00:SCAN HDFS [functional.alltypesagg]'
+====
+---- QUERY
+set explain_level=0;
+set optimize_partition_key_scans=0;
+explain select min(month), max(year), ndv(day) from functional.alltypesagg;
+---- RESULTS: VERIFY_IS_SUBSET
+'03:AGGREGATE [FINALIZE]'
+'02:EXCHANGE [UNPARTITIONED]'
+'01:AGGREGATE'
+'00:SCAN HDFS [functional.alltypesagg]'
+====
+---- QUERY
+set explain_level=0;
+set disable_streaming_preaggregations=false;
+explain select count(distinct double_col) from functional.alltypesagg;
+---- RESULTS: VERIFY_IS_SUBSET
+'06:AGGREGATE [FINALIZE]'
+'05:EXCHANGE [UNPARTITIONED]'
+'02:AGGREGATE'
+'04:AGGREGATE'
+'03:EXCHANGE [HASH(double_col)]'
+'01:AGGREGATE [STREAMING]'
+'00:SCAN HDFS [functional.alltypesagg]'
+====
+---- QUERY
+set explain_level=0;
+set disable_streaming_preaggregations=0;
+explain select count(distinct double_col) from functional.alltypesagg;
+---- RESULTS: VERIFY_IS_SUBSET
+'06:AGGREGATE [FINALIZE]'
+'05:EXCHANGE [UNPARTITIONED]'
+'02:AGGREGATE'
+'04:AGGREGATE'
+'03:EXCHANGE [HASH(double_col)]'
+'01:AGGREGATE [STREAMING]'
+'00:SCAN HDFS [functional.alltypesagg]'
+====
+---- QUERY
+set explain_level=0;
+set disable_streaming_preaggregations=true;
+explain select count(distinct double_col) from functional.alltypesagg;
+---- RESULTS: VERIFY_IS_SUBSET
+'06:AGGREGATE [FINALIZE]'
+'05:EXCHANGE [UNPARTITIONED]'
+'02:AGGREGATE'
+'04:AGGREGATE'
+'03:EXCHANGE [HASH(double_col)]'
+'01:AGGREGATE'
+'00:SCAN HDFS [functional.alltypesagg]'
+====
+---- QUERY
+set explain_level=0;
+set disable_streaming_preaggregations=1;
+explain select count(distinct double_col) from functional.alltypesagg;
+---- RESULTS: VERIFY_IS_SUBSET
+'06:AGGREGATE [FINALIZE]'
+'05:EXCHANGE [UNPARTITIONED]'
+'02:AGGREGATE'
+'04:AGGREGATE'
+'03:EXCHANGE [HASH(double_col)]'
+'01:AGGREGATE'
+'00:SCAN HDFS [functional.alltypesagg]'
 ====

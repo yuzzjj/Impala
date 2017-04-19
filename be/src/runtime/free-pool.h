@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_RUNTIME_FREE_POOL_H
@@ -19,7 +22,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <string>
+#include <sstream>
+#include "common/atomic.h"
 #include "common/logging.h"
+#include "gutil/bits.h"
 #include "runtime/mem-pool.h"
 #include "util/bit-util.h"
 
@@ -30,8 +36,8 @@ namespace impala {
 
 /// Implementation of a free pool to recycle allocations. The pool is broken
 /// up into 64 lists, one for each power of 2. Each allocation is rounded up
-/// to the next power of 2. When the allocation is freed, it is added to the
-/// corresponding free list.
+/// to the next power of 2 (or 8 bytes, whichever is larger). When the
+/// allocation is freed, it is added to the corresponding free list.
 /// Each allocation has an 8 byte header that immediately precedes the actual
 /// allocation. If the allocation is owned by the user, the header contains
 /// the ptr to the list that it should be added to on Free().
@@ -51,29 +57,28 @@ class FreePool {
     memset(&lists_, 0, sizeof(lists_));
   }
 
-  /// Allocates a buffer of size.
-  uint8_t* Allocate(int size) {
+  /// Allocates a buffer of size between [0, 2^62 - 1 - sizeof(FreeListNode)] bytes.
+  uint8_t* Allocate(int64_t size) {
+    DCHECK_GE(size, 0);
 #ifndef NDEBUG
-    static int32_t alloc_counts = 0;
     if (FLAGS_stress_free_pool_alloc > 0 &&
-        (++alloc_counts % FLAGS_stress_free_pool_alloc) == 0) {
+        (alloc_counts_.Add(1) % FLAGS_stress_free_pool_alloc) == 0) {
       return NULL;
     }
 #endif
+    /// Return a non-NULL dummy pointer. NULL is reserved for failures.
+    if (UNLIKELY(size == 0)) return mem_pool_->EmptyAllocPtr();
     ++net_allocations_;
     if (FLAGS_disable_mem_pools) return reinterpret_cast<uint8_t*>(malloc(size));
-
-    /// This is the typical malloc behavior. NULL is reserved for failures.
-    if (size == 0) return reinterpret_cast<uint8_t*>(0x1);
-
-    /// Do ceil(log_2(size))
-    int free_list_idx = BitUtil::Log2(size);
+    /// MemPool allocations are 8-byte aligned, so making allocations < 8 bytes
+    /// doesn't save memory and eliminates opportunities to recycle allocations.
+    size = std::max<int64_t>(8, size);
+    int free_list_idx = Bits::Log2Ceiling64(size);
     DCHECK_LT(free_list_idx, NUM_LISTS);
-
     FreeListNode* allocation = lists_[free_list_idx].next;
     if (allocation == NULL) {
       // There wasn't an existing allocation of the right size, allocate a new one.
-      size = 1 << free_list_idx;
+      size = 1LL << free_list_idx;
       allocation = reinterpret_cast<FreeListNode*>(
           mem_pool_->Allocate(size + sizeof(FreeListNode)));
       if (UNLIKELY(allocation == NULL)) {
@@ -92,12 +97,12 @@ class FreePool {
   }
 
   void Free(uint8_t* ptr) {
+    if (UNLIKELY(ptr == NULL || ptr == mem_pool_->EmptyAllocPtr())) return;
     --net_allocations_;
     if (FLAGS_disable_mem_pools) {
       free(ptr);
       return;
     }
-    if (ptr == NULL || reinterpret_cast<int64_t>(ptr) == 0x1) return;
     FreeListNode* node = reinterpret_cast<FreeListNode*>(ptr - sizeof(FreeListNode));
     FreeListNode* list = node->list;
 #ifndef NDEBUG
@@ -114,26 +119,26 @@ class FreePool {
   ///
   /// NULL will be returned on allocation failure. It's the caller's responsibility to
   /// free the memory buffer pointed to by "ptr" in this case.
-  uint8_t* Reallocate(uint8_t* ptr, int size) {
+  uint8_t* Reallocate(uint8_t* ptr, int64_t size) {
 #ifndef NDEBUG
-    static int32_t alloc_counts = 0;
     if (FLAGS_stress_free_pool_alloc > 0 &&
-        (++alloc_counts % FLAGS_stress_free_pool_alloc) == 0) {
+        (alloc_counts_.Add(1) % FLAGS_stress_free_pool_alloc) == 0) {
       return NULL;
     }
 #endif
+    if (UNLIKELY(ptr == NULL || ptr == mem_pool_->EmptyAllocPtr())) return Allocate(size);
     if (FLAGS_disable_mem_pools) {
       return reinterpret_cast<uint8_t*>(realloc(reinterpret_cast<void*>(ptr), size));
     }
-    if (ptr == NULL || reinterpret_cast<int64_t>(ptr) == 0x1) return Allocate(size);
     FreeListNode* node = reinterpret_cast<FreeListNode*>(ptr - sizeof(FreeListNode));
     FreeListNode* list = node->list;
 #ifndef NDEBUG
     CheckValidAllocation(list, ptr);
 #endif
     int bucket_idx = (list - &lists_[0]);
+    DCHECK_LT(bucket_idx, NUM_LISTS);
     // This is the actual size of ptr.
-    int allocation_size = 1 << bucket_idx;
+    int64_t allocation_size = 1LL << bucket_idx;
 
     // If it's already big enough, just return the ptr.
     if (allocation_size >= size) return ptr;
@@ -203,6 +208,12 @@ class FreePool {
 
   /// Diagnostic counter that tracks (# Allocates - # Frees)
   int64_t net_allocations_;
+
+#ifndef NDEBUG
+  /// Counter for tracking the number of allocations. Used only if the
+  /// the stress flag FLAGS_stress_free_pool_alloc is set.
+  static AtomicInt32 alloc_counts_;
+#endif
 };
 
 }

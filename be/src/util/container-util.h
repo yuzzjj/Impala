@@ -1,23 +1,28 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UTIL_CONTAINER_UTIL_H
 #define IMPALA_UTIL_CONTAINER_UTIL_H
 
 #include <map>
+#include <unordered_map>
 #include <boost/unordered_map.hpp>
+#include <boost/functional/hash.hpp>
 
 #include "util/hash-util.h"
 #include "gen-cpp/Types_types.h"
@@ -31,6 +36,21 @@ inline std::size_t hash_value(const TNetworkAddress& host_port) {
       HashUtil::Hash(host_port.hostname.c_str(), host_port.hostname.length(), 0);
   return HashUtil::Hash(&host_port.port, sizeof(host_port.port), hash);
 }
+
+}
+
+/// Hash function for std:: containers
+namespace std {
+
+template<> struct hash<impala::TNetworkAddress> {
+  std::size_t operator()(const impala::TNetworkAddress& host_port) const {
+    return impala::hash_value(host_port);
+  }
+};
+
+}
+
+namespace impala {
 
 struct HashTNetworkAddressPtr : public std::unary_function<TNetworkAddress*, size_t> {
   size_t operator()(const TNetworkAddress* const& p) const { return hash_value(*p); }
@@ -46,10 +66,20 @@ struct TNetworkAddressPtrEquals : public std::unary_function<TNetworkAddress*, b
 
 /// FindOrInsert(): if the key is present, return the value; if the key is not present,
 /// create a new entry (key, default_val) and return default_val.
+/// TODO: replace with single template which takes a template param
 
 template <typename K, typename V>
 V* FindOrInsert(std::map<K,V>* m, const K& key, const V& default_val) {
   typename std::map<K,V>::iterator it = m->find(key);
+  if (it == m->end()) {
+    it = m->insert(std::make_pair(key, default_val)).first;
+  }
+  return &it->second;
+}
+
+template <typename K, typename V>
+V* FindOrInsert(std::unordered_map<K,V>* m, const K& key, const V& default_val) {
+  typename std::unordered_map<K,V>::iterator it = m->find(key);
   if (it == m->end()) {
     it = m->insert(std::make_pair(key, default_val)).first;
   }

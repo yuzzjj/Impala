@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UTIL_BIT_STREAM_UTILS_H
@@ -74,6 +77,9 @@ class BitWriter {
   /// to the next byte boundary.
   void Flush(bool align=false);
 
+  /// Maximum supported bitwidth for writer.
+  static const int MAX_BITWIDTH = 32;
+
  private:
   uint8_t* buffer_;
   int max_bytes_;
@@ -92,13 +98,19 @@ class BitWriter {
 class BitReader {
  public:
   /// 'buffer' is the buffer to read from.  The buffer's length is 'buffer_len'.
-  BitReader(uint8_t* buffer, int buffer_len) {
-    Reset(buffer, buffer_len);
-  }
+  /// Does not take ownership of the buffer.
+  BitReader(const uint8_t* buffer, int buffer_len) { Reset(buffer, buffer_len); }
 
   BitReader() : buffer_(NULL), max_bytes_(0) {}
 
-  void Reset(uint8_t* buffer, int buffer_len) {
+  // The implicit copy constructor is left defined. If a BitReader is copied, the
+  // two copies do not share any state. Invoking functions on either copy continues
+  // reading from the current read position without modifying the state of the other
+  // copy.
+
+  /// Resets the read to start reading from the start of 'buffer'. The buffer's
+  /// length is 'buffer_len'. Does not take ownership of the buffer.
+  void Reset(const uint8_t* buffer, int buffer_len) {
     buffer_ = buffer;
     max_bytes_ = buffer_len;
     byte_offset_ = 0;
@@ -120,7 +132,8 @@ class BitReader {
   bool GetAligned(int num_bytes, T* v);
 
   /// Reads a vlq encoded int from the stream.  The encoded int must start at the
-  /// beginning of a byte. Return false if there were not enough bytes in the buffer.
+  /// beginning of a byte. Return false if there were not enough bytes in the buffer or
+  /// the int is invalid.
   bool GetVlqInt(int32_t* v);
 
   /// Returns the number of bytes left in the stream, not including the current byte (i.e.,
@@ -130,8 +143,11 @@ class BitReader {
   /// Maximum byte length of a vlq encoded int
   static const int MAX_VLQ_BYTE_LEN = 5;
 
+  /// Maximum supported bitwidth for reader.
+  static const int MAX_BITWIDTH = 32;
+
  private:
-  uint8_t* buffer_;
+  const uint8_t* buffer_;
   int max_bytes_;
 
   /// Bytes are memcpy'd from buffer_ and values are read from this variable. This is

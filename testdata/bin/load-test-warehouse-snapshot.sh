@@ -1,17 +1,21 @@
 #!/bin/bash
-# Copyright 2012 Cloudera Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # Loads a test-warehouse snapshot file into HDFS. Test-warehouse snapshot files
 # are produced as an artifact of each successful master Jenkins build and can be
@@ -24,13 +28,14 @@ set -euo pipefail
 trap 'echo Error in $0 at line $LINENO: $(cd "'$PWD'" && awk "NR == $LINENO" $0)' ERR
 
 . ${IMPALA_HOME}/bin/impala-config.sh > /dev/null 2>&1
+: ${REMOTE_LOAD:=}
 
 if [[ $# -ne 1 ]]; then
   echo "Usage: load-test-warehouse-snapshot.sh [test-warehouse-SNAPSHOT.tar.gz]"
   exit 1
 fi
 
-TEST_WAREHOUSE_DIR="/test-warehouse"
+: ${TEST_WAREHOUSE_DIR=/test-warehouse}
 
 SNAPSHOT_FILE=$1
 if [ ! -f ${SNAPSHOT_FILE} ]; then
@@ -38,9 +43,13 @@ if [ ! -f ${SNAPSHOT_FILE} ]; then
   exit 1
 fi
 
-echo "Your existing ${TARGET_FILESYSTEM} warehouse directory " \
-     "(${FILESYSTEM_PREFIX}${TEST_WAREHOUSE_DIR}) will be removed."
-read -p "Continue (y/n)? "
+if [[ -z "$REMOTE_LOAD" ]]; then
+  echo "Your existing ${TARGET_FILESYSTEM} warehouse directory " \
+    "(${FILESYSTEM_PREFIX}${TEST_WAREHOUSE_DIR} will be removed."
+  read -p "Continue (y/n)? "
+else
+  REPLY=y
+fi
 if [[ "$REPLY" =~ ^[Yy]$ ]]; then
   # Create a new warehouse directory. If one already exist, remove it first.
   if [ "${TARGET_FILESYSTEM}" = "s3" ]; then
@@ -52,7 +61,7 @@ if [[ "$REPLY" =~ ^[Yy]$ ]]; then
   else
     # Either isilon or hdfs, no change in procedure.
     if hadoop fs -test -d ${FILESYSTEM_PREFIX}${TEST_WAREHOUSE_DIR}; then
-      echo "Removing existing test-warehouse directory"
+      echo "Removing existing ${TEST_WAREHOUSE_DIR} directory"
       # For filesystems that don't allow 'rm' without 'x', chmod to 777 for the
       # subsequent 'rm -r'.
       if [ "${TARGET_FILESYSTEM}" = "isilon" ] || \
@@ -61,8 +70,13 @@ if [[ "$REPLY" =~ ^[Yy]$ ]]; then
       fi
       hadoop fs -rm -r -skipTrash ${FILESYSTEM_PREFIX}${TEST_WAREHOUSE_DIR}
     fi
-    echo "Creating test-warehouse directory"
-    hadoop fs -mkdir ${FILESYSTEM_PREFIX}${TEST_WAREHOUSE_DIR}
+    echo "Creating ${TEST_WAREHOUSE_DIR} directory"
+    hadoop fs -mkdir -p ${FILESYSTEM_PREFIX}${TEST_WAREHOUSE_DIR}
+
+    # TODO: commented out because of regressions in local end-to-end testing
+    # See: https://issues.cloudera.org/browse/IMPALA-4345
+    #
+    # hdfs dfs -chmod 1777 ${FILESYSTEM_PREFIX}${TEST_WAREHOUSE_DIR}
   fi
 else
   echo -e "\nAborting."
@@ -77,14 +91,18 @@ mkdir ${SNAPSHOT_STAGING_DIR}
 echo "Extracting tarball"
 tar -C ${SNAPSHOT_STAGING_DIR} -xzf ${SNAPSHOT_FILE}
 
-if [ ! -f ${SNAPSHOT_STAGING_DIR}/test-warehouse/githash.txt ]; then
-  echo "The test-warehouse snapshot does not containa githash, aborting load"
+if [ ! -f ${SNAPSHOT_STAGING_DIR}${TEST_WAREHOUSE_DIR}/githash.txt ]; then
+  echo "The test-warehouse snapshot does not contain a githash.txt file, aborting load"
   exit 1
 fi
 
 
-echo "Loading hive builtins"
-${IMPALA_HOME}/testdata/bin/load-hive-builtins.sh
+# Hive builtins are already present on a pre-setup CM managed cluster.
+if [[ -z "$REMOTE_LOAD" ]]; then
+  echo "Loading hive builtins"
+  ${IMPALA_HOME}/testdata/bin/load-hive-builtins.sh
+fi
+
 echo "Copying data to ${TARGET_FILESYSTEM}"
 if [ "${TARGET_FILESYSTEM}" = "s3" ]; then
   # hive does not yet work well with s3, so we won't need hive builtins.
@@ -95,8 +113,7 @@ if [ "${TARGET_FILESYSTEM}" = "s3" ]; then
     exit 1
   fi
 else
-  hadoop fs -put ${SNAPSHOT_STAGING_DIR}${TEST_WAREHOUSE_DIR}/* \
-      ${FILESYSTEM_PREFIX}${TEST_WAREHOUSE_DIR}
+    hadoop fs -put ${SNAPSHOT_STAGING_DIR}${TEST_WAREHOUSE_DIR}/* ${FILESYSTEM_PREFIX}${TEST_WAREHOUSE_DIR}
 fi
 
 ${IMPALA_HOME}/bin/create_testdata.sh

@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/hbase-table-scanner.h"
 #include "exec/hbase-scan-node.h"
@@ -23,11 +26,14 @@
 #include "runtime/descriptors.h"
 #include "runtime/runtime-state.h"
 #include "runtime/mem-pool.h"
+#include "runtime/mem-tracker.h"
 #include "runtime/tuple.h"
+#include "util/runtime-profile-counters.h"
 
 #include "common/names.h"
 
 using namespace impala;
+using namespace strings;
 
 jclass HBaseTableScanner::scan_cl_ = NULL;
 jclass HBaseTableScanner::resultscanner_cl_ = NULL;
@@ -69,6 +75,9 @@ jmethodID HBaseTableScanner::single_column_value_filter_ctor_ = NULL;
 jobject HBaseTableScanner::empty_row_ = NULL;
 jobject HBaseTableScanner::must_pass_all_op_ = NULL;
 jobjectArray HBaseTableScanner::compare_ops_ = NULL;
+
+const string HBASE_MEM_LIMIT_EXCEEDED = "HBaseTableScanner::$0() failed to "
+    "allocate $1 bytes for $2.";
 
 void HBaseTableScanner::ScanRange::DebugString(int indentation_level,
     stringstream* out) {
@@ -158,7 +167,7 @@ Status HBaseTableScanner::Init() {
     RETURN_IF_ERROR(
         JniUtil::GetGlobalClassRef(env, "org/apache/hadoop/hbase/Cell", &cell_cl_));
   } else {
-    // Assume a non-CDH5 HBase version because the Cell class wasn't found.
+    // Assume a HBase version prior to 0.95.2 because the Cell class wasn't found.
     LOG(INFO) << "Detected HBase version < 0.95.2";
     RETURN_IF_ERROR(
         JniUtil::GetGlobalClassRef(env, "org/apache/hadoop/hbase/KeyValue",
@@ -302,9 +311,9 @@ Status HBaseTableScanner::ScanSetup(JNIEnv* env, const TupleDescriptor* tuple_de
   // Setup an Scan object without the range
   // scan_ = new Scan();
   DCHECK(scan_ == NULL);
-  scan_ = env->NewObject(scan_cl_, scan_ctor_);
+  jobject local_scan = env->NewObject(scan_cl_, scan_ctor_);
   RETURN_ERROR_IF_EXC(env);
-  scan_ = env->NewGlobalRef(scan_);
+  RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(env, local_scan, &scan_));
 
   // scan_.setMaxVersions(1);
   env->CallObjectMethod(scan_, scan_set_max_versions_id_, 1);
@@ -453,14 +462,13 @@ Status HBaseTableScanner::InitScanRange(JNIEnv* env, jbyteArray start_bytes,
   if (resultscanner_ != NULL) {
     // resultscanner_.close();
     env->CallObjectMethod(resultscanner_, resultscanner_close_id_);
-    env->DeleteGlobalRef(resultscanner_);
-    RETURN_ERROR_IF_EXC(env);
+    RETURN_IF_ERROR(JniUtil::FreeGlobalRef(env, resultscanner_));
     resultscanner_ = NULL;
   }
   // resultscanner_ = htable_.getScanner(scan_);
-  RETURN_IF_ERROR(htable_->GetResultScanner(scan_, &resultscanner_));
-  resultscanner_ = env->NewGlobalRef(resultscanner_);
-  RETURN_ERROR_IF_EXC(env);
+  jobject local_resultscanner;
+  RETURN_IF_ERROR(htable_->GetResultScanner(scan_, &local_resultscanner));
+  RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(env, local_resultscanner, &resultscanner_));
   return Status::OK();
 }
 
@@ -539,11 +547,11 @@ Status HBaseTableScanner::Next(JNIEnv* env, bool* has_next) {
     return Status::OK();
   }
 
-  if (cells_ != NULL) env->DeleteGlobalRef(cells_);
+  if (cells_ != NULL) RETURN_IF_ERROR(JniUtil::FreeGlobalRef(env, cells_));
   // cells_ = result.raw();
-  cells_ = reinterpret_cast<jobjectArray>(
+  jobject local_cells = reinterpret_cast<jobjectArray>(
       env->CallObjectMethod(result, result_raw_cells_id_));
-  cells_ = reinterpret_cast<jobjectArray>(env->NewGlobalRef(cells_));
+  RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(env, local_cells, &cells_));
   num_cells_ = env->GetArrayLength(cells_);
   // Check that raw() didn't return more cells than expected.
   // If num_requested_cells_ is 0 then only row key is asked for and this check
@@ -573,53 +581,77 @@ inline void HBaseTableScanner::WriteTupleSlot(const SlotDescriptor* slot_desc,
   BitUtil::ByteSwap(slot, data, slot_desc->type().GetByteSize());
 }
 
-inline void HBaseTableScanner::GetRowKey(JNIEnv* env, jobject cell,
+inline Status HBaseTableScanner::GetRowKey(JNIEnv* env, jobject cell,
     void** data, int* length) {
   int offset = env->CallIntMethod(cell, cell_get_row_offset_id_);
   *length = env->CallShortMethod(cell, cell_get_row_length_id_);
   jbyteArray jdata =
       (jbyteArray) env->CallObjectMethod(cell, cell_get_row_array_);
-  *data = value_pool_->Allocate(*length);
+  *data = value_pool_->TryAllocate(*length);
+  if (UNLIKELY(*data == NULL)) {
+    string details = Substitute(HBASE_MEM_LIMIT_EXCEEDED, "GetRowKey",
+        *length, "row array");
+    return value_pool_->mem_tracker()->MemLimitExceeded(state_, details, *length);
+  }
   env->GetByteArrayRegion(jdata, offset, *length, reinterpret_cast<jbyte*>(*data));
   COUNTER_ADD(scan_node_->bytes_read_counter(), *length);
+  return Status::OK();
 }
 
-inline void HBaseTableScanner::GetFamily(JNIEnv* env, jobject cell,
+inline Status HBaseTableScanner::GetFamily(JNIEnv* env, jobject cell,
     void** data, int* length) {
   int offset = env->CallIntMethod(cell, cell_get_family_offset_id_);
   *length = env->CallShortMethod(cell, cell_get_family_length_id_);
   jbyteArray jdata =
       (jbyteArray) env->CallObjectMethod(cell, cell_get_family_array_);
-  *data = value_pool_->Allocate(*length);
+  *data = value_pool_->TryAllocate(*length);
+  if (UNLIKELY(*data == NULL)) {
+    string details = Substitute(HBASE_MEM_LIMIT_EXCEEDED, "GetFamily",
+        *length, "family array");
+    return value_pool_->mem_tracker()->MemLimitExceeded(state_, details, *length);
+  }
   env->GetByteArrayRegion(jdata, offset, *length, reinterpret_cast<jbyte*>(*data));
   COUNTER_ADD(scan_node_->bytes_read_counter(), *length);
+  return Status::OK();
 }
 
-inline void HBaseTableScanner::GetQualifier(JNIEnv* env, jobject cell,
+inline Status HBaseTableScanner::GetQualifier(JNIEnv* env, jobject cell,
     void** data, int* length) {
   int offset = env->CallIntMethod(cell, cell_get_qualifier_offset_id_);
   *length = env->CallIntMethod(cell, cell_get_qualifier_length_id_);
   jbyteArray jdata =
       (jbyteArray) env->CallObjectMethod(cell, cell_get_qualifier_array_);
-  *data = value_pool_->Allocate(*length);
+  *data = value_pool_->TryAllocate(*length);
+  if (UNLIKELY(*data == NULL)) {
+    string details = Substitute(HBASE_MEM_LIMIT_EXCEEDED, "GetQualifier",
+        *length, "qualifier array");
+    return value_pool_->mem_tracker()->MemLimitExceeded(state_, details, *length);
+  }
   env->GetByteArrayRegion(jdata, offset, *length, reinterpret_cast<jbyte*>(*data));
   COUNTER_ADD(scan_node_->bytes_read_counter(), *length);
+  return Status::OK();
 }
 
-inline void HBaseTableScanner::GetValue(JNIEnv* env, jobject cell,
+inline Status HBaseTableScanner::GetValue(JNIEnv* env, jobject cell,
     void** data, int* length) {
   int offset = env->CallIntMethod(cell, cell_get_value_offset_id_);
   *length = env->CallIntMethod(cell, cell_get_value_length_id_);
   jbyteArray jdata =
       (jbyteArray) env->CallObjectMethod(cell, cell_get_value_array_);
-  *data = value_pool_->Allocate(*length);
+  *data = value_pool_->TryAllocate(*length);
+  if (UNLIKELY(*data == NULL)) {
+    string details = Substitute(HBASE_MEM_LIMIT_EXCEEDED, "GetValue",
+        *length, "value array");
+    return value_pool_->mem_tracker()->MemLimitExceeded(state_, details, *length);
+  }
   env->GetByteArrayRegion(jdata, offset, *length, reinterpret_cast<jbyte*>(*data));
   COUNTER_ADD(scan_node_->bytes_read_counter(), *length);
+  return Status::OK();
 }
 
 Status HBaseTableScanner::GetRowKey(JNIEnv* env, void** key, int* key_length) {
   jobject cell = env->GetObjectArrayElement(cells_, 0);
-  GetRowKey(env, cell, key, key_length);
+  RETURN_IF_ERROR(GetRowKey(env, cell, key, key_length));
   RETURN_ERROR_IF_EXC(env);
   return Status::OK();
 }
@@ -650,7 +682,7 @@ Status HBaseTableScanner::GetCurrentValue(JNIEnv* env, const string& family,
     // Check family. If it doesn't match, we have a NULL value.
     void* family_data;
     int family_length;
-    GetFamily(env, cell, &family_data, &family_length);
+    RETURN_IF_ERROR(GetFamily(env, cell, &family_data, &family_length));
     if (CompareStrings(family, family_data, family_length) != 0) {
       *is_null = true;
       return Status::OK();
@@ -659,13 +691,13 @@ Status HBaseTableScanner::GetCurrentValue(JNIEnv* env, const string& family,
     // Check qualifier. If it doesn't match, we have a NULL value.
     void* qualifier_data;
     int qualifier_length;
-    GetQualifier(env, cell, &qualifier_data, &qualifier_length);
+    RETURN_IF_ERROR(GetQualifier(env, cell, &qualifier_data, &qualifier_length));
     if (CompareStrings(qualifier, qualifier_data, qualifier_length) != 0) {
       *is_null = true;
       return Status::OK();
     }
   }
-  GetValue(env, cell, data, length);
+  RETURN_IF_ERROR(GetValue(env, cell, data, length));
   *is_null = false;
   return Status::OK();
 }
@@ -732,11 +764,11 @@ void HBaseTableScanner::Close(JNIEnv* env) {
             "Unknown error occurred while closing ResultScanner: ");
       }
     }
-    env->DeleteGlobalRef(resultscanner_);
+    JniUtil::FreeGlobalRef(env, resultscanner_);
     resultscanner_ = NULL;
   }
-  if (scan_ != NULL) env->DeleteGlobalRef(scan_);
-  if (cells_ != NULL) env->DeleteGlobalRef(cells_);
+  if (scan_ != NULL) JniUtil::FreeGlobalRef(env, scan_);
+  if (cells_ != NULL) JniUtil::FreeGlobalRef(env, cells_);
 
   // Close the HTable so that the connections are not kept around.
   if (htable_.get() != NULL) htable_->Close(state_);

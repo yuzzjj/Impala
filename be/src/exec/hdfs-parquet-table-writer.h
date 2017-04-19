@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_HDFS_PARQUET_TABLE_WRITER_H
@@ -64,9 +67,8 @@ class HdfsParquetTableWriter : public HdfsTableWriter {
   virtual Status InitNewFile();
 
   /// Appends parquet representation of rows in the batch to the current file.
-  virtual Status AppendRowBatch(RowBatch* batch,
-                                const std::vector<int32_t>& row_group_indices,
-                                bool* new_file);
+  virtual Status AppendRows(
+      RowBatch* batch, const std::vector<int32_t>& row_group_indices, bool* new_file);
 
   /// Write out all the data.
   virtual Status Finalize();
@@ -97,6 +99,11 @@ class HdfsParquetTableWriter : public HdfsTableWriter {
 
   /// Minimum file size.  If the configured size is less, fail.
   static const int HDFS_MIN_FILE_SIZE = 8 * 1024 * 1024;
+
+  /// Maximum statistics size. If the size of a single thrift parquet::Statistics struct
+  /// for a page or row group exceed this value, we'll not write it. We use the same value
+  /// as 'parquet-mr'.
+  static const int MAX_COLUMN_STATS_SIZE = 4 * 1024;
 
   /// Per-column information state.  This contains some metadata as well as the
   /// data buffers.
@@ -139,8 +146,10 @@ class HdfsParquetTableWriter : public HdfsTableWriter {
   /// The current row group being written to.
   parquet::RowGroup* current_row_group_;
 
-  /// array of pointers to column information.
-  std::vector<BaseColumnWriter*> columns_;
+  /// Array of pointers to column information. The column writers are owned by the
+  /// table writer, as there is no reason for the column writers to outlive the table
+  /// writer.
+  std::vector<std::unique_ptr<BaseColumnWriter>> columns_;
 
   /// Number of rows in current file
   int64_t row_count_;
@@ -178,7 +187,7 @@ class HdfsParquetTableWriter : public HdfsTableWriter {
   std::vector<uint8_t> compression_staging_buffer_;
 
   /// For each column, the on disk size written.
-  TParquetInsertStats parquet_stats_;
+  TParquetInsertStats parquet_insert_stats_;
 };
 
 }

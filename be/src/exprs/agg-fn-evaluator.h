@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXPRS_AGG_FN_EVALUATOR_H
@@ -116,8 +119,7 @@ class AggFnEvaluator {
   bool SupportsRemove() const { return remove_fn_ != NULL; }
   bool SupportsSerialize() const { return serialize_fn_ != NULL; }
   const std::string& fn_name() const { return fn_.name.function_name; }
-  const std::string& update_symbol() const { return fn_.aggregate_fn.update_fn_symbol; }
-  const std::string& merge_symbol() const { return fn_.aggregate_fn.merge_fn_symbol; }
+  const SlotDescriptor* output_slot_desc() const { return output_slot_desc_; }
 
   static std::string DebugString(const std::vector<AggFnEvaluator*>& exprs);
   std::string DebugString() const;
@@ -128,11 +130,11 @@ class AggFnEvaluator {
   /// Updates the intermediate state dst based on adding the input src row. This can be
   /// called either to drive the UDA's Update() or Merge() function depending on
   /// is_merge_. That is, from the caller, it doesn't mater.
-  void Add(FunctionContext* agg_fn_ctx, TupleRow* src, Tuple* dst);
+  void Add(FunctionContext* agg_fn_ctx, const TupleRow* src, Tuple* dst);
 
   /// Updates the intermediate state dst to remove the input src row, i.e. undoes
   /// Add(src, dst). Only used internally for analytic fn builtins.
-  void Remove(FunctionContext* agg_fn_ctx, TupleRow* src, Tuple* dst);
+  void Remove(FunctionContext* agg_fn_ctx, const TupleRow* src, Tuple* dst);
 
   /// Explicitly does a merge, even if this evalutor is not marked as merging.
   /// This is used by the partitioned agg node when it needs to merge spill results.
@@ -143,18 +145,20 @@ class AggFnEvaluator {
   void Finalize(FunctionContext* agg_fn_ctx, Tuple* src, Tuple* dst);
 
   /// Puts the finalized value from Tuple* src in Tuple* dst just as Finalize() does.
-  /// However, unlike Finalize(), GetValue() does not clean up state in src. GetValue()
-  /// can be called repeatedly with the same src. Only used internally for analytic fn
-  /// builtins.
+  /// However, unlike Finalize(), GetValue() does not clean up state in src.
+  /// GetValue() can be called repeatedly with the same src. Only used internally for
+  /// analytic fn builtins. Note that StringVal result is from local allocation (which
+  /// will be freed in the next QueryMaintenance()) so it needs to be copied out if it
+  /// needs to survive beyond QueryMaintenance() (e.g. if 'dst' lives in a row batch).
   void GetValue(FunctionContext* agg_fn_ctx, Tuple* src, Tuple* dst);
 
   /// Helper functions for calling the above functions on many evaluators.
   static void Init(const std::vector<AggFnEvaluator*>& evaluators,
       const std::vector<FunctionContext*>& fn_ctxs, Tuple* dst);
   static void Add(const std::vector<AggFnEvaluator*>& evaluators,
-      const std::vector<FunctionContext*>& fn_ctxs, TupleRow* src, Tuple* dst);
+      const std::vector<FunctionContext*>& fn_ctxs, const TupleRow* src, Tuple* dst);
   static void Remove(const std::vector<AggFnEvaluator*>& evaluators,
-      const std::vector<FunctionContext*>& fn_ctxs, TupleRow* src, Tuple* dst);
+      const std::vector<FunctionContext*>& fn_ctxs, const TupleRow* src, Tuple* dst);
   static void Serialize(const std::vector<AggFnEvaluator*>& evaluators,
       const std::vector<FunctionContext*>& fn_ctxs, Tuple* dst);
   static void GetValue(const std::vector<AggFnEvaluator*>& evaluators,
@@ -162,14 +166,8 @@ class AggFnEvaluator {
   static void Finalize(const std::vector<AggFnEvaluator*>& evaluators,
       const std::vector<FunctionContext*>& fn_ctxs, Tuple* src, Tuple* dst);
 
-  /// TODO: implement codegen path. These functions would return IR functions with
-  /// the same signature as the interpreted ones above.
-  /// Function* GetIrInitFn();
-  /// Function* GetIrAddFn();
-  /// Function* GetIrRemoveFn();
-  /// Function* GetIrSerializeFn();
-  /// Function* GetIrGetValueFn();
-  /// Function* GetIrFinalizeFn();
+  /// Gets the codegened update or merge function for this aggregate function.
+  Status GetUpdateOrMergeFunction(LlvmCodeGen* codegen, llvm::Function** uda_fn);
 
  private:
   const TFunction fn_;
@@ -185,7 +183,12 @@ class AggFnEvaluator {
   /// intermediate_slot_desc_ if this agg fn has the same intermediate and output type.
   const SlotDescriptor* output_slot_desc_;
 
+  /// Expression contexts for this AggFnEvaluator. Empty if there is no
+  /// expression (e.g. count(*)).
   std::vector<ExprContext*> input_expr_ctxs_;
+
+  /// The types of the arguments to the aggregate function.
+  const std::vector<FunctionContext::TypeDesc> arg_type_descs_;
 
   /// The enum for some of the builtins that still require special cased logic.
   AggregationOp agg_op_;
@@ -199,7 +202,7 @@ class AggFnEvaluator {
   impala_udf::AnyVal* staging_merge_input_val_;
 
   /// Cache entry for the library containing the function ptrs.
-  LibCache::LibCacheEntry* cache_entry_;
+  LibCacheEntry* cache_entry_;
 
   /// Function ptrs for the different phases of the aggregate function.
   void* init_fn_;
@@ -213,6 +216,12 @@ class AggFnEvaluator {
   /// Use Create() instead.
   AggFnEvaluator(const TExprNode& desc, bool is_analytic_fn);
 
+  /// Return the intermediate type of the aggregate function.
+  FunctionContext::TypeDesc GetIntermediateTypeDesc() const;
+
+  /// Return the output type of the aggregate function.
+  FunctionContext::TypeDesc GetOutputTypeDesc() const;
+
   /// TODO: these functions below are not extensible and we need to use codegen to
   /// generate the calls into the UDA functions (like for UDFs).
   /// Remove these functions when this is supported.
@@ -221,12 +230,15 @@ class AggFnEvaluator {
   /// taking TupleRow to the UDA signature taking AnvVals by populating the staging
   /// AnyVals.
   /// fn must be a function that implement's the UDA Update() signature.
-  void Update(FunctionContext* agg_fn_ctx, TupleRow* row, Tuple* dst, void* fn);
+  void Update(FunctionContext* agg_fn_ctx, const TupleRow* row, Tuple* dst, void* fn);
 
-  /// Sets up the arguments to call fn. This converts from the agg-expr signature,
+  /// Sets up the arguments to call 'fn'. This converts from the agg-expr signature,
   /// taking TupleRow to the UDA signature taking AnvVals. Writes the serialize/finalize
-  /// result to the given destination slot/tuple. The fn can be NULL to indicate the src
-  /// value should simply be written into the destination.
+  /// result to the given destination slot/tuple. 'fn' can be NULL to indicate the src
+  /// value should simply be written into the destination. Note that StringVal result is
+  /// from local allocation (which will be freed in the next QueryMaintenance()) so it
+  /// needs to be copied out if it needs to survive beyond QueryMaintenance() (e.g. if
+  /// 'dst' lives in a row batch).
   void SerializeOrFinalize(FunctionContext* agg_fn_ctx, Tuple* src,
       const SlotDescriptor* dst_slot_desc, Tuple* dst, void* fn);
 
@@ -236,12 +248,12 @@ class AggFnEvaluator {
 };
 
 inline void AggFnEvaluator::Add(
-    FunctionContext* agg_fn_ctx, TupleRow* row, Tuple* dst) {
+    FunctionContext* agg_fn_ctx, const TupleRow* row, Tuple* dst) {
   agg_fn_ctx->impl()->IncrementNumUpdates();
   Update(agg_fn_ctx, row, dst, is_merge() ? merge_fn_ : update_fn_);
 }
 inline void AggFnEvaluator::Remove(
-    FunctionContext* agg_fn_ctx, TupleRow* row, Tuple* dst) {
+    FunctionContext* agg_fn_ctx, const TupleRow* row, Tuple* dst) {
   agg_fn_ctx->impl()->IncrementNumRemoves();
   Update(agg_fn_ctx, row, dst, remove_fn_);
 }
@@ -259,42 +271,42 @@ inline void AggFnEvaluator::GetValue(
 }
 
 inline void AggFnEvaluator::Init(const std::vector<AggFnEvaluator*>& evaluators,
-      const std::vector<FunctionContext*>& fn_ctxs, Tuple* dst) {
+    const std::vector<FunctionContext*>& fn_ctxs, Tuple* dst) {
   DCHECK_EQ(evaluators.size(), fn_ctxs.size());
   for (int i = 0; i < evaluators.size(); ++i) {
     evaluators[i]->Init(fn_ctxs[i], dst);
   }
 }
 inline void AggFnEvaluator::Add(const std::vector<AggFnEvaluator*>& evaluators,
-      const std::vector<FunctionContext*>& fn_ctxs, TupleRow* src, Tuple* dst) {
+    const std::vector<FunctionContext*>& fn_ctxs, const TupleRow* src, Tuple* dst) {
   DCHECK_EQ(evaluators.size(), fn_ctxs.size());
   for (int i = 0; i < evaluators.size(); ++i) {
     evaluators[i]->Add(fn_ctxs[i], src, dst);
   }
 }
 inline void AggFnEvaluator::Remove(const std::vector<AggFnEvaluator*>& evaluators,
-      const std::vector<FunctionContext*>& fn_ctxs, TupleRow* src, Tuple* dst) {
+    const std::vector<FunctionContext*>& fn_ctxs, const TupleRow* src, Tuple* dst) {
   DCHECK_EQ(evaluators.size(), fn_ctxs.size());
   for (int i = 0; i < evaluators.size(); ++i) {
     evaluators[i]->Remove(fn_ctxs[i], src, dst);
   }
 }
 inline void AggFnEvaluator::Serialize(const std::vector<AggFnEvaluator*>& evaluators,
-      const std::vector<FunctionContext*>& fn_ctxs, Tuple* dst) {
+    const std::vector<FunctionContext*>& fn_ctxs, Tuple* dst) {
   DCHECK_EQ(evaluators.size(), fn_ctxs.size());
   for (int i = 0; i < evaluators.size(); ++i) {
     evaluators[i]->Serialize(fn_ctxs[i], dst);
   }
 }
 inline void AggFnEvaluator::GetValue(const std::vector<AggFnEvaluator*>& evaluators,
-      const std::vector<FunctionContext*>& fn_ctxs, Tuple* src, Tuple* dst) {
+    const std::vector<FunctionContext*>& fn_ctxs, Tuple* src, Tuple* dst) {
   DCHECK_EQ(evaluators.size(), fn_ctxs.size());
   for (int i = 0; i < evaluators.size(); ++i) {
     evaluators[i]->GetValue(fn_ctxs[i], src, dst);
   }
 }
 inline void AggFnEvaluator::Finalize(const std::vector<AggFnEvaluator*>& evaluators,
-      const std::vector<FunctionContext*>& fn_ctxs, Tuple* src, Tuple* dst) {
+    const std::vector<FunctionContext*>& fn_ctxs, Tuple* src, Tuple* dst) {
   DCHECK_EQ(evaluators.size(), fn_ctxs.size());
   for (int i = 0; i < evaluators.size(); ++i) {
     evaluators[i]->Finalize(fn_ctxs[i], src, dst);

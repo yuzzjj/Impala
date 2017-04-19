@@ -1,34 +1,38 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_SERVICE_SIMPLE_LOGGER_H
 #define IMPALA_SERVICE_SIMPLE_LOGGER_H
 
-#include <boost/thread/thread.hpp>
 #include <fstream>
+#include <boost/thread/mutex.hpp>
 
 #include "common/status.h"
 
 namespace impala {
 
 /// A class that provides basic thread-safe support for logging to a file. Supports
-/// creation of the log file and log directories as well as rolling the log file when
-/// it has reached a specified number of entries.
+/// creation of the log file and log directories, rolling the log file when it
+/// has reached a specified number of entries, and deletion of old files when a
+/// threshold number of files is exceeded.
 class SimpleLogger {
  public:
   SimpleLogger(const std::string& log_dir_, const std::string& log_file_name_prefix_,
-      uint64_t max_entries_per_file);
+      uint64_t max_entries_per_file, int max_log_files = 0);
 
   /// Initializes the logging directory and creates the initial log file. If the log dir
   /// does not already exist, it will be created. This function is not thread safe and
@@ -62,6 +66,9 @@ class SimpleLogger {
   /// file will be rolled
   uint64_t max_entries_per_file_;
 
+  /// Maximum number of log files to keep. If 0, all files are retained.
+  int max_log_files_;
+
   /// Log files are written to this stream.
   std::ofstream log_file_;
 
@@ -75,6 +82,9 @@ class SimpleLogger {
   /// Flushes the log file to disk (closes and reopens the file). Must be called with the
   /// log_file_lock_ held.
   Status FlushInternal();
+
+  /// Deletes all log files except the max_log_files_ newest.
+  void RotateLogFiles();
 };
 }
 #endif

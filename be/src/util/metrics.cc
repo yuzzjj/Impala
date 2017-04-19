@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/metrics.h"
 
@@ -115,10 +118,10 @@ void MetricGroup::CMCompatibleCallback(const Webserver::ArgumentMap& args,
     // expected by CM before we introduced metric groups.
     MetricGroup* group = groups.top();
     groups.pop();
-    BOOST_FOREACH(const ChildGroupMap::value_type& child, group->children_) {
+    for (const ChildGroupMap::value_type& child: group->children_) {
       groups.push(child.second);
     }
-    BOOST_FOREACH(const MetricMap::value_type& m, group->metric_map_) {
+    for (const MetricMap::value_type& m: group->metric_map_) {
       m.second->ToLegacyJson(document);
     }
   } while (!groups.empty());
@@ -148,7 +151,7 @@ void MetricGroup::TemplateCallback(const Webserver::ArgumentMap& args,
     // expected by CM before we introduced metric groups.
     MetricGroup* group = groups.top();
     groups.pop();
-    BOOST_FOREACH(const ChildGroupMap::value_type& child, group->children_) {
+    for (const ChildGroupMap::value_type& child: group->children_) {
       if (child.first == metric_group->second) {
         found_group = child.second;
         break;
@@ -169,7 +172,7 @@ void MetricGroup::TemplateCallback(const Webserver::ArgumentMap& args,
 
 void MetricGroup::ToJson(bool include_children, Document* document, Value* out_val) {
   Value metric_list(kArrayType);
-  BOOST_FOREACH(const MetricMap::value_type& m, metric_map_) {
+  for (const MetricMap::value_type& m: metric_map_) {
     Value metric_value;
     m.second->ToJson(document, &metric_value);
     metric_list.PushBack(metric_value, document->GetAllocator());
@@ -180,7 +183,7 @@ void MetricGroup::ToJson(bool include_children, Document* document, Value* out_v
   container.AddMember("name", name_.c_str(), document->GetAllocator());
   if (include_children) {
     Value child_groups(kArrayType);
-    BOOST_FOREACH(const ChildGroupMap::value_type& child, children_) {
+    for (const ChildGroupMap::value_type& child: children_) {
       Value child_value;
       child.second->ToJson(true, document, &child_value);
       child_groups.PushBack(child_value, document->GetAllocator());
@@ -191,13 +194,20 @@ void MetricGroup::ToJson(bool include_children, Document* document, Value* out_v
   *out_val = container;
 }
 
-MetricGroup* MetricGroup::GetChildGroup(const string& name) {
+MetricGroup* MetricGroup::GetOrCreateChildGroup(const string& name) {
   lock_guard<SpinLock> l(lock_);
   ChildGroupMap::iterator it = children_.find(name);
   if (it != children_.end()) return it->second;
   MetricGroup* group = obj_pool_->Add(new MetricGroup(name));
   children_[name] = group;
   return group;
+}
+
+MetricGroup* MetricGroup::FindChildGroup(const string& name) {
+  lock_guard<SpinLock> l(lock_);
+  ChildGroupMap::iterator it = children_.find(name);
+  if (it != children_.end()) return it->second;
+  return NULL;
 }
 
 string MetricGroup::DebugString() {

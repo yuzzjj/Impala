@@ -35,7 +35,12 @@ table_name:old_rcfile_table, constraint:restrict_to, table_format:rc/none/none
 table_name:bad_text_lzo, constraint:restrict_to, table_format:text/lzo/block
 table_name:bad_text_gzip, constraint:restrict_to, table_format:text/gzip/block
 table_name:bad_seq_snap, constraint:restrict_to, table_format:seq/snap/block
+table_name:bad_avro_snap_strings, constraint:restrict_to, table_format:avro/snap/block
+table_name:bad_avro_snap_floats, constraint:restrict_to, table_format:avro/snap/block
+table_name:bad_avro_decimal_schema, constraint:restrict_to, table_format:avro/snap/block
 table_name:bad_parquet, constraint:restrict_to, table_format:parquet/none/none
+table_name:bad_parquet_strings_negative_len, constraint:restrict_to, table_format:parquet/none/none
+table_name:bad_parquet_strings_out_of_bounds, constraint:restrict_to, table_format:parquet/none/none
 table_name:bad_magic_number, constraint:restrict_to, table_format:parquet/none/none
 table_name:bad_metadata_len, constraint:restrict_to, table_format:parquet/none/none
 table_name:bad_dict_page_offset, constraint:restrict_to, table_format:parquet/none/none
@@ -44,6 +49,8 @@ table_name:alltypesagg_hive_13_1, constraint:restrict_to, table_format:parquet/n
 table_name:kite_required_fields, constraint:restrict_to, table_format:parquet/none/none
 table_name:bad_column_metadata, constraint:restrict_to, table_format:parquet/none/none
 table_name:lineitem_multiblock, constraint:restrict_to, table_format:parquet/none/none
+table_name:lineitem_sixblocks, constraint:restrict_to, table_format:parquet/none/none
+table_name:lineitem_multiblock_one_row_group, constraint:restrict_to, table_format:parquet/none/none
 
 # TODO: Support Avro. Data loading currently fails for Avro because complex types
 # cannot be converted to the corresponding Avro types yet.
@@ -89,6 +96,8 @@ table_name:complex_view, constraint:restrict_to, table_format:text/none/none
 table_name:complex_view, constraint:restrict_to, table_format:seq/snap/block
 table_name:view_view, constraint:restrict_to, table_format:text/none/none
 table_name:view_view, constraint:restrict_to, table_format:seq/snap/block
+table_name:subquery_view, constraint:restrict_to, table_format:seq/snap/block
+table_name:subquery_view, constraint:restrict_to, table_format:rc/none/none
 
 # liketbl and tblwithraggedcolumns all have
 # NULLs in primary key columns. hbase does not support
@@ -100,9 +109,10 @@ table_name:tblwithraggedcolumns, constraint:exclude, table_format:hbase/none/non
 table_name:greptiny, constraint:exclude, table_format:hbase/none/none
 table_name:tinyinttable, constraint:exclude, table_format:hbase/none/none
 
-# overflow has a bigint that's too big. hbase may lose precision, hence this
-# table cannot be loaded.
-table_name:overflow, constraint:exclude, table_format:hbase/none/none
+# overflow uses a manually constructed text file which doesn't make sense to write to
+# other table formats since the values that would be written are different (e.g. already
+# truncated.)
+table_name:overflow, constraint:restrict_to, table_format:text/none/none
 
 # widerow has a single column with a single row containing a 10MB string. hbase doesn't
 # seem to like this.
@@ -114,7 +124,7 @@ table_name:widerow, constraint:exclude, table_format:hbase/none/none
 table_name:nullformat_custom, constraint:exclude, table_format:hbase/none/none
 table_name:unsupported_types, constraint:exclude, table_format:hbase/none/none
 
-# On CDH4, decimal can only be tested on formats Impala can write to (text and parquet)
+# Decimal can only be tested on formats Impala can write to (text and parquet).
 # TODO: add Avro once Hive or Impala can write Avro decimals
 table_name:decimal_tbl, constraint:restrict_to, table_format:text/none/none
 table_name:decimal_tiny, constraint:restrict_to, table_format:text/none/none
@@ -147,6 +157,38 @@ table_name:testescape_32_crlf, constraint:restrict_to, table_format:text/none/no
 # alltimezones is used to verify that impala properly deals with timezones
 table_name:alltimezones, constraint:restrict_to, table_format:text/none/none
 
+
 # Avro schema is inferred from the column definitions (IMPALA-1136)
 table_name:no_avro_schema, constraint:restrict_to, table_format:avro/snap/block
 table_name:avro_unicode_nulls, constraint:restrict_to, table_format:avro/snap/block
+
+# test single and multi stream bz2 files
+table_name:bzip2_tbl, constraint:restrict_to, table_format:text/bzip/block
+table_name:large_bzip2_tbl, constraint:restrict_to, table_format:text/bzip/block
+table_name:multistream_bzip2_tbl, constraint:restrict_to, table_format:text/bzip/block
+table_name:large_multistream_bzip2_tbl, constraint:restrict_to, table_format:text/bzip/block
+
+# Kudu can't handle certain types such as timestamp so we pick and choose the tables
+# we actually use for Kudu related tests.
+table_name:alltypes, constraint:only, table_format:kudu/none/none
+table_name:alltypessmall, constraint:only, table_format:kudu/none/none
+table_name:alltypestiny, constraint:only, table_format:kudu/none/none
+table_name:alltypesagg, constraint:only, table_format:kudu/none/none
+table_name:alltypesaggnonulls, constraint:only, table_format:kudu/none/none
+table_name:testtbl, constraint:only, table_format:kudu/none/none
+table_name:jointbl, constraint:only, table_format:kudu/none/none
+table_name:emptytable, constraint:only, table_format:kudu/none/none
+table_name:dimtbl, constraint:only, table_format:kudu/none/none
+table_name:tinytable, constraint:only, table_format:kudu/none/none
+table_name:tinyinttable, constraint:only, table_format:kudu/none/none
+table_name:zipcode_incomes, constraint:only, table_format:kudu/none/none
+table_name:nulltable, constraint:only, table_format:kudu/none/none
+table_name:nullescapedtable, constraint:only, table_format:kudu/none/none
+
+# Skipping header lines is only effective with text tables
+table_name:table_with_header, constraint:restrict_to, table_format:text/none/none
+table_name:table_with_header_2, constraint:restrict_to, table_format:text/none/none
+table_name:table_with_header_insert, constraint:restrict_to, table_format:text/none/none
+# Inserting into parquet tables should not be affected by the 'skip.header.line.count'
+# property, so we test parquet format as well.
+table_name:table_with_header_insert, constraint:restrict_to, table_format:parquet/none/none

@@ -1,16 +1,19 @@
-// Copyright 2014 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_EXEC_ANALYTIC_EVAL_NODE_H
 #define IMPALA_EXEC_ANALYTIC_EVAL_NODE_H
@@ -129,21 +132,24 @@ class AnalyticEvalNode : public ExecNode {
   Status AddRow(int64_t stream_idx, TupleRow* row);
 
   /// Determines if there is a window ending at the previous row, and if so, calls
-  /// AddResultTuple() with the index of the previous row in input_stream_. next_partition
-  /// indicates if the current row is the start of a new partition. stream_idx is the
-  /// index of the current input row from input_stream_.
-  void TryAddResultTupleForPrevRow(bool next_partition, int64_t stream_idx,
+  /// AddResultTuple() with the index of the previous row in 'input_stream_'.
+  /// 'next_partition' indicates if the current row is the start of a new partition.
+  /// 'stream_idx' is the index of the current input row from 'input_stream_'.
+  /// Returns an error when memory limit is exceeded.
+  Status TryAddResultTupleForPrevRow(bool next_partition, int64_t stream_idx,
       TupleRow* row);
 
   /// Determines if there is a window ending at the current row, and if so, calls
-  /// AddResultTuple() with the index of the current row in input_stream_. stream_idx is
-  /// the index of the current input row from input_stream_.
-  void TryAddResultTupleForCurrRow(int64_t stream_idx, TupleRow* row);
+  /// AddResultTuple() with the index of the current row in 'input_stream_'.
+  /// 'stream_idx' is the index of the current input row from 'input_stream_'.
+  /// Returns an error when memory limit is exceeded.
+  Status TryAddResultTupleForCurrRow(int64_t stream_idx, TupleRow* row);
 
   /// Adds additional result tuples at the end of a partition, e.g. if the end bound is
   /// FOLLOWING. partition_idx is the index into input_stream_ of the new partition,
-  /// prev_partition_idx is the index of the previous partition.
-  void TryAddRemainingResults(int64_t partition_idx, int64_t prev_partition_idx);
+  /// 'prev_partition_idx' is the index of the previous partition.
+  /// Returns an error when memory limit is exceeded.
+  Status TryAddRemainingResults(int64_t partition_idx, int64_t prev_partition_idx);
 
   /// Removes rows from curr_tuple_ (by calling AggFnEvaluator::Remove()) that are no
   /// longer in the window (i.e. they are before the window start boundary). stream_idx
@@ -156,9 +162,10 @@ class AnalyticEvalNode : public ExecNode {
   Status InitNextPartition(RuntimeState* state, int64_t stream_idx);
 
   /// Produces a result tuple with analytic function results by calling GetValue() or
-  /// Finalize() for curr_tuple_ on the evaluators_. The result tuple is stored in
-  /// result_tuples_ with the index into input_stream_ specified by stream_idx.
-  void AddResultTuple(int64_t stream_idx);
+  /// Finalize() for 'curr_tuple_' on the 'evaluators_'. The result tuple is stored in
+  /// 'result_tuples_' with the index into 'input_stream_' specified by 'stream_idx'.
+  /// Returns an error when memory limit is exceeded.
+  Status AddResultTuple(int64_t stream_idx);
 
   /// Gets the number of rows that are ready to be returned by subsequent calls to
   /// GetNextOutputBatch().
@@ -268,7 +275,7 @@ class AnalyticEvalNode : public ExecNode {
   /// output row and result_tuples_.size() may be one less than the row batch size, in
   /// which case we will process another input row batch (inserting one result tuple per
   /// input row) before returning a row batch.
-  std::list<std::pair<int64_t, Tuple*> > result_tuples_;
+  std::list<std::pair<int64_t, Tuple*>> result_tuples_;
 
   /// Index in input_stream_ of the most recently added result tuple.
   int64_t last_result_idx_;
@@ -278,7 +285,7 @@ class AnalyticEvalNode : public ExecNode {
   /// or FOLLOWING. Tuples in this list are deep copied and owned by
   /// curr_window_tuple_pool_.
   /// TODO: Remove and use BufferedTupleStream (needs support for multiple readers).
-  std::list<std::pair<int64_t, Tuple*> > window_tuples_;
+  std::list<std::pair<int64_t, Tuple*>> window_tuples_;
 
   /// The index of the last row from input_stream_ associated with output row containing
   /// resources in prev_tuple_pool_. -1 when the pool is empty. Resources from
@@ -326,10 +333,10 @@ class AnalyticEvalNode : public ExecNode {
   /// no order by clause) to a single row (e.g. ROWS windows). When the amount of
   /// buffered data exceeds the available memory in the underlying BufferedBlockMgr,
   /// input_stream_ is unpinned (i.e., possibly spilled to disk if necessary).
-  /// The input stream owns tuple data backing rows returned in GetNext(), and is
-  /// attached to an output row batch on eos or ReachedLimit().
+  /// The input stream owns tuple data backing rows returned in GetNext(). The blocks
+  /// with tuple data are attached to an output row batch on eos or ReachedLimit().
   /// TODO: Consider re-pinning unpinned streams when possible.
-  BufferedTupleStream* input_stream_;
+  boost::scoped_ptr<BufferedTupleStream> input_stream_;
 
   /// Pool used for O(1) allocations that live until Close() or Reset().
   /// Does not own data backing tuples returned in GetNext(), so it does not

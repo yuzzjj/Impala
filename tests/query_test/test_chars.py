@@ -1,15 +1,25 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-import logging
-import os
-import pytest
-from copy import copy
-from tests.common.test_vector import *
-from tests.common.impala_test_suite import *
-from tests.common.skip import SkipIfS3
-from tests.util.filesystem_utils import WAREHOUSE
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
-@SkipIfS3.insert
+import pytest
+
+from tests.common.impala_test_suite import ImpalaTestSuite
+from tests.common.test_dimensions import create_exec_option_dimension
+
 class TestStringQueries(ImpalaTestSuite):
   @classmethod
   def get_workload(cls):
@@ -61,9 +71,9 @@ class TestStringQueries(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestStringQueries, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(
+    cls.ImpalaTestMatrix.add_dimension(
       create_exec_option_dimension(disable_codegen_options=[False, True]))
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('table_format').file_format in ['text'] and
         v.get_value('table_format').compression_codec in ['none'])
 
@@ -107,9 +117,9 @@ class TestCharFormats(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestCharFormats, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(
+    cls.ImpalaTestMatrix.add_dimension(
       create_exec_option_dimension(disable_codegen_options=[False, True]))
-    cls.TestMatrix.add_constraint(lambda v:
+    cls.ImpalaTestMatrix.add_constraint(lambda v:
         (v.get_value('table_format').file_format in ['avro'] and
         v.get_value('table_format').compression_codec in ['snap']) or
         v.get_value('table_format').file_format in ['parquet'] or

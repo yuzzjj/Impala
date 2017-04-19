@@ -1,44 +1,47 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef STATESTORE_STATESTORE_H
 #define STATESTORE_STATESTORE_H
 
-#include <stdint.h>
+#include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
-#include <map>
-#include <boost/unordered_map.hpp>
+
 #include <boost/scoped_ptr.hpp>
 #include <boost/thread/condition_variable.hpp>
+#include <boost/unordered_map.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 
-#include "gen-cpp/Types_types.h"
-#include "gen-cpp/StatestoreSubscriber.h"
 #include "gen-cpp/StatestoreService.h"
-#include "util/metrics.h"
-#include "util/collection-metrics.h"
+#include "gen-cpp/StatestoreSubscriber.h"
+#include "gen-cpp/Types_types.h"
 #include "rpc/thrift-client.h"
-#include "util/thread-pool.h"
-#include "util/webserver.h"
 #include "runtime/client-cache.h"
 #include "runtime/timestamp-value.h"
 #include "statestore/failure-detector.h"
+#include "util/aligned-new.h"
+#include "util/collection-metrics.h"
+#include "util/metrics.h"
+#include "util/thread-pool.h"
+#include "util/webserver.h"
 
 namespace impala {
-
-using namespace impala;
 
 class Status;
 
@@ -76,7 +79,7 @@ class Status;
 /// processed. The statestore can use this information to send a delta of updates to a
 /// subscriber, rather than all items in the topic.  For non-delta updates, the statestore
 /// will send an update that includes all values in the topic.
-class Statestore {
+class Statestore : public CacheLineAligned {
  public:
   /// A SubscriberId uniquely identifies a single subscriber, and is
   /// provided by the subscriber at registration time.
@@ -248,6 +251,7 @@ class Statestore {
   /// Protects access to exit_flag_, but is used mostly to ensure visibility of updates
   /// between threads..
   boost::mutex exit_flag_lock_;
+
   bool exit_flag_;
 
   /// Controls access to topics_. Cannot take subscribers_lock_ after acquiring this lock.
@@ -305,7 +309,7 @@ class Statestore {
 
     /// Returns the last version of the topic which this subscriber has successfully
     /// processed. Will never decrease.
-    const TopicEntry::Version LastTopicVersionProcessed(const TopicId& topic_id) const;
+    TopicEntry::Version LastTopicVersionProcessed(const TopicId& topic_id) const;
 
     /// Sets the subscriber's last processed version of the topic to the given value.  This
     /// should only be set when once a subscriber has succesfully processed the given
@@ -350,7 +354,7 @@ class Statestore {
   /// Subscribers are held in shared_ptrs so that RegisterSubscriber() may overwrite their
   /// entry in this map while UpdateSubscriber() tries to update an existing registration
   /// without risk of use-after-free.
-  typedef boost::unordered_map<SubscriberId, boost::shared_ptr<Subscriber> >
+  typedef boost::unordered_map<SubscriberId, std::shared_ptr<Subscriber>>
     SubscriberMap;
   SubscriberMap subscribers_;
 
@@ -396,13 +400,13 @@ class Statestore {
 
   /// Cache of subscriber clients used for UpdateState() RPCs. Only one client per
   /// subscriber should be used, but the cache helps with the client lifecycle on failure.
-  boost::scoped_ptr<ClientCache<StatestoreSubscriberClient> > update_state_client_cache_;
+  boost::scoped_ptr<ClientCache<StatestoreSubscriberClient>> update_state_client_cache_;
 
   /// Cache of subscriber clients used for Heartbeat() RPCs. Separate from
   /// update_state_client_cache_ because we enable TCP-level timeouts for these calls,
   /// whereas they are not safe for UpdateState() RPCs which can take an unbounded amount
   /// of time.
-  boost::scoped_ptr<ClientCache<StatestoreSubscriberClient> > heartbeat_client_cache_;
+  boost::scoped_ptr<ClientCache<StatestoreSubscriberClient>> heartbeat_client_cache_;
 
   /// Thrift API implementation which proxies requests onto this Statestore
   boost::shared_ptr<StatestoreServiceIf> thrift_iface_;
@@ -481,8 +485,8 @@ class Statestore {
   /// TODO: Update the min subscriber version only when a topic is updated, rather than
   /// each time a subscriber is updated. One way to do this would be to keep a priority
   /// queue in Topic of each subscriber's last processed version of the topic.
-  const TopicEntry::Version GetMinSubscriberTopicVersion(const TopicId& topic_id,
-      SubscriberId* subscriber_id = NULL);
+  TopicEntry::Version GetMinSubscriberTopicVersion(
+      const TopicId& topic_id, SubscriberId* subscriber_id = NULL);
 
   /// True if the shutdown flag has been set true, false otherwise.
   bool ShouldExit();

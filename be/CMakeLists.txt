@@ -1,16 +1,19 @@
-# Copyright 2012 Cloudera Inc.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 
 cmake_minimum_required(VERSION 2.6)
@@ -41,8 +44,10 @@ SET(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -fno-strict-aliasing")
 SET(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -std=c++14")
 SET(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-deprecated -Wno-vla")
 SET(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -DBOOST_DATE_TIME_POSIX_TIME_STD_CONFIG")
+SET(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -DBOOST_SYSTEM_NO_DEPRECATED")
+SET(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -B $ENV{IMPALA_TOOLCHAIN}/binutils-$ENV{IMPALA_BINUTILS_VERSION}/bin/")
 IF($ENV{USE_GOLD_LINKER} STREQUAL "true")
-  SET(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wl,-fuse-ld=gold")
+  SET(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -fuse-ld=gold")
 ENDIF()
 
 # On Apple we build with clang and need libstdc++ instead of libc++
@@ -57,7 +62,10 @@ SET(CXX_COVERAGE_FLAGS "-fprofile-arcs -ftest-coverage")
 #        makes extra calls to clang which may have extra includes (-I) that are unused.
 #   -fcolor-diagnostics: ensure clang generates colorized output, which is necessary
 #        when using ccache as clang thinks it is not called from a terminal.
+#   -Wno-mismatched-tags: ignore harmless class/struct mismatch for forward declarations.
+#        Disabling to be consistent with gcc, which doesn't have this warning.
 SET(CXX_CLANG_FLAGS "-Qunused-arguments -fcolor-diagnostics -Wno-unused-local-typedef")
+SET(CXX_CLANG_FLAGS "${CXX_CLANG_FLAGS} -Wno-mismatched-tags")
 # For any gcc builds:
 #   -g: Enable symbols for profiler tools
 #   -Wno-unused-local-typedefs: Do not warn for local typedefs that are unused.
@@ -72,9 +80,40 @@ SET(CXX_GCC_FLAGS "-g -Wno-unused-local-typedefs")
 #
 # Debug information is stored as dwarf2 to be as compatible as possible
 SET(CXX_FLAGS_DEBUG "${CXX_GCC_FLAGS} -ggdb -gdwarf-2")
+# -Werror: compile warnings should be errors when using the toolchain compiler.
+#   Only enable for debug builds because this is what we test in pre-commit tests.
+SET(CXX_FLAGS_DEBUG "${CXX_FLAGS_DEBUG} -Werror")
 SET(CXX_FLAGS_RELEASE "${CXX_GCC_FLAGS} -O3 -DNDEBUG -gdwarf-2")
 SET(CXX_FLAGS_ADDRESS_SANITIZER
   "${CXX_CLANG_FLAGS} -O1 -g -fsanitize=address -fno-omit-frame-pointer -DADDRESS_SANITIZER")
+
+# Set the flags to the undefined behavior sanitizer, also known as "ubsan"
+# Turn on sanitizer and debug symbols to get stack traces:
+SET(CXX_FLAGS_UBSAN "${CXX_CLANG_FLAGS} -ggdb3 -fno-omit-frame-pointer -fsanitize=undefined")
+# Add flags to enable symbol resolution in the stack traces:
+SET(CXX_FLAGS_UBSAN "${CXX_FLAGS_UBSAN} -rtlib=compiler-rt -lgcc_s")
+# Ignore a number of noisy errors with too many false positives:
+SET(CXX_FLAGS_UBSAN "${CXX_FLAGS_UBSAN} -fno-sanitize=alignment,function,vptr,float-divide-by-zero,float-cast-overflow")
+# Don't enforce wrapped signed integer arithmetic so that the sanitizer actually sees
+# undefined wrapping:
+SET(CXX_FLAGS_UBSAN "${CXX_FLAGS_UBSAN} -fno-wrapv")
+# To ease debugging, turn off all optimizations:
+SET(CXX_FLAGS_UBSAN "${CXX_FLAGS_UBSAN} -O0")
+
+SET(CXX_FLAGS_TIDY "${CXX_CLANG_FLAGS}")
+# Catching unused variables requires an optimization level greater than 0
+SET(CXX_FLAGS_TIDY "${CXX_FLAGS_TIDY} -O1")
+# Ignore assert() and DCHECK() to avoid dead code errors on "DCHECK(false); return
+# nullptr" in impossible default switch/case statements.
+SET(CXX_FLAGS_TIDY "${CXX_FLAGS_TIDY} -DNDEBUG")
+# Turn all warnings back on. Some will be ignored via .clang-tidy's "Checks" value, but
+# this allows different "Checks" settings to be used in different clang-tidy runs without
+# recompiling.
+SET(CXX_FLAGS_TIDY "${CXX_FLAGS_TIDY} -Wall -W -Weverything")
+# The Tidy build is so verbose (becasue of -Weverything) that it is unlikely to be viewed
+# in a terminal and most likely will be redirecto to less, a log file, or /dev/null. In
+# those places color codes just make the output harder to read.
+SET(CXX_FLAGS_TIDY "${CXX_FLAGS_TIDY} -fno-color-diagnostics")
 
 # Set compile flags based on the build type.
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG")
@@ -82,10 +121,11 @@ if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG")
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
   SET(CMAKE_CXX_FLAGS ${CXX_FLAGS_RELEASE})
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "ADDRESS_SANITIZER")
-  if (NOT IMPALA_TOOLCHAIN)
-    SET(CMAKE_CXX_COMPILER ${LLVM_CLANG_EXECUTABLE})
-  endif()
   SET(CMAKE_CXX_FLAGS "${CXX_FLAGS_ADDRESS_SANITIZER}")
+elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "TIDY")
+  SET(CMAKE_CXX_FLAGS "${CXX_FLAGS_TIDY}")
+elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "UBSAN")
+  SET(CMAKE_CXX_FLAGS "${CXX_FLAGS_UBSAN}")
 else()
   message(FATAL_ERROR "Unknown build type: ${CMAKE_BUILD_TYPE}")
 endif()
@@ -95,7 +135,7 @@ if (ENABLE_CODE_COVERAGE)
 endif()
 
 # Add flags that are common across build types
-#  - fverboase-asm creates better annotated assembly.  This doesn't seem to affect
+#  - fverbose-asm creates better annotated assembly.  This doesn't seem to affect
 #    when building the binary.
 # LLMV_CFLAGS - Adding llvm compile flags
 SET(CMAKE_CXX_FLAGS "${CXX_COMMON_FLAGS} ${CMAKE_CXX_FLAGS}")
@@ -104,10 +144,12 @@ SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${LLVM_CFLAGS}")
 
 # Use ccache when found and not explicitly disabled by setting the DISABLE_CCACHE envvar.
 find_program(CCACHE ccache)
+set(RULE_LAUNCH_PREFIX)
 if (CCACHE AND NOT DEFINED ENV{DISABLE_CCACHE})
-  set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
-  set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ccache)
-  if ("${CMAKE_BUILD_TYPE}" STREQUAL "ADDRESS_SANITIZER")
+  set(RULE_LAUNCH_PREFIX ccache)
+  if ("${CMAKE_BUILD_TYPE}" STREQUAL "ADDRESS_SANITIZER"
+      OR "${CMAKE_BUILD_TYPE}" STREQUAL "TIDY"
+      OR "${CMAKE_BUILD_TYPE}" STREQUAL "UBSAN")
     # Need to set CCACHE_CPP so that ccache calls clang with the original source file for
     # both preprocessing and compilation. Otherwise, ccache will use clang to preprocess
     # the file and then call clang with the preprocessed output if not cached. However,
@@ -118,6 +160,15 @@ if (CCACHE AND NOT DEFINED ENV{DISABLE_CCACHE})
   endif()
 endif()
 
+if(DEFINED ENV{IMPALA_DISTCC_ENABLED})
+  if ($ENV{IMPALA_DISTCC_ENABLED} STREQUAL "true")
+    SET(RULE_LAUNCH_PREFIX "${RULE_LAUNCH_PREFIX} $ENV{IMPALA_HOME}/bin/distcc/distcc.sh")
+  endif()
+endif()
+
+set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ${RULE_LAUNCH_PREFIX})
+set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ${RULE_LAUNCH_PREFIX})
+
 # Thrift requires these definitions for some types that we use
 add_definitions(-DHAVE_INTTYPES_H -DHAVE_NETINET_IN_H -DHAVE_NETDB_H)
 
@@ -127,10 +178,26 @@ add_definitions(-DHAVE_INTTYPES_H -DHAVE_NETINET_IN_H -DHAVE_NETDB_H)
 # Empirically, the runtime JIT produces slightly better code when starting with IR that
 # was optimized at -O1. Higher optimization levels tend to bloat the code.
 #  -Wno-deprecated: gutil contains deprecated headers
-#  -Wno-c++11-extensions: c++11 extensions are ok as long as clang supports them
-set(CLANG_IR_CXX_FLAGS "-emit-llvm" "-c" "-DIR_COMPILE" "-DNDEBUG"
+#  -Wno-return-type-c-linkage: UDFs return C++ classes but use C linkage to prevent
+#       mangling
+#  -DBOOST_NO_EXCEPTIONS: call a custom error handler for exceptions in codegen'd code.
+set(CLANG_IR_CXX_FLAGS "-emit-llvm" "-c" "-std=c++14" "-DIR_COMPILE" "-DNDEBUG"
   "-DHAVE_INTTYPES_H" "-DHAVE_NETINET_IN_H" "-DBOOST_DATE_TIME_POSIX_TIME_STD_CONFIG"
-  "-Wno-deprecated" "-Wno-c++11-extensions" "-O1")
+  "-DBOOST_NO_EXCEPTIONS" "-fcolor-diagnostics" "-Wno-deprecated"
+  "-Wno-return-type-c-linkage" "-O1")
+# -Werror: compile warnings should be errors when using the toolchain compiler.
+set(CLANG_IR_CXX_FLAGS "${CLANG_IR_CXX_FLAGS}" "-Werror")
+
+IF($ENV{ENABLE_IMPALA_IR_DEBUG_INFO} STREQUAL "true")
+  # -g: emit debug symbols in IR. These increase IR size and memory overhead of LLVM, but
+  #     are useful for debugging codegened code and interpreting codegen disassembly
+  #     dumps.
+  SET(CLANG_IR_CXX_FLAGS "${CLANG_IR_CXX_FLAGS}" "-g")
+endif()
+
+# Flags to pass to LLVM's opt to further optimize cross-compiled IR.
+#  -inline: inline with low threshold to get rid of trivial accessor functions.
+set(LLVM_OPT_IR_FLAGS "-inline" "-inlinehint-threshold=10" "-inline-threshold=10")
 
 # setup doc generation with Doxygen
 find_package(Doxygen)
@@ -143,7 +210,6 @@ if (DOXYGEN_FOUND)
     ${CMAKE_SOURCE_DIR}/be/src/common/
     ${CMAKE_SOURCE_DIR}/be/src/exec/
     ${CMAKE_SOURCE_DIR}/be/src/exprs/
-    ${CMAKE_SOURCE_DIR}/be/src/resourcebroker/
     ${CMAKE_SOURCE_DIR}/be/src/runtime/
     ${CMAKE_SOURCE_DIR}/be/src/scheduling/
     ${CMAKE_SOURCE_DIR}/be/src/service/
@@ -174,19 +240,9 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/generated-sources)
 
 set(CLANG_INCLUDE_FLAGS)
 
-if (IMPALA_TOOLCHAIN)
-  # When the Toolchain is used we use LLVM 3.3 that was built in a different path that it
-  # is invoked from, and a GCC that resides in a different location. LVVM 3.3 relies on
-  # hard-coded path information about where to find the system headers and does not support
-  # specifying the -gcc-toolchain flag to dynamically provide this information. Because of
-  # these reasons we need to manually add the system c++ headers to the path when we
-  # compile the IR code with clang.
-  set(CLANG_BASE_FLAGS
-    "-I${GCC_ROOT}/include/c++/$ENV{IMPALA_GCC_VERSION}"
-    "-I${GCC_ROOT}/include/c++/$ENV{IMPALA_GCC_VERSION}/backward"
-    "-I${GCC_ROOT}/include/c++/$ENV{IMPALA_GCC_VERSION}/x86_64-unknown-linux-gnu")
-  set(CLANG_INCLUDE_FLAGS ${CLANG_BASE_FLAGS})
-endif()
+# Ensure that clang uses the gcc toolchain headers.
+set(CLANG_BASE_FLAGS --gcc-toolchain=${GCC_ROOT})
+set(CLANG_INCLUDE_FLAGS ${CLANG_BASE_FLAGS})
 
 set(CLANG_INCLUDE_FLAGS
   ${CLANG_INCLUDE_FLAGS}
@@ -208,6 +264,7 @@ set(CLANG_INCLUDE_FLAGS
   "-I${ZLIB_INCLUDE_DIR}"
   "-I${OPENSSL_INCLUDE_DIR}"
   "-I${LDAP_INCLUDE_DIR}"
+  "-I${PROTOBUF_INCLUDE_DIR}"
 )
 
 # allow linking of static libs into dynamic lib
@@ -215,7 +272,8 @@ add_definitions(-fPIC)
 
 # set compile output directory
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG" OR
-    "${CMAKE_BUILD_TYPE}" STREQUAL "ADDRESS_SANITIZER")
+    "${CMAKE_BUILD_TYPE}" STREQUAL "ADDRESS_SANITIZER" OR
+    "${CMAKE_BUILD_TYPE}" STREQUAL "UBSAN")
   set(BUILD_OUTPUT_ROOT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/build/debug/")
 else()
   set(BUILD_OUTPUT_ROOT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/build/release/")
@@ -228,6 +286,10 @@ if (NOT APPLE)
 endif()
 EXECUTE_PROCESS(COMMAND ln ${MORE_ARGS} -sf ${BUILD_OUTPUT_ROOT_DIRECTORY}
   ${CMAKE_CURRENT_SOURCE_DIR}/build/latest)
+
+# Determine what functions are available on the current platform.
+INCLUDE(CheckFunctionExists)
+CHECK_FUNCTION_EXISTS(sched_getcpu HAVE_SCHED_GETCPU)
 
 # This is a list of impala library dependencies. Individual libraries
 # must not specify library dependencies in their own CMakeLists.txt file.
@@ -245,6 +307,7 @@ if (NOT APPLE)
 endif()
 set (IMPALA_LINK_LIBS
   ${WL_START_GROUP}
+  BufferPool
   Catalog
   CodeGen
   Common
@@ -252,7 +315,6 @@ set (IMPALA_LINK_LIBS
   Exprs
   GlobalFlags
   ImpalaThrift
-  ResourceBroker
   Rpc
   Runtime
   Scheduling
@@ -262,7 +324,6 @@ set (IMPALA_LINK_LIBS
   ThriftSaslTransport
   Udf
   Util
-  Webserver
   ${WL_END_GROUP}
 )
 
@@ -271,6 +332,7 @@ set (IMPALA_LINK_LIBS
 # libraries when dynamic linking is enabled.
 if (BUILD_SHARED_LIBS)
   set (IMPALA_LINK_LIBS ${IMPALA_LINK_LIBS}
+    BufferPool
     Runtime
     Exec
     CodeGen
@@ -280,8 +342,6 @@ if (BUILD_SHARED_LIBS)
     Statestore
     Scheduling
     Catalog
-    ResourceBroker
-    Webserver
     ImpalaThrift
     GlobalFlags
     Common
@@ -289,8 +349,7 @@ if (BUILD_SHARED_LIBS)
     )
 endif ()
 
-# Add all external dependencies. They should come after the impala libs.
-set (IMPALA_LINK_LIBS ${IMPALA_LINK_LIBS}
+set (IMPALA_DEPENDENCIES
   ${SNAPPY_STATIC_LIB}
   ${LZ4_STATIC_LIB}
   ${RE2_STATIC_LIB}
@@ -301,16 +360,24 @@ set (IMPALA_LINK_LIBS ${IMPALA_LINK_LIBS}
   ${LDAP_LIBRARY}
   ${LBER_LIBRARY}
   ThriftSaslTransport
+  ${OPENSSL_LIBS}
   gutil
   glogstatic
   gflagsstatic
   pprofstatic
+  breakpad
   ${HDFS_LIB}
   ${LIBZ}
   ${LIBBZ2}
   ${AVRO_STATIC_LIB}
   ${JAVA_JVM_LIBRARY}
+  kudu_client)
+
+# Add all external dependencies. They should come after the impala libs.
+set (IMPALA_LINK_LIBS ${IMPALA_LINK_LIBS}
+  ${IMPALA_DEPENDENCIES}
   -lrt
+  -ldl # Needed for LLVM
 )
 
 # The above link list does not include tcmalloc. This is because the Impala JVM support
@@ -331,22 +398,12 @@ endif()
 set(IMPALA_LINK_LIBS_DYNAMIC_TARGETS ${IMPALA_LINK_LIBS_NO_TCMALLOC})
 list(REMOVE_ITEM IMPALA_LINK_LIBS_DYNAMIC_TARGETS HDFS_STATIC)
 set(IMPALA_LINK_LIBS_DYNAMIC_TARGETS ${IMPALA_LINK_LIBS_DYNAMIC_TARGETS} ${HDFS_LIBRARIES})
-# Replace static libz bzib with dynamic
-if (NOT IMPALA_TOOLCHAIN AND NOT BUILD_SHARED_LIBS)
-  list(REMOVE_ITEM IMPALA_LINK_LIBS_DYNAMIC_TARGETS BZIP2_STATIC)
-  list(REMOVE_ITEM IMPALA_LINK_LIBS_DYNAMIC_TARGETS ZLIB_STATIC)
-  set(IMPALA_LINK_LIBS_DYNAMIC_TARGETS
-    ${IMPALA_LINK_LIBS_DYNAMIC_TARGETS} ${ZLIB_LIBRARIES} ${BZIP2_LIBRARIES})
-endif()
-
-# Replace Udf with ImpalaUdf for $UDF_TEST_LINK_LIBS
-set (UDF_TEST_LINK_LIBS ${IMPALA_LINK_LIBS} ImpalaUdf)
-list(REMOVE_ITEM UDF_TEST_LINK_LIBS Udf)
 
 # Link libs for test executables.  Although not all tests need all libs,
 # the build time for the tests is rather small and not worth the trouble.
+# TODO: build time for tests is no longer small, but our dependencies are now very
+# complicated and hard to isolate
 set (IMPALA_TEST_LINK_LIBS ${IMPALA_LINK_LIBS} gtest)
-set (UDF_TEST_LINK_LIBS ${UDF_TEST_LINK_LIBS} gtest)
 
 MESSAGE(STATUS "Compiler Flags: ${CMAKE_CXX_FLAGS}")
 
@@ -363,17 +420,29 @@ add_custom_target(be-test)
 # Utility CMake function to make specifying tests and benchmarks less verbose
 FUNCTION(ADD_BE_TEST TEST_NAME)
   # This gets the directory where the test is from (e.g. 'exprs' or 'runtime')
-  get_filename_component(DIR_NAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
+  file(RELATIVE_PATH DIR_NAME "${CMAKE_SOURCE_DIR}/be/src/" ${CMAKE_CURRENT_SOURCE_DIR})
   ADD_EXECUTABLE(${TEST_NAME} ${TEST_NAME}.cc)
   TARGET_LINK_LIBRARIES(${TEST_NAME} ${IMPALA_TEST_LINK_LIBS})
   set(CMAKE_EXE_LINKER_FLAGS "--start-group")
-  ADD_TEST(${TEST_NAME} "${BUILD_OUTPUT_ROOT_DIRECTORY}/${DIR_NAME}/${TEST_NAME}")
+  ADD_TEST(${TEST_NAME} "${BUILD_OUTPUT_ROOT_DIRECTORY}/${DIR_NAME}/${TEST_NAME}"
+    -log_dir=$ENV{IMPALA_BE_TEST_LOGS_DIR})
   ADD_DEPENDENCIES(be-test ${TEST_NAME})
 ENDFUNCTION()
 
-FUNCTION(ADD_BE_BENCHMARK BENCHMARK_NAME)
-  ADD_EXECUTABLE(${BENCHMARK_NAME} ${BENCHMARK_NAME}.cc)
-  TARGET_LINK_LIBRARIES(${BENCHMARK_NAME} ${IMPALA_LINK_LIBS})
+# Similar utility function for tests that use the UDF SDK
+FUNCTION(ADD_UDF_TEST TEST_NAME)
+  # This gets the directory where the test is from (e.g. 'exprs' or 'runtime')
+  get_filename_component(DIR_NAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
+  ADD_EXECUTABLE(${TEST_NAME} ${TEST_NAME}.cc)
+  # Set ImpalaUdf as the first link library for UDF tests. This will cause its test
+  # definitions to be linked instead of subsequent non-test definitions. Otherwise the
+  # test definitions of MemTracker, etc. will be used in the udf.cc compilation unit, but
+  # the Runtime method implementations will be linked. See IMPALA-3132.
+  TARGET_LINK_LIBRARIES(${TEST_NAME} ImpalaUdf ${IMPALA_TEST_LINK_LIBS})
+  set(CMAKE_EXE_LINKER_FLAGS "--start-group")
+  ADD_TEST(${TEST_NAME} "${BUILD_OUTPUT_ROOT_DIRECTORY}/${DIR_NAME}/${TEST_NAME}"
+    -log_dir=$ENV{IMPALA_BE_TEST_LOGS_DIR})
+  ADD_DEPENDENCIES(be-test ${TEST_NAME})
 ENDFUNCTION()
 
 # Function to generate rule to cross compile a source file to an IR module.
@@ -399,7 +468,6 @@ add_subdirectory(src/catalog)
 add_subdirectory(src/codegen)
 add_subdirectory(src/common)
 add_subdirectory(src/exec)
-add_subdirectory(src/resourcebroker)
 add_subdirectory(src/exprs)
 add_subdirectory(src/runtime)
 add_subdirectory(src/scheduling)
@@ -422,6 +490,7 @@ SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-variable")
 add_subdirectory(generated-sources/gen-cpp)
 
 link_directories(
+  ${CMAKE_CURRENT_SOURCE_DIR}/build/bufferpool
   ${CMAKE_CURRENT_SOURCE_DIR}/build/catalog
   ${CMAKE_CURRENT_SOURCE_DIR}/build/common
   ${CMAKE_CURRENT_SOURCE_DIR}/build/exec

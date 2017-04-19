@@ -1,22 +1,25 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <sstream>
 #include <boost/functional/hash.hpp>
 
 #include "runtime/collection-value.h"
-#include "runtime/raw-value.h"
+#include "runtime/raw-value.inline.h"
 #include "runtime/string-value.inline.h"
 #include "runtime/tuple.h"
 
@@ -151,6 +154,9 @@ void RawValue::Write(const void* value, void* dst, const ColumnType& type,
       dest->len = src->len;
       if (type.type == TYPE_VARCHAR) DCHECK_LE(dest->len, type.len);
       if (pool != NULL) {
+        // Note: if this changes to TryAllocate(), CodegenAnyVal::WriteToSlot() will need
+        // to reflect this change as well (the codegen'd Allocate() call is actually
+        // generated in CodegenAnyVal::ToNativeValue()).
         dest->ptr = reinterpret_cast<char*>(pool->Allocate(dest->len));
         memcpy(dest->ptr, src->ptr, dest->len);
       } else {
@@ -175,61 +181,6 @@ void RawValue::Write(const void* value, void* dst, const ColumnType& type,
   }
 }
 
-// TODO: can we remove some of this code duplication? Templated allocator?
-void RawValue::Write(const void* value, const ColumnType& type,
-    void* dst, uint8_t** buf) {
-  DCHECK(value != NULL);
-  switch (type.type) {
-    case TYPE_BOOLEAN:
-      *reinterpret_cast<bool*>(dst) = *reinterpret_cast<const bool*>(value);
-      break;
-    case TYPE_TINYINT:
-      *reinterpret_cast<int8_t*>(dst) = *reinterpret_cast<const int8_t*>(value);
-      break;
-    case TYPE_SMALLINT:
-      *reinterpret_cast<int16_t*>(dst) = *reinterpret_cast<const int16_t*>(value);
-      break;
-    case TYPE_INT:
-      *reinterpret_cast<int32_t*>(dst) = *reinterpret_cast<const int32_t*>(value);
-      break;
-    case TYPE_BIGINT:
-      *reinterpret_cast<int64_t*>(dst) = *reinterpret_cast<const int64_t*>(value);
-      break;
-    case TYPE_FLOAT:
-      *reinterpret_cast<float*>(dst) = *reinterpret_cast<const float*>(value);
-      break;
-    case TYPE_DOUBLE:
-      *reinterpret_cast<double*>(dst) = *reinterpret_cast<const double*>(value);
-      break;
-    case TYPE_TIMESTAMP:
-      *reinterpret_cast<TimestampValue*>(dst) =
-          *reinterpret_cast<const TimestampValue*>(value);
-      break;
-    case TYPE_STRING:
-    case TYPE_VARCHAR:
-    case TYPE_CHAR: {
-      DCHECK(buf != NULL);
-      if (!type.IsVarLenStringType()) {
-        DCHECK_EQ(type.type, TYPE_CHAR);
-        memcpy(dst, value, type.len);
-        break;
-      }
-      const StringValue* src = reinterpret_cast<const StringValue*>(value);
-      StringValue* dest = reinterpret_cast<StringValue*>(dst);
-      dest->len = src->len;
-      dest->ptr = reinterpret_cast<char*>(*buf);
-      memcpy(dest->ptr, src->ptr, dest->len);
-      *buf += dest->len;
-      break;
-    }
-    case TYPE_DECIMAL:
-      memcpy(dst, value, type.GetByteSize());
-      break;
-    default:
-      DCHECK(false) << "RawValue::Write(): bad type: " << type.DebugString();
-  }
-}
-
 void RawValue::Write(const void* value, Tuple* tuple, const SlotDescriptor* slot_desc,
                      MemPool* pool) {
   if (value == NULL) {
@@ -240,4 +191,119 @@ void RawValue::Write(const void* value, Tuple* tuple, const SlotDescriptor* slot
   }
 }
 
+uint32_t RawValue::GetHashValueFnv(const void* v, const ColumnType& type, uint32_t seed) {
+  // Use HashCombine with arbitrary constant to ensure we don't return seed.
+  if (v == NULL) return HashUtil::HashCombine32(HASH_VAL_NULL, seed);
+
+  switch (type.type) {
+    case TYPE_STRING:
+    case TYPE_VARCHAR: {
+      const StringValue* string_value = reinterpret_cast<const StringValue*>(v);
+      if (string_value->len == 0) {
+        return HashUtil::HashCombine32(HASH_VAL_EMPTY, seed);
+      }
+      return HashUtil::FnvHash64to32(string_value->ptr, string_value->len, seed);
+    }
+    case TYPE_BOOLEAN:
+      return HashUtil::HashCombine32(*reinterpret_cast<const bool*>(v), seed);
+    case TYPE_TINYINT: return HashUtil::FnvHash64to32(v, 1, seed);
+    case TYPE_SMALLINT: return HashUtil::FnvHash64to32(v, 2, seed);
+    case TYPE_INT: return HashUtil::FnvHash64to32(v, 4, seed);
+    case TYPE_BIGINT: return HashUtil::FnvHash64to32(v, 8, seed);
+    case TYPE_FLOAT: return HashUtil::FnvHash64to32(v, 4, seed);
+    case TYPE_DOUBLE: return HashUtil::FnvHash64to32(v, 8, seed);
+    case TYPE_TIMESTAMP: return HashUtil::FnvHash64to32(v, 12, seed);
+    case TYPE_CHAR:
+      return HashUtil::FnvHash64to32(StringValue::CharSlotToPtr(v, type), type.len, seed);
+    case TYPE_DECIMAL: return HashUtil::FnvHash64to32(v, type.GetByteSize(), seed);
+    default: DCHECK(false); return 0;
+  }
+}
+
+void RawValue::PrintValue(
+    const void* value, const ColumnType& type, int scale, std::stringstream* stream) {
+  if (value == NULL) {
+    *stream << "NULL";
+    return;
+  }
+
+  int old_precision = stream->precision();
+  std::ios_base::fmtflags old_flags = stream->flags();
+  if (scale > -1) {
+    stream->precision(scale);
+    // Setting 'fixed' causes precision to set the number of digits printed after the
+    // decimal (by default it sets the maximum number of digits total).
+    *stream << std::fixed;
+  }
+
+  const StringValue* string_val = NULL;
+  switch (type.type) {
+    case TYPE_BOOLEAN: {
+      bool val = *reinterpret_cast<const bool*>(value);
+      *stream << (val ? "true" : "false");
+      return;
+    }
+    case TYPE_TINYINT:
+      // Extra casting for chars since they should not be interpreted as ASCII.
+      *stream << static_cast<int>(*reinterpret_cast<const int8_t*>(value));
+      break;
+    case TYPE_SMALLINT: *stream << *reinterpret_cast<const int16_t*>(value); break;
+    case TYPE_INT: *stream << *reinterpret_cast<const int32_t*>(value); break;
+    case TYPE_BIGINT: *stream << *reinterpret_cast<const int64_t*>(value); break;
+    case TYPE_FLOAT: {
+      float val = *reinterpret_cast<const float*>(value);
+      if (LIKELY(std::isfinite(val))) {
+        *stream << val;
+      } else if (std::isinf(val)) {
+        // 'Infinity' is Java's text representation of inf. By staying close to Java, we
+        // allow Hive to read text tables containing non-finite values produced by
+        // Impala. (The same logic applies to 'NaN', below).
+        *stream << (val < 0 ? "-Infinity" : "Infinity");
+      } else if (std::isnan(val)) {
+        *stream << "NaN";
+      }
+    } break;
+    case TYPE_DOUBLE: {
+      double val = *reinterpret_cast<const double*>(value);
+      if (LIKELY(std::isfinite(val))) {
+        *stream << val;
+      } else if (std::isinf(val)) {
+        // See TYPE_FLOAT for rationale.
+        *stream << (val < 0 ? "-Infinity" : "Infinity");
+      } else if (std::isnan(val)) {
+        *stream << "NaN";
+      }
+    } break;
+    case TYPE_VARCHAR:
+    case TYPE_STRING:
+      string_val = reinterpret_cast<const StringValue*>(value);
+      if (type.type == TYPE_VARCHAR) DCHECK(string_val->len <= type.len);
+      stream->write(string_val->ptr, string_val->len);
+      break;
+    case TYPE_TIMESTAMP:
+      *stream << *reinterpret_cast<const TimestampValue*>(value);
+      break;
+    case TYPE_CHAR:
+      stream->write(StringValue::CharSlotToPtr(value, type), type.len);
+      break;
+    case TYPE_DECIMAL:
+      switch (type.GetByteSize()) {
+        case 4:
+          *stream << reinterpret_cast<const Decimal4Value*>(value)->ToString(type);
+          break;
+        case 8:
+          *stream << reinterpret_cast<const Decimal8Value*>(value)->ToString(type);
+          break;
+        case 16:
+          *stream << reinterpret_cast<const Decimal16Value*>(value)->ToString(type);
+          break;
+        default: DCHECK(false) << type;
+      }
+      break;
+    default: DCHECK(false);
+  }
+  stream->precision(old_precision);
+  // Undo setting stream to fixed
+  stream->flags(old_flags);
+}
 }

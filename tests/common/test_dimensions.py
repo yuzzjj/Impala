@@ -1,11 +1,26 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # Common test dimensions and associated utility functions.
-import logging
+
 import os
 from itertools import product
-from tests.common.test_vector import TestDimension
-from os.path import isfile
+
+from tests.common.test_vector import ImpalaTestDimension
 
 WORKLOAD_DIR = os.environ['IMPALA_WORKLOAD_DIR']
 
@@ -14,6 +29,8 @@ WORKLOAD_DIR = os.environ['IMPALA_WORKLOAD_DIR']
 # to use when running the query.
 class TableFormatInfo(object):
   KNOWN_FILE_FORMATS = ['text', 'seq', 'rc', 'parquet', 'avro', 'hbase']
+  if os.environ['KUDU_IS_SUPPORTED'] == 'true':
+    KNOWN_FILE_FORMATS.append('kudu')
   KNOWN_COMPRESSION_CODECS = ['none', 'snap', 'gzip', 'bzip', 'def', 'lzo']
   KNOWN_COMPRESSION_TYPES = ['none', 'block', 'record']
 
@@ -70,12 +87,12 @@ class TableFormatInfo(object):
 
 def create_uncompressed_text_dimension(workload):
   dataset = get_dataset_from_workload(workload)
-  return TestDimension('table_format',
+  return ImpalaTestDimension('table_format',
       TableFormatInfo.create_from_string(dataset, 'text/none'))
 
 def create_parquet_dimension(workload):
   dataset = get_dataset_from_workload(workload)
-  return TestDimension('table_format',
+  return ImpalaTestDimension('table_format',
       TableFormatInfo.create_from_string(dataset, 'parquet/none'))
 
 # Available Exec Options:
@@ -112,6 +129,18 @@ def create_exec_option_dimension(cluster_sizes=ALL_CLUSTER_SIZES,
                                  disable_codegen_options=ALL_DISABLE_CODEGEN_OPTIONS,
                                  batch_sizes=ALL_BATCH_SIZES,
                                  sync_ddl=None, exec_single_node_option=[0]):
+  exec_option_dimensions = {
+      'abort_on_error': [1],
+      'exec_single_node_rows_threshold': exec_single_node_option,
+      'batch_size': batch_sizes,
+      'disable_codegen': disable_codegen_options,
+      'num_nodes': cluster_sizes}
+
+  if sync_ddl is not None:
+    exec_option_dimensions['sync_ddl'] = sync_ddl
+  return create_exec_option_dimension_from_dict(exec_option_dimensions)
+
+def create_exec_option_dimension_from_dict(exec_option_dimensions):
   """
   Builds a query exec option test dimension
 
@@ -123,16 +152,6 @@ def create_exec_option_dimension(cluster_sizes=ALL_CLUSTER_SIZES,
   TODO: In the future we could generate these values using pairwise to reduce total
   execution time.
   """
-  exec_option_dimensions = {
-      'abort_on_error': [1],
-      'exec_single_node_rows_threshold': exec_single_node_option,
-      'batch_size': batch_sizes,
-      'disable_codegen': disable_codegen_options,
-      'num_nodes': cluster_sizes}
-
-  if sync_ddl is not None:
-    exec_option_dimensions['sync_ddl'] = sync_ddl
-
   # Generate the cross product (all combinations) of the exec options specified. Then
   # store them in exec_option dictionary format.
   keys = sorted(exec_option_dimensions)
@@ -140,7 +159,7 @@ def create_exec_option_dimension(cluster_sizes=ALL_CLUSTER_SIZES,
   exec_option_dimension_values = [dict(zip(keys, prod)) for prod in combinations]
 
   # Build a test vector out of it
-  return TestDimension('exec_option', *exec_option_dimension_values)
+  return ImpalaTestDimension('exec_option', *exec_option_dimension_values)
 
 def get_dataset_from_workload(workload):
   # TODO: We need a better way to define the workload -> dataset mapping so we can
@@ -167,6 +186,10 @@ def load_table_info_dimension(workload_name, exploration_strategy, file_formats=
       vals = dict((key.strip(), value.strip()) for key, value in\
           (item.split(':') for item in line.split(',')))
 
+      # Skip Kudu if Kudu is not supported (IMPALA-4287).
+      if os.environ['KUDU_IS_SUPPORTED'] != 'true' and vals['file_format'] == 'kudu':
+        continue
+
       # If only loading specific file formats skip anything that doesn't match
       if file_formats is not None and vals['file_format'] not in file_formats:
         continue
@@ -175,10 +198,9 @@ def load_table_info_dimension(workload_name, exploration_strategy, file_formats=
         continue
       vector_values.append(TableFormatInfo(**vals))
 
-  return TestDimension('table_format', *vector_values)
+  return ImpalaTestDimension('table_format', *vector_values)
 
 def is_supported_insert_format(table_format):
   # Returns true if the given table_format is a supported Impala INSERT format
   return table_format.compression_codec == 'none' and\
       table_format.file_format in ['text', 'parquet']
-

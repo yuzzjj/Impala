@@ -1,41 +1,55 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # Injects failures  at specific locations in each of the plan nodes. Currently supports
 # two types of failures - cancellation of the query and a failure test hook.
 #
-import os
 import pytest
+import os
 import re
-from copy import copy
 from collections import defaultdict
-from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
-from tests.common.impala_test_suite import ImpalaTestSuite, ALL_NODES_ONLY, LOG
-from tests.common.test_vector import TestDimension
-from tests.common.test_dimensions import create_exec_option_dimension
-from tests.common.skip import SkipIf, SkipIfS3, SkipIfIsilon, SkipIfLocal
-from tests.util.test_file_parser import QueryTestSectionReader
 from time import sleep
 
-FAILPOINT_ACTION = ['FAIL', 'CANCEL']
-FAILPOINT_LOCATION = ['PREPARE', 'PREPARE_SCANNER', 'OPEN', 'GETNEXT', 'CLOSE']
+from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
+from tests.common.impala_test_suite import ImpalaTestSuite, LOG
+from tests.common.skip import SkipIf, SkipIfS3, SkipIfIsilon, SkipIfLocal
+from tests.common.test_dimensions import create_exec_option_dimension
+from tests.common.test_vector import ImpalaTestDimension
 
-# The goal of this query is to use all of the node types.
-# TODO: This query could be simplified a bit...
-QUERY = """
-select a.int_col, count(b.int_col) int_sum from functional_hbase.alltypesagg a
-join
-  (select * from alltypes
-   where year=2009 and month=1 order by int_col limit 2500
-   union all
-   select * from alltypes
-   where year=2009 and month=2 limit 3000) b
-on (a.int_col = b.int_col)
-group by a.int_col
-order by int_sum
-"""
+FAILPOINT_ACTIONS = ['FAIL', 'CANCEL', 'MEM_LIMIT_EXCEEDED']
+FAILPOINT_LOCATIONS = ['PREPARE', 'PREPARE_SCANNER', 'OPEN', 'GETNEXT', 'CLOSE']
+# Map debug actions to their corresponding query options' values.
+FAILPOINT_ACTION_MAP = {'FAIL': 'FAIL', 'CANCEL': 'WAIT',
+                        'MEM_LIMIT_EXCEEDED': 'MEM_LIMIT_EXCEEDED'}
+MT_DOP_VALUES = [0, 4]
 
-# TODO: Update to include INSERT when we support failpoints in the HDFS/Hbase sinks using
-# a similar pattern as test_cancellation.py
-QUERY_TYPE = ["SELECT"]
+# Queries should cover all exec nodes.
+QUERIES = [
+  "select * from alltypessmall",
+  "select count(*) from alltypessmall",
+  "select count(int_col) from alltypessmall group by id",
+  "select 1 from alltypessmall a join alltypessmall b on a.id = b.id",
+  "select 1 from alltypessmall a join alltypessmall b on a.id != b.id",
+  "select 1 from alltypessmall order by id",
+  "select 1 from alltypessmall order by id limit 100",
+  "select * from alltypessmall union all select * from alltypessmall",
+  "select row_number() over (partition by int_col order by id) from alltypessmall",
+  "select c from (select id c from alltypessmall order by id limit 10) v where c = 1"
+]
 
 @SkipIf.skip_hbase # -skip_hbase argument specified
 @SkipIfS3.hbase # S3: missing coverage: failures
@@ -47,70 +61,53 @@ class TestFailpoints(ImpalaTestSuite):
     return 'functional-query'
 
   @classmethod
-  def parse_plan_nodes_from_explain_output(cls, query, use_db="default"):
-    """Parses the EXPLAIN <query> output and returns a map of node_name->list(node_id)"""
-    client = cls.create_impala_client()
-    client.execute("use %s" % use_db)
-    explain_result = client.execute("explain " + QUERY)
-    # Maps plan node names to their respective node ids. Expects format of <ID>:<NAME>
-    node_id_map = defaultdict(list)
-    for row in explain_result.data:
-      match = re.search(r'\s*(?P<node_id>\d+)\:(?P<node_type>\S+\s*\S+)', row)
-      if match is not None:
-        node_id_map[match.group('node_type')].append(int(match.group('node_id')))
-    return node_id_map
-
-  @classmethod
   def add_test_dimensions(cls):
     super(TestFailpoints, cls).add_test_dimensions()
-    # Executing an explain on the the test query will fail in an enviornment where hbase
-    # tables don't exist (s3). Since this happens before the tests are run, the skipif
-    # marker won't catch it. If 's3' is detected as a file system, return immedietely.
-    if os.getenv("TARGET_FILESYSTEM") in ["s3", "isilon", "local"]: return
-    node_id_map = TestFailpoints.parse_plan_nodes_from_explain_output(QUERY, "functional")
-    assert node_id_map
-    cls.TestMatrix.add_dimension(TestDimension('location', *FAILPOINT_LOCATION))
-    cls.TestMatrix.add_dimension(TestDimension('target_node', *(node_id_map.items())))
-    cls.TestMatrix.add_dimension(TestDimension('action', *FAILPOINT_ACTION))
-    cls.TestMatrix.add_dimension(TestDimension('query_type', *QUERY_TYPE))
-    cls.TestMatrix.add_dimension(create_exec_option_dimension([0], [False], [0]))
-
-    # These are invalid test cases.
-    # For more info see IMPALA-55 and IMPALA-56.
-    cls.TestMatrix.add_constraint(lambda v: not (
-        v.get_value('action') == 'FAIL' and
-        v.get_value('location') in ['CLOSE'] and
-        v.get_value('target_node')[0] in ['AGGREGATE', 'HASH JOIN']) and
-        not (v.get_value('location') in ['PREPARE'] and
-             v.get_value('action') == 'CANCEL'))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('query', *QUERIES))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('action', *FAILPOINT_ACTIONS))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('location', *FAILPOINT_LOCATIONS))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('mt_dop', *MT_DOP_VALUES))
+    cls.ImpalaTestMatrix.add_dimension(
+        create_exec_option_dimension([0], [False], [0]))
 
     # Don't create CLOSE:WAIT debug actions to avoid leaking plan fragments (there's no
     # way to cancel a plan fragment once Close() has been called)
-    cls.TestMatrix.add_constraint(
+    cls.ImpalaTestMatrix.add_constraint(
         lambda v: not (v.get_value('action') == 'CANCEL'
                      and v.get_value('location') == 'CLOSE'))
 
-    # No need to test error in scanner preparation for non-scan nodes.
-    cls.TestMatrix.add_constraint(
-        lambda v: (v.get_value('location') != 'PREPARE_SCANNER' or
-            v.get_value('target_node')[0] == 'SCAN HDFS'))
-
-
+  # Run serially because this can create enough memory pressure to invoke the Linux OOM
+  # killer on machines with 30GB RAM. This makes the test run in 4 minutes instead of 1-2.
+  @pytest.mark.execute_serially
   def test_failpoints(self, vector):
-    query = QUERY
-    node_type, node_ids = vector.get_value('target_node')
+    query = vector.get_value('query')
     action = vector.get_value('action')
     location = vector.get_value('location')
+    vector.get_value('exec_option')['mt_dop'] = vector.get_value('mt_dop')
 
-    for node_id in node_ids:
-      debug_action = '%d:%s:%s' % (node_id, location,
-                                   'WAIT' if action == 'CANCEL' else 'FAIL')
-      LOG.info('Current dubug action: SET DEBUG_ACTION=%s' % debug_action)
+    if action == "CANCEL" and location == "PREPARE":
+      pytest.xfail(reason="IMPALA-5202 leads to a hang.")
+
+    try:
+      plan_node_ids = self.__parse_plan_nodes_from_explain(query, vector)
+    except ImpalaBeeswaxException as e:
+      if "MT_DOP not supported" in str(e):
+        pytest.xfail(reason="MT_DOP not supported.")
+      else:
+        raise e
+
+    for node_id in plan_node_ids:
+      debug_action = '%d:%s:%s' % (node_id, location, FAILPOINT_ACTION_MAP[action])
+      LOG.info('Current debug action: SET DEBUG_ACTION=%s' % debug_action)
       vector.get_value('exec_option')['debug_action'] = debug_action
 
       if action == 'CANCEL':
         self.__execute_cancel_action(query, vector)
-      elif action == 'FAIL':
+      elif action == 'FAIL' or action == 'MEM_LIMIT_EXCEEDED':
         self.__execute_fail_action(query, vector)
       else:
         assert 0, 'Unknown action: %s' % action
@@ -119,6 +116,19 @@ class TestFailpoints(ImpalaTestSuite):
     # injected.
     del vector.get_value('exec_option')['debug_action']
     self.execute_query(query, vector.get_value('exec_option'))
+
+  def __parse_plan_nodes_from_explain(self, query, vector):
+    """Parses the EXPLAIN <query> output and returns a list of node ids.
+    Expects format of <ID>:<NAME>"""
+    explain_result =\
+        self.execute_query("explain " + query, vector.get_value('exec_option'),
+                           table_format=vector.get_value('table_format'))
+    node_ids = []
+    for row in explain_result.data:
+      match = re.search(r'\s*(?P<node_id>\d+)\:(?P<node_type>\S+\s*\S+)', row)
+      if match is not None:
+        node_ids.append(int(match.group('node_id')))
+    return node_ids
 
   def __execute_fail_action(self, query, vector):
     try:

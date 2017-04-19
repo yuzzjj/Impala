@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/exec-node.h"
 
@@ -32,6 +35,10 @@
 #include "exec/hash-join-node.h"
 #include "exec/hbase-scan-node.h"
 #include "exec/hdfs-scan-node.h"
+#include "exec/hdfs-scan-node-mt.h"
+#include "exec/kudu-scan-node.h"
+#include "exec/kudu-scan-node-mt.h"
+#include "exec/kudu-util.h"
 #include "exec/nested-loop-join-node.h"
 #include "exec/partitioned-aggregation-node.h"
 #include "exec/partitioned-hash-join-node.h"
@@ -48,7 +55,7 @@
 #include "runtime/row-batch.h"
 #include "runtime/runtime-state.h"
 #include "util/debug-util.h"
-#include "util/runtime-profile.h"
+#include "util/runtime-profile-counters.h"
 
 #include "common/names.h"
 
@@ -79,6 +86,11 @@ void ExecNode::RowBatchQueue::AddBatch(RowBatch* batch) {
     lock_guard<SpinLock> l(lock_);
     cleanup_queue_.push_back(batch);
   }
+}
+
+bool ExecNode::RowBatchQueue::AddBatchWithTimeout(RowBatch* batch,
+    int64_t timeout_micros) {
+  return BlockingPutWithTimeout(batch, timeout_micros);
 }
 
 RowBatch* ExecNode::RowBatchQueue::GetBatch() {
@@ -118,6 +130,7 @@ ExecNode::ExecNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl
     rows_returned_counter_(NULL),
     rows_returned_rate_(NULL),
     containing_subplan_(NULL),
+    disable_codegen_(tnode.disable_codegen),
     is_closed_(false) {
   InitRuntimeProfile(PrintPlanNodeType(tnode.node_type));
 }
@@ -136,10 +149,9 @@ Status ExecNode::Prepare(RuntimeState* state) {
   DCHECK(runtime_profile_.get() != NULL);
   rows_returned_counter_ =
       ADD_COUNTER(runtime_profile_, "RowsReturned", TUnit::UNIT);
-  mem_tracker_.reset(new MemTracker(
-      runtime_profile_.get(), -1, -1, runtime_profile_->name(),
+  mem_tracker_.reset(new MemTracker(runtime_profile_.get(), -1, runtime_profile_->name(),
       state->instance_mem_tracker()));
-  expr_mem_tracker_.reset(new MemTracker(-1, -1, "Exprs", mem_tracker_.get(), false));
+  expr_mem_tracker_.reset(new MemTracker(-1, "Exprs", mem_tracker_.get(), false));
 
   rows_returned_rate_ = runtime_profile()->AddDerivedCounter(
       ROW_THROUGHPUT_COUNTER, TUnit::UNIT_PER_SECOND,
@@ -148,11 +160,18 @@ Status ExecNode::Prepare(RuntimeState* state) {
 
   RETURN_IF_ERROR(Expr::Prepare(conjunct_ctxs_, state, row_desc(), expr_mem_tracker()));
   AddExprCtxsToFree(conjunct_ctxs_);
-
   for (int i = 0; i < children_.size(); ++i) {
     RETURN_IF_ERROR(children_[i]->Prepare(state));
   }
   return Status::OK();
+}
+
+void ExecNode::Codegen(RuntimeState* state) {
+  DCHECK(state->ShouldCodegen());
+  DCHECK(state->codegen() != NULL);
+  for (int i = 0; i < children_.size(); ++i) {
+    children_[i]->Codegen(state);
+  }
 }
 
 Status ExecNode::Open(RuntimeState* state) {
@@ -188,27 +207,8 @@ void ExecNode::Close(RuntimeState* state) {
   }
 }
 
-void ExecNode::AddRuntimeExecOption(const string& str) {
-  lock_guard<mutex> l(exec_options_lock_);
-  if (runtime_exec_options_.empty()) {
-    runtime_exec_options_ = str;
-  } else {
-    runtime_exec_options_.append(", ");
-    runtime_exec_options_.append(str);
-  }
-  runtime_profile()->AddInfoString("ExecOption", runtime_exec_options_);
-}
-
-void ExecNode::AddCodegenExecOption(bool codegen_enabled, const string& extra_info,
-    const string& extra_label) {
-  string str = codegen_enabled ? "Codegen Enabled" : "Codegen Disabled";
-  if (!extra_info.empty()) str = str + ": " + extra_info;
-  if (!extra_label.empty()) str = extra_label + " " + str;
-  AddRuntimeExecOption(str);
-}
-
-Status ExecNode::CreateTree(RuntimeState* state, const TPlan& plan,
-    const DescriptorTbl& descs, ExecNode** root) {
+Status ExecNode::CreateTree(
+    RuntimeState* state, const TPlan& plan, const DescriptorTbl& descs, ExecNode** root) {
   if (plan.nodes.size() == 0) {
     *root = NULL;
     return Status::OK();
@@ -272,18 +272,31 @@ Status ExecNode::CreateNode(ObjectPool* pool, const TPlanNode& tnode,
   stringstream error_msg;
   switch (tnode.node_type) {
     case TPlanNodeType::HDFS_SCAN_NODE:
-      *node = pool->Add(new HdfsScanNode(pool, tnode, descs));
-      // If true, this node requests codegen over interpretation for conjuncts
-      // evaluation whenever possible. Turn codegen on for expr evaluation for
-      // the entire fragment.
-      if (tnode.hdfs_scan_node.codegen_conjuncts) state->SetCodegenExpr();
-      (*node)->AddCodegenExecOption(state->ShouldCodegenExpr(), "", "Expr Evaluation");
+      if (tnode.hdfs_scan_node.use_mt_scan_node) {
+        DCHECK_GT(state->query_options().mt_dop, 0);
+        *node = pool->Add(new HdfsScanNodeMt(pool, tnode, descs));
+      } else {
+        DCHECK(state->query_options().mt_dop == 0
+            || state->query_options().num_scanner_threads == 1);
+        *node = pool->Add(new HdfsScanNode(pool, tnode, descs));
+      }
       break;
     case TPlanNodeType::HBASE_SCAN_NODE:
       *node = pool->Add(new HBaseScanNode(pool, tnode, descs));
       break;
     case TPlanNodeType::DATA_SOURCE_NODE:
       *node = pool->Add(new DataSourceScanNode(pool, tnode, descs));
+      break;
+    case TPlanNodeType::KUDU_SCAN_NODE:
+      RETURN_IF_ERROR(CheckKuduAvailability());
+      if (tnode.kudu_scan_node.use_mt_scan_node) {
+        DCHECK_GT(state->query_options().mt_dop, 0);
+        *node = pool->Add(new KuduScanNodeMt(pool, tnode, descs));
+      } else {
+        DCHECK(state->query_options().mt_dop == 0
+            || state->query_options().num_scanner_threads == 1);
+        *node = pool->Add(new KuduScanNode(pool, tnode, descs));
+      }
       break;
     case TPlanNodeType::AGGREGATION_NODE:
       if (FLAGS_enable_partitioned_aggregation) {
@@ -396,6 +409,7 @@ void ExecNode::CollectNodes(TPlanNodeType::type node_type, vector<ExecNode*>* no
 void ExecNode::CollectScanNodes(vector<ExecNode*>* nodes) {
   CollectNodes(TPlanNodeType::HDFS_SCAN_NODE, nodes);
   CollectNodes(TPlanNodeType::HBASE_SCAN_NODE, nodes);
+  CollectNodes(TPlanNodeType::KUDU_SCAN_NODE, nodes);
 }
 
 void ExecNode::InitRuntimeProfile(const string& name) {
@@ -416,6 +430,14 @@ Status ExecNode::ExecDebugAction(TExecNodePhase::type phase, RuntimeState* state
       sleep(1);
     }
     return Status::CANCELLED;
+  }
+  if (debug_action_ == TDebugAction::INJECT_ERROR_LOG) {
+    state->LogError(
+        ErrorMsg(TErrorCode::INTERNAL_ERROR, "Debug Action: INJECT_ERROR_LOG"));
+    return Status::OK();
+  }
+  if (debug_action_ == TDebugAction::MEM_LIMIT_EXCEEDED) {
+    return mem_tracker()->MemLimitExceeded(state, "Debug Action: MEM_LIMIT_EXCEEDED");
   }
   return Status::OK();
 }
@@ -441,6 +463,18 @@ void ExecNode::AddExprCtxsToFree(const SortExecExprs& sort_exec_exprs) {
   AddExprCtxsToFree(sort_exec_exprs.sort_tuple_slot_expr_ctxs());
   AddExprCtxsToFree(sort_exec_exprs.lhs_ordering_expr_ctxs());
   AddExprCtxsToFree(sort_exec_exprs.rhs_ordering_expr_ctxs());
+}
+
+void ExecNode::AddCodegenDisabledMessage(RuntimeState* state) {
+  if (state->CodegenDisabledByQueryOption()) {
+    runtime_profile()->AddCodegenMsg(false, "disabled by query option DISABLE_CODEGEN");
+  } else if (state->CodegenDisabledByHint()) {
+    runtime_profile()->AddCodegenMsg(false, "disabled due to optimization hints");
+  }
+}
+
+bool ExecNode::IsNodeCodegenDisabled() const {
+  return disable_codegen_;
 }
 
 // Codegen for EvalConjuncts.  The generated signature is
@@ -479,15 +513,17 @@ void ExecNode::AddExprCtxsToFree(const SortExecExprs& sort_exec_exprs) {
 // false:                                            ; preds = %continue, %entry
 //   ret i1 false
 // }
-Status ExecNode::CodegenEvalConjuncts(RuntimeState* state,
+Status ExecNode::CodegenEvalConjuncts(LlvmCodeGen* codegen,
     const vector<ExprContext*>& conjunct_ctxs, Function** fn, const char* name) {
   Function* conjunct_fns[conjunct_ctxs.size()];
   for (int i = 0; i < conjunct_ctxs.size(); ++i) {
     RETURN_IF_ERROR(
-        conjunct_ctxs[i]->root()->GetCodegendComputeFn(state, &conjunct_fns[i]));
+        conjunct_ctxs[i]->root()->GetCodegendComputeFn(codegen, &conjunct_fns[i]));
+    if (i >= LlvmCodeGen::CODEGEN_INLINE_EXPRS_THRESHOLD) {
+      // Avoid bloating EvalConjuncts by inlining everything into it.
+      codegen->SetNoInline(conjunct_fns[i]);
+    }
   }
-  LlvmCodeGen* codegen;
-  RETURN_IF_ERROR(state->GetCodegen(&codegen));
 
   // Construct function signature to match
   // bool EvalConjuncts(Expr** exprs, int num_exprs, TupleRow* row)
@@ -507,7 +543,7 @@ Status ExecNode::CodegenEvalConjuncts(RuntimeState* state,
       LlvmCodeGen::NamedVariable("num_ctxs", codegen->GetType(TYPE_INT)));
   prototype.AddArgument(LlvmCodeGen::NamedVariable("row", tuple_row_ptr_type));
 
-  LlvmCodeGen::LlvmBuilder builder(codegen->context());
+  LlvmBuilder builder(codegen->context());
   Value* args[3];
   *fn = prototype.GeneratePrototype(&builder, args);
   Value* ctxs_arg = args[0];
@@ -546,12 +582,16 @@ Status ExecNode::CodegenEvalConjuncts(RuntimeState* state,
     builder.CreateRet(codegen->true_value());
   }
 
+  // Avoid inlining EvalConjuncts into caller if it is large.
+  if (conjunct_ctxs.size() > LlvmCodeGen::CODEGEN_INLINE_EXPR_BATCH_THRESHOLD) {
+    codegen->SetNoInline(*fn);
+  }
+
   *fn = codegen->FinalizeFunction(*fn);
   if (*fn == NULL) {
     return Status("ExecNode::CodegenEvalConjuncts(): codegen'd EvalConjuncts() function "
-        "failed verification, see log");
+                  "failed verification, see log");
   }
   return Status::OK();
 }
-
 }

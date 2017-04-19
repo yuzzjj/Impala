@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_RUNTIME_CLIENT_CACHE_H
 #define IMPALA_RUNTIME_CLIENT_CACHE_H
@@ -21,7 +24,9 @@
 #include <boost/unordered_map.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/bind.hpp>
+#include <gutil/strings/substitute.h>
 
+#include "runtime/client-cache-types.h"
 #include "util/metrics.h"
 #include "rpc/thrift-client.h"
 #include "rpc/thrift-util.h"
@@ -84,12 +89,16 @@ class ClientCacheHelper {
   Status ReopenClient(ClientFactory factory_method, ClientKey* client_key);
 
   /// Returns a client to the cache. Upon return, *client_key will be NULL, and the
-  /// associated client will be available in the per-host cache..
+  /// associated client will be available in the per-host cache.
   void ReleaseClient(ClientKey* client_key);
 
   /// Close all connections to a host (e.g., in case of failure) so that on their
   /// next use they will have to be reopened via ReopenClient().
   void CloseConnections(const TNetworkAddress& address);
+
+  /// Close the client connection and don't put client back to per-host cache.
+  /// Also remove client from client_map_.
+  void DestroyClient(ClientKey* client_key);
 
   /// Return a debug representation of the contents of this cache.
   std::string DebugString();
@@ -140,20 +149,20 @@ class ClientCacheHelper {
   boost::mutex cache_lock_;
 
   /// Map from an address to a PerHostCache containing a list of keys that have entries in
-  /// client_map_ for that host. The value type is wrapped in a shared_ptr so that the copy
-  /// c'tor for PerHostCache is not required.
+  /// client_map_ for that host. The value type is wrapped in a shared_ptr so that the
+  /// copy c'tor for PerHostCache is not required.
   typedef boost::unordered_map<
-      TNetworkAddress, boost::shared_ptr<PerHostCache> > PerHostCacheMap;
+      TNetworkAddress, std::shared_ptr<PerHostCache>> PerHostCacheMap;
   PerHostCacheMap per_host_caches_;
 
   /// Protects client_map_.
   boost::mutex client_map_lock_;
 
   /// Map from client key back to its associated ThriftClientImpl transport. This is where
-  /// all the clients are actually stored, and client instances are owned by this class and
-  /// persist for exactly as long as they are present in this map.
+  /// all the clients are actually stored, and client instances are owned by this class
+  /// and persist for exactly as long as they are present in this map.
   /// We use a map (vs. unordered_map) so we get iterator consistency across operations.
-  typedef std::map<ClientKey, boost::shared_ptr<ThriftClientImpl> > ClientMap;
+  typedef std::map<ClientKey, std::shared_ptr<ThriftClientImpl>> ClientMap;
   ClientMap client_map_;
 
   /// Number of attempts to make to open a connection. 0 means retry indefinitely.
@@ -183,23 +192,25 @@ class ClientCacheHelper {
       ClientKey* client_key);
 };
 
-template<class T>
-class ClientCache;
-
 /// A scoped client connection to help manage clients from a client cache. Clients of this
 /// class should use DoRpc() to actually make RPC calls.
 template<class T>
 class ClientConnection {
  public:
   ClientConnection(ClientCache<T>* client_cache, TNetworkAddress address, Status* status)
-    : client_cache_(client_cache), client_(NULL) {
+    : client_cache_(client_cache), client_(NULL), address_(address),
+      client_is_unrecoverable_(false) {
     *status = client_cache_->GetClient(address, &client_);
     if (status->ok()) DCHECK(client_ != NULL);
   }
 
   ~ClientConnection() {
     if (client_ != NULL) {
-      client_cache_->ReleaseClient(&client_);
+      if (client_is_unrecoverable_) {
+        client_cache_->DestroyClient(&client_);
+      } else {
+        client_cache_->ReleaseClient(&client_);
+      }
     }
   }
 
@@ -215,40 +226,90 @@ class ClientConnection {
   /// depending on the error received from the first attempt.
   /// TODO: Detect already-closed cnxns and only retry in that case.
   ///
-  /// Returns RPC_TIMEOUT if a timeout occurred, RPC_CLIENT_CONNECT_FAILURE if the client
-  /// failed to connect, and RPC_GENERAL_ERROR if the RPC could not be completed for any
-  /// other reason (except for an unexpectedly closed cnxn, see TODO). Application-level
-  /// failures should be signalled through the response type.
-  //
+  /// retry_is_safe is an output parameter. In case of connection failure,
+  /// '*retry_is_safe' is set to true because the send never occurred and it's
+  /// safe to retry the RPC. Otherwise, it's set to false to indicate that the RPC was
+  /// in progress when it failed or the RPC was completed, therefore retrying the RPC
+  /// is not safe.
+  ///
+  /// Returns RPC_RECV_TIMEOUT if a timeout occurred while waiting for a response,
+  /// RPC_CLIENT_CONNECT_FAILURE if the client failed to connect, and RPC_GENERAL_ERROR
+  /// if the RPC could not be completed for any other reason (except for an unexpectedly
+  /// closed cnxn, see TODO).
+  /// Application-level failures should be signalled through the response type.
+  ///
   /// TODO: Use TTransportException::TTransportExceptionType to distinguish between
   /// failure modes.
   template <class F, class Request, class Response>
-  Status DoRpc(const F& f, const Request& request, Response* response) {
+  Status DoRpc(const F& f, const Request& request, Response* response,
+      bool* retry_is_safe = NULL) {
     DCHECK(response != NULL);
+    client_is_unrecoverable_ = true;
+    if (retry_is_safe != NULL) *retry_is_safe = false;
     try {
       (client_->*f)(*response, request);
+    } catch (const apache::thrift::TApplicationException& e) {
+      // TApplicationException only happens in recv RPC call.
+      // which means send RPC call is done, should not retry.
+      return Status(TErrorCode::RPC_GENERAL_ERROR, e.what());
     } catch (const apache::thrift::TException& e) {
-      if (IsTimeoutTException(e)) return Status(TErrorCode::RPC_TIMEOUT);
+      if (IsRecvTimeoutTException(e)) {
+        return Status(TErrorCode::RPC_RECV_TIMEOUT, strings::Substitute(
+            "Client $0 timed-out during recv call.", TNetworkAddressToString(address_)));
+      }
+      VLOG(1) << "client " << client_ << " unexpected exception: "
+              << e.what() << ", type=" << typeid(e).name();
 
       // Client may have unexpectedly been closed, so re-open and retry.
       // TODO: ThriftClient should return proper error codes.
       const Status& status = Reopen();
       if (!status.ok()) {
+        if (retry_is_safe != NULL) *retry_is_safe = true;
         return Status(TErrorCode::RPC_CLIENT_CONNECT_FAILURE, status.GetDetail());
       }
       try {
         (client_->*f)(*response, request);
       } catch (apache::thrift::TException& e) {
         // By this point the RPC really has failed.
+        // TODO: Revisit this logic later. It's possible that the new connection
+        // works but we hit timeout here.
         return Status(TErrorCode::RPC_GENERAL_ERROR, e.what());
       }
     }
+    client_is_unrecoverable_ = false;
+    return Status::OK();
+  }
+
+  /// In certain cases, the server may take longer to provide an RPC response than
+  /// the configured socket timeout. Callers may wish to retry receiving the response.
+  /// This is safe if and only if DoRpc() returned RPC_RECV_TIMEOUT.
+  template <class F, class Response>
+  Status RetryRpcRecv(const F& recv_func, Response* response) {
+    DCHECK(response != NULL);
+    DCHECK(client_is_unrecoverable_);
+    try {
+      (client_->*recv_func)(*response);
+    } catch (const apache::thrift::TException& e) {
+      if (IsRecvTimeoutTException(e)) {
+        return Status(TErrorCode::RPC_RECV_TIMEOUT, strings::Substitute(
+            "Client $0 timed-out during recv call.", TNetworkAddressToString(address_)));
+      }
+      // If it's not timeout exception, then the connection is broken, stop retrying.
+      return Status(TErrorCode::RPC_GENERAL_ERROR, e.what());
+    }
+    client_is_unrecoverable_ = false;
     return Status::OK();
   }
 
  private:
   ClientCache<T>* client_cache_;
   T* client_;
+  TNetworkAddress address_;
+
+  /// Indicate the last rpc call sent by this connection succeeds or not. If the rpc call
+  /// fails for any reason, the connection could be left in a bad state and cannot be
+  /// recovered.
+  bool client_is_unrecoverable_;
 };
 
 /// Generic cache of Thrift clients for a given service type.
@@ -334,6 +395,12 @@ class ClientCache {
     return client_cache_helper_.ReleaseClient(reinterpret_cast<ClientKey*>(client));
   }
 
+  /// Destroy the client because it's left in an unrecoverable state after errors
+  /// in DoRpc() to avoid more rpc failure.
+  void DestroyClient(T** client) {
+    return client_cache_helper_.DestroyClient(reinterpret_cast<ClientKey*>(client));
+  }
+
   /// Factory method to produce a new ThriftClient<T> for the wrapped cache
   ThriftClientImpl* MakeClient(const TNetworkAddress& address, ClientKey* client_key,
       const std::string service_name, bool enable_ssl) {
@@ -345,15 +412,6 @@ class ClientCache {
 
 };
 
-/// Common cache / connection types
-
-class ImpalaInternalServiceClient;
-typedef ClientCache<ImpalaInternalServiceClient> ImpalaInternalServiceClientCache;
-typedef ClientConnection<ImpalaInternalServiceClient> ImpalaInternalServiceConnection;
-
-class CatalogServiceClient;
-typedef ClientCache<CatalogServiceClient> CatalogServiceClientCache;
-typedef ClientConnection<CatalogServiceClient> CatalogServiceConnection;
 }
 
 #endif

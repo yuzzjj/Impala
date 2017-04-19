@@ -1,16 +1,19 @@
-// Copyright 2013 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_SERVICE_QUERY_EXEC_STATE_H
 #define IMPALA_SERVICE_QUERY_EXEC_STATE_H
@@ -46,9 +49,9 @@ class QueryExecStateCleaner;
 /// we can return to the client. It also captures all state required for
 /// servicing query-related requests from the client.
 /// Thread safety: this class is generally not thread-safe, callers need to
-/// synchronize access explicitly via lock().
-/// To avoid deadlocks, the caller must *not* acquire query_exec_state_map_lock_
-/// while holding the exec state's lock.
+/// synchronize access explicitly via lock(). See the ImpalaServer class comment for
+/// the required lock acquisition order.
+///
 /// TODO: Consider renaming to RequestExecState for consistency.
 /// TODO: Compute stats is the only stmt that requires child queries. Once the
 /// CatalogService performs background stats gathering the concept of child queries
@@ -56,7 +59,7 @@ class QueryExecStateCleaner;
 class ImpalaServer::QueryExecState {
  public:
   QueryExecState(const TQueryCtx& query_ctx, ExecEnv* exec_env, Frontend* frontend,
-      ImpalaServer* server, boost::shared_ptr<ImpalaServer::SessionState> session);
+      ImpalaServer* server, std::shared_ptr<ImpalaServer::SessionState> session);
 
   ~QueryExecState();
 
@@ -102,9 +105,11 @@ class ImpalaServer::QueryExecState {
   /// The caller must hold fetch_rows_lock_ and lock_.
   Status RestartFetch();
 
-  /// Update query state if the requested state isn't already obsolete.
+  /// Update query state if the requested state isn't already obsolete. This is only for
+  /// non-error states - if the query encounters an error the query status needs to be set
+  /// with information about the error so UpdateQueryStatus must be used instead.
   /// Takes lock_.
-  void UpdateQueryState(beeswax::QueryState::type query_state);
+  void UpdateNonErrorQueryState(beeswax::QueryState::type query_state);
 
   /// Update the query status and the "Query Status" summary profile string.
   /// If current status is already != ok, no update is made (we preserve the first error)
@@ -119,9 +124,12 @@ class ImpalaServer::QueryExecState {
   /// Cancels the child queries and the coordinator with the given cause.
   /// If cause is NULL, assume this was deliberately cancelled by the user.
   /// Otherwise, sets state to EXCEPTION.
-  /// Caller needs to hold lock_.
   /// Does nothing if the query has reached EOS or already cancelled.
-  void Cancel(const Status* cause = NULL);
+  ///
+  /// Only returns an error if 'check_inflight' is true and the query is not yet
+  /// in-flight. Otherwise, proceed and return Status::OK() even if the query isn't
+  /// in-flight (for cleaning up after an error on the query issuing path).
+  Status Cancel(bool check_inflight, const Status* cause);
 
   /// This is called when the query is done (finished, cancelled, or failed).
   /// Takes lock_: callers must not hold lock() before calling.
@@ -146,6 +154,13 @@ class ImpalaServer::QueryExecState {
   bool eos() const { return eos_; }
   Coordinator* coord() const { return coord_.get(); }
   QuerySchedule* schedule() { return schedule_.get(); }
+
+  /// Resource pool associated with this query, or an empty string if the schedule has not
+  /// been created and had the pool set yet, or this StmtType doesn't go through admission
+  /// control.
+  std::string request_pool() const {
+    return schedule_ == nullptr ? "" : schedule_->request_pool();
+  }
   int num_rows_fetched() const { return num_rows_fetched_; }
   void set_fetched_rows() { fetched_rows_ = true; }
   bool fetched_rows() const { return fetched_rows_; }
@@ -162,16 +177,17 @@ class ImpalaServer::QueryExecState {
   }
   boost::mutex* lock() { return &lock_; }
   boost::mutex* fetch_rows_lock() { return &fetch_rows_lock_; }
-  const beeswax::QueryState::type query_state() const { return query_state_; }
-  void set_query_state(beeswax::QueryState::type state) { query_state_ = state; }
+  beeswax::QueryState::type query_state() const { return query_state_; }
   const Status& query_status() const { return query_status_; }
   void set_result_metadata(const TResultSetMetadata& md) { result_metadata_ = md; }
   const RuntimeProfile& profile() const { return profile_; }
   const RuntimeProfile& summary_profile() const { return summary_profile_; }
   const TimestampValue& start_time() const { return start_time_; }
   const TimestampValue& end_time() const { return end_time_; }
-  const std::string& sql_stmt() const { return query_ctx_.request.stmt; }
-  const TQueryOptions& query_options() const { return query_ctx_.request.query_options; }
+  const std::string& sql_stmt() const { return query_ctx_.client_request.stmt; }
+  const TQueryOptions& query_options() const {
+    return query_ctx_.client_request.query_options;
+  }
   /// Returns 0:0 if this is a root query
   TUniqueId parent_query_id() const { return query_ctx_.parent_query_id; }
 
@@ -179,9 +195,9 @@ class ImpalaServer::QueryExecState {
     return exec_request_.analysis_warnings;
   }
 
-  inline int64_t last_active() const {
+  inline int64_t last_active_ms() const {
     boost::lock_guard<boost::mutex> l(expiration_data_lock_);
-    return last_active_time_;
+    return last_active_time_ms_;
   }
 
   /// Returns true if Impala is actively processing this query.
@@ -200,20 +216,32 @@ class ImpalaServer::QueryExecState {
   /// responsible for acquiring this lock. To avoid deadlocks, callers must not hold lock_
   /// while acquiring this lock (since FetchRows() will release and re-acquire lock_ during
   /// its execution).
+  /// See "Locking" in the class comment for lock acquisition order.
   boost::mutex fetch_rows_lock_;
 
-  /// Protects last_active_time_ and ref_count_.
-  /// Must always be taken as the last lock, that is no other locks may be taken while
-  /// holding this lock.
+  /// Protects last_active_time_ms_ and ref_count_. Only held during short function calls
+  /// - no other locks should be acquired while holding this lock.
   mutable boost::mutex expiration_data_lock_;
-  int64_t last_active_time_;
+
+  /// Stores the last time that the query was actively doing work, in Unix milliseconds.
+  int64_t last_active_time_ms_;
 
   /// ref_count_ > 0 if Impala is currently performing work on this query's behalf. Every
   /// time a client instructs Impala to do work on behalf of this query, the ref count is
   /// increased, and decreased once that work is completed.
   uint32_t ref_count_;
 
-  boost::mutex lock_;  // protects all following fields
+  /// Executor for any child queries (e.g. compute stats subqueries). Always non-NULL.
+  const boost::scoped_ptr<ChildQueryExecutor> child_query_executor_;
+
+  /// Protects all following fields. Acquirers should be careful not to hold it for too
+  /// long, e.g. during RPCs because this lock is required to make progress on various
+  /// ImpalaServer requests. If held for too long it can block progress of client
+  /// requests for this query, e.g. query status and cancellation. Furthermore, until
+  /// IMPALA-3882 is fixed, it can indirectly block progress on all other queries.
+  /// See "Locking" in the class comment for lock acquisition order.
+  boost::mutex lock_;
+
   ExecEnv* exec_env_;
 
   /// Thread for asynchronously running Wait().
@@ -227,12 +255,12 @@ class ImpalaServer::QueryExecState {
   bool is_block_on_wait_joining_;
 
   /// Session that this query is from
-  boost::shared_ptr<SessionState> session_;
+  std::shared_ptr<SessionState> session_;
 
   /// Resource assignment determined by scheduler. Owned by obj_pool_.
   boost::scoped_ptr<QuerySchedule> schedule_;
 
-  /// not set for ddl queries, or queries with "limit 0"
+  /// Not set for ddl queries.
   boost::scoped_ptr<Coordinator> coord_;
 
   /// Runs statements that query or modify the catalog via the CatalogService.
@@ -240,7 +268,7 @@ class ImpalaServer::QueryExecState {
 
   /// Result set used for requests that return results and are not QUERY
   /// statements. For example, EXPLAIN, LOAD, and SHOW use this.
-  boost::scoped_ptr<std::vector<TResultRow> > request_result_set_;
+  boost::scoped_ptr<std::vector<TResultRow>> request_result_set_;
 
   /// Cache of the first result_cache_max_size_ query results to allow clients to restart
   /// fetching from the beginning of the result set. This cache is appended to in
@@ -252,8 +280,6 @@ class ImpalaServer::QueryExecState {
   /// Max size of the result_cache_ in number of rows. A value <= 0 means no caching.
   int64_t result_cache_max_size_;
 
-  /// local runtime_state_ in case we don't have a coord_
-  boost::scoped_ptr<RuntimeState> local_runtime_state_;
   ObjectPool profile_pool_;
 
   /// The QueryExecState builds three separate profiles.
@@ -279,8 +305,11 @@ class ImpalaServer::QueryExecState {
   MonotonicStopWatch client_wait_sw_;
 
   RuntimeProfile::EventSequence* query_events_;
-  std::vector<ExprContext*> output_expr_ctxs_;
+
+  bool is_cancelled_; // if true, Cancel() was called.
   bool eos_;  // if true, there are no more rows to return
+  // We enforce the invariant that query_status_ is not OK iff query_state_
+  // is EXCEPTION, given that lock_ is held.
   beeswax::QueryState::type query_state_;
   Status query_status_;
   TExecRequest exec_request_;
@@ -304,31 +333,23 @@ class ImpalaServer::QueryExecState {
   /// Start/end time of the query
   TimestampValue start_time_, end_time_;
 
-  /// List of child queries to be executed on behalf of this query.
-  std::vector<ChildQuery> child_queries_;
-
-  /// Thread to execute child_queries_ in and the resulting status. The status is OK iff
-  /// all child queries complete successfully. Otherwise, status contains the error of the
-  /// first child query that failed (child queries are executed serially and abort on the
-  /// first error).
-  Status child_queries_status_;
-  boost::scoped_ptr<Thread> child_queries_thread_;
-
   /// Executes a local catalog operation (an operation that does not need to execute
   /// against the catalog service). Includes USE, SHOW, DESCRIBE, and EXPLAIN statements.
   Status ExecLocalCatalogOp(const TCatalogOpRequest& catalog_op);
 
-  /// Updates last_active_time_ and ref_count_ to reflect that query is currently not doing
-  /// any work. Takes expiration_data_lock_.
+  /// Updates last_active_time_ms_ and ref_count_ to reflect that query is currently not
+  /// doing any work. Takes expiration_data_lock_.
   void MarkInactive();
 
-  /// Updates last_active_time_ and ref_count_ to reflect that query is currently being
+  /// Updates last_active_time_ms_ and ref_count_ to reflect that query is currently being
   /// actively processed. Takes expiration_data_lock_.
   void MarkActive();
 
   /// Core logic of initiating a query or dml execution request.
   /// Initiates execution of plan fragments, if there are any, and sets
   /// up the output exprs for subsequent calls to FetchRows().
+  /// 'coord_' is only valid after this method is called, and may be invalid if it
+  /// returns an error.
   /// Also sets up profile and pre-execution counters.
   /// Non-blocking.
   Status ExecQueryOrDmlRequest(const TQueryExecRequest& query_exec_request);
@@ -347,13 +368,6 @@ class ImpalaServer::QueryExecState {
   /// Caller needs to hold fetch_rows_lock_ and lock_.
   Status FetchRowsInternal(const int32_t max_rows, QueryResultSet* fetched_rows);
 
-  /// Fetch the next row batch and store the results in current_batch_. Only called for
-  /// non-DDL / DML queries. current_batch_ is set to NULL if execution is complete or the
-  /// query was cancelled.
-  /// Caller needs to hold fetch_rows_lock_ and lock_. Blocks, during which time lock_ is
-  /// released.
-  Status FetchNextBatch();
-
   /// Evaluates 'output_expr_ctxs_' against 'row' and output the evaluated row in
   /// 'result'. The values' scales (# of digits after decimal) are stored in 'scales'.
   /// result and scales must have been resized to the number of columns before call.
@@ -364,6 +378,7 @@ class ImpalaServer::QueryExecState {
 
   /// Copies results into request_result_set_
   /// TODO: Have the FE return list<Data.TResultRow> so that this isn't necessary
+  void SetResultSet(const TDdlExecResponse* ddl_resp);
   void SetResultSet(const std::vector<std::string>& results);
   void SetResultSet(const std::vector<std::string>& col1,
       const std::vector<std::string>& col2);
@@ -382,23 +397,7 @@ class ImpalaServer::QueryExecState {
   /// For example, INSERT queries update partition metadata in UpdateCatalog() using a
   /// TUpdateCatalogRequest, whereas our DDL uses a TCatalogOpRequest for very similar
   /// purposes. Perhaps INSERT should use a TCatalogOpRequest as well.
-  Status UpdateTableAndColumnStats();
-
-  /// Asynchronously executes all child_queries_ one by one. Calls ExecChildQueries()
-  /// in a new child_queries_thread_.
-  void ExecChildQueriesAsync();
-
-  /// Serially executes the queries in child_queries_ by calling the child query's
-  /// ExecAndWait(). This function is blocking and is intended to be run in a separate
-  /// thread to ensure that Exec() remains non-blocking. Sets child_queries_status_.
-  /// Must not be called while holding lock_.
-  void ExecChildQueries();
-
-  /// Waits for all child queries to complete successfully or with an error, by joining
-  /// child_queries_thread_. Returns a non-OK status if a child query fails or if the
-  /// parent query is cancelled (subsequent children will not be executed). Returns OK
-  /// if child_queries_thread_ is not set or if all child queries finished successfully.
-  Status WaitForChildQueries();
+  Status UpdateTableAndColumnStats(const std::vector<ChildQuery*>& child_queries);
 
   /// Sets result_cache_ to NULL and updates its associated metrics and mem consumption.
   /// This function is a no-op if the cache has already been cleared.

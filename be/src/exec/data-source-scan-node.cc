@@ -1,20 +1,22 @@
-// Copyright 2014 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/data-source-scan-node.h"
 
-#include <boost/foreach.hpp>
 #include <vector>
 #include <gutil/strings/substitute.h>
 
@@ -22,13 +24,14 @@
 #include "exec/read-write-util.h"
 #include "exprs/expr.h"
 #include "runtime/mem-pool.h"
+#include "runtime/mem-tracker.h"
 #include "runtime/runtime-state.h"
 #include "runtime/row-batch.h"
 #include "runtime/string-value.h"
 #include "runtime/tuple-row.h"
 #include "util/jni-util.h"
 #include "util/periodic-counter-updater.h"
-#include "util/runtime-profile.h"
+#include "util/runtime-profile-counters.h"
 
 #include "common/names.h"
 
@@ -55,6 +58,8 @@ const string ERROR_INVALID_TIMESTAMP = "Data source returned invalid timestamp d
     "This likely indicates a problem with the data source library.";
 const string ERROR_INVALID_DECIMAL = "Data source returned invalid decimal data. "
     "This likely indicates a problem with the data source library.";
+const string ERROR_MEM_LIMIT_EXCEEDED = "DataSourceScanNode::$0() failed to allocate "
+    "$1 bytes for $2.";
 
 // Size of an encoded TIMESTAMP
 const size_t TIMESTAMP_SIZE = sizeof(int64_t) + sizeof(int32_t);
@@ -92,7 +97,7 @@ Status DataSourceScanNode::Open(RuntimeState* state) {
 
   // Prepare the schema for TOpenParams.row_schema
   vector<extdatasource::TColumnDesc> cols;
-  BOOST_FOREACH(const SlotDescriptor* slot, tuple_desc_->slots()) {
+  for (const SlotDescriptor* slot: tuple_desc_->slots()) {
     extdatasource::TColumnDesc col;
     int col_idx = slot->col_pos();
     col.__set_name(tuple_desc_->table_desc()->col_descs()[col_idx].name());
@@ -106,7 +111,7 @@ Status DataSourceScanNode::Open(RuntimeState* state) {
   params.__set_query_id(state->query_id());
   params.__set_table_name(tuple_desc_->table_desc()->name());
   params.__set_init_string(data_src_node_.init_string);
-  params.__set_authenticated_user_name(state->effective_user());
+  params.__set_authenticated_user_name(state->GetEffectiveUser());
   params.__set_row_schema(row_schema);
   params.__set_batch_size(FLAGS_data_source_batch_size);
   params.__set_predicates(data_src_node_.accepted_predicates);
@@ -166,20 +171,26 @@ inline Status SetDecimalVal(const ColumnType& type, char* bytes, int len,
   switch (type.GetByteSize()) {
     case 4: {
       Decimal4Value* val = reinterpret_cast<Decimal4Value*>(slot);
-      if (len > sizeof(Decimal4Value)) return Status(ERROR_INVALID_DECIMAL);
-      // TODO: Move Decode() to a more generic utils class (here and below)
-      ParquetPlainEncoder::Decode(buffer, len, val);
+      if (UNLIKELY(len > sizeof(Decimal4Value) ||
+          ParquetPlainEncoder::Decode(buffer, buffer + len, len, val) < 0)) {
+        return Status(ERROR_INVALID_DECIMAL);
+      }
+      break;
     }
     case 8: {
       Decimal8Value* val = reinterpret_cast<Decimal8Value*>(slot);
-      if (len > sizeof(Decimal8Value)) return Status(ERROR_INVALID_DECIMAL);
-      ParquetPlainEncoder::Decode(buffer, len, val);
+      if (UNLIKELY(len > sizeof(Decimal8Value) ||
+          ParquetPlainEncoder::Decode(buffer, buffer + len, len, val) < 0)) {
+        return Status(ERROR_INVALID_DECIMAL);
+      }
       break;
     }
     case 16: {
       Decimal16Value* val = reinterpret_cast<Decimal16Value*>(slot);
-      if (len > sizeof(Decimal16Value)) return Status(ERROR_INVALID_DECIMAL);
-      ParquetPlainEncoder::Decode(buffer, len, val);
+      if (UNLIKELY(len > sizeof(Decimal16Value) ||
+          ParquetPlainEncoder::Decode(buffer, buffer + len, len, val) < 0)) {
+        return Status(ERROR_INVALID_DECIMAL);
+      }
       break;
     }
     default: DCHECK(false);
@@ -187,17 +198,17 @@ inline Status SetDecimalVal(const ColumnType& type, char* bytes, int len,
   return Status::OK();
 }
 
-Status DataSourceScanNode::MaterializeNextRow(MemPool* tuple_pool) {
+Status DataSourceScanNode::MaterializeNextRow(MemPool* tuple_pool, Tuple* tuple) {
   const vector<TColumnData>& cols = input_batch_->rows.cols;
-  tuple_->Init(tuple_desc_->byte_size());
+  tuple->Init(tuple_desc_->byte_size());
 
   for (int i = 0; i < tuple_desc_->slots().size(); ++i) {
     const SlotDescriptor* slot_desc = tuple_desc_->slots()[i];
-    void* slot = tuple_->GetSlot(slot_desc->tuple_offset());
+    void* slot = tuple->GetSlot(slot_desc->tuple_offset());
     const TColumnData& col = cols[i];
 
     if (col.is_null[next_row_idx_]) {
-      tuple_->SetNull(slot_desc->null_indicator_offset());
+      tuple->SetNull(slot_desc->null_indicator_offset());
       continue;
     }
 
@@ -210,7 +221,12 @@ Status DataSourceScanNode::MaterializeNextRow(MemPool* tuple_pool) {
           }
           const string& val = col.string_vals[val_idx];
           size_t val_size = val.size();
-          char* buffer = reinterpret_cast<char*>(tuple_pool->Allocate(val_size));
+          char* buffer = reinterpret_cast<char*>(tuple_pool->TryAllocate(val_size));
+          if (UNLIKELY(buffer == NULL)) {
+            string details = Substitute(ERROR_MEM_LIMIT_EXCEEDED, "MaterializeNextRow",
+                val_size, "string slot");
+            return tuple_pool->mem_tracker()->MemLimitExceeded(NULL, details, val_size);
+          }
           memcpy(buffer, val.data(), val_size);
           reinterpret_cast<StringValue*>(slot)->ptr = buffer;
           reinterpret_cast<StringValue*>(slot)->len = val_size;
@@ -299,9 +315,11 @@ Status DataSourceScanNode::GetNext(RuntimeState* state, RowBatch* row_batch, boo
 
   // create new tuple buffer for row_batch
   MemPool* tuple_pool = row_batch->tuple_data_pool();
-  int tuple_buffer_size = row_batch->MaxTupleBufferSize();
-  void* tuple_buffer = tuple_pool->Allocate(tuple_buffer_size);
-  tuple_ = reinterpret_cast<Tuple*>(tuple_buffer);
+  int64_t tuple_buffer_size;
+  uint8_t* tuple_buffer;
+  RETURN_IF_ERROR(
+      row_batch->ResizeAndAllocateTupleBuffer(state, &tuple_buffer_size, &tuple_buffer));
+  Tuple* tuple = reinterpret_cast<Tuple*>(tuple_buffer);
   ExprContext** ctxs = &conjunct_ctxs_[0];
   int num_ctxs = conjunct_ctxs_.size();
 
@@ -310,16 +328,15 @@ Status DataSourceScanNode::GetNext(RuntimeState* state, RowBatch* row_batch, boo
       SCOPED_TIMER(materialize_tuple_timer());
       // copy rows until we hit the limit/capacity or until we exhaust input_batch_
       while (!ReachedLimit() && !row_batch->AtCapacity() && InputBatchHasNext()) {
-        RETURN_IF_ERROR(MaterializeNextRow(tuple_pool));
+        RETURN_IF_ERROR(MaterializeNextRow(tuple_pool, tuple));
         int row_idx = row_batch->AddRow();
         TupleRow* tuple_row = row_batch->GetRow(row_idx);
-        tuple_row->SetTuple(tuple_idx_, tuple_);
+        tuple_row->SetTuple(tuple_idx_, tuple);
 
         if (ExecNode::EvalConjuncts(ctxs, num_ctxs, tuple_row)) {
           row_batch->CommitLastRow();
-          char* new_tuple = reinterpret_cast<char*>(tuple_);
-          new_tuple += tuple_desc_->byte_size();
-          tuple_ = reinterpret_cast<Tuple*>(new_tuple);
+          tuple = reinterpret_cast<Tuple*>(
+              reinterpret_cast<uint8_t*>(tuple) + tuple_desc_->byte_size());
           ++num_rows_returned_;
         }
         ++next_row_idx_;

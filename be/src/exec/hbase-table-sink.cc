@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/hbase-table-sink.h"
 
@@ -20,6 +23,8 @@
 #include "exprs/expr.h"
 #include "exprs/expr-context.h"
 #include "gen-cpp/ImpalaInternalService_constants.h"
+#include "runtime/mem-tracker.h"
+#include "util/runtime-profile-counters.h"
 
 #include "common/names.h"
 
@@ -31,10 +36,10 @@ const static string& ROOT_PARTITION_KEY =
 HBaseTableSink::HBaseTableSink(const RowDescriptor& row_desc,
                                const vector<TExpr>& select_list_texprs,
                                const TDataSink& tsink)
-    : table_id_(tsink.table_sink.target_table_id),
+    : DataSink(row_desc),
+      table_id_(tsink.table_sink.target_table_id),
       table_desc_(NULL),
       hbase_table_writer_(NULL),
-      row_desc_(row_desc),
       select_list_texprs_(select_list_texprs) {
 }
 
@@ -48,11 +53,9 @@ Status HBaseTableSink::PrepareExprs(RuntimeState* state) {
   return Status::OK();
 }
 
-Status HBaseTableSink::Prepare(RuntimeState* state) {
-  RETURN_IF_ERROR(DataSink::Prepare(state));
-  runtime_profile_ = state->obj_pool()->Add(
-      new RuntimeProfile(state->obj_pool(), "HbaseTableSink"));
-  SCOPED_TIMER(runtime_profile_->total_time_counter());
+Status HBaseTableSink::Prepare(RuntimeState* state, MemTracker* parent_mem_tracker) {
+  RETURN_IF_ERROR(DataSink::Prepare(state, parent_mem_tracker));
+  SCOPED_TIMER(profile()->total_time_counter());
 
   // Get the hbase table descriptor.  The table name will be used.
   table_desc_ = static_cast<HBaseTableDescriptor*>(
@@ -61,7 +64,7 @@ Status HBaseTableSink::Prepare(RuntimeState* state) {
   RETURN_IF_ERROR(PrepareExprs(state));
   // Now that expressions are ready to materialize tuples, create the writer.
   hbase_table_writer_.reset(
-      new HBaseTableWriter(table_desc_, output_expr_ctxs_, runtime_profile_));
+      new HBaseTableWriter(table_desc_, output_expr_ctxs_, profile()));
 
   // Try and init the table writer.  This can create connections to HBase and
   // to zookeeper.
@@ -69,7 +72,7 @@ Status HBaseTableSink::Prepare(RuntimeState* state) {
 
   // Add a 'root partition' status in which to collect insert statistics
   TInsertPartitionStatus root_status;
-  root_status.__set_num_appended_rows(0L);
+  root_status.__set_num_modified_rows(0L);
   root_status.__set_stats(TInsertStats());
   root_status.__set_id(-1L);
   state->per_partition_status()->insert(make_pair(ROOT_PARTITION_KEY, root_status));
@@ -81,26 +84,32 @@ Status HBaseTableSink::Open(RuntimeState* state) {
   return Expr::Open(output_expr_ctxs_, state);
 }
 
-Status HBaseTableSink::Send(RuntimeState* state, RowBatch* batch, bool eos) {
-  SCOPED_TIMER(runtime_profile_->total_time_counter());
+Status HBaseTableSink::Send(RuntimeState* state, RowBatch* batch) {
+  SCOPED_TIMER(profile()->total_time_counter());
   ExprContext::FreeLocalAllocations(output_expr_ctxs_);
   RETURN_IF_ERROR(state->CheckQueryState());
   // Since everything is set up just forward everything to the writer.
-  RETURN_IF_ERROR(hbase_table_writer_->AppendRowBatch(batch));
-  (*state->per_partition_status())[ROOT_PARTITION_KEY].num_appended_rows +=
+  RETURN_IF_ERROR(hbase_table_writer_->AppendRows(batch));
+  (*state->per_partition_status())[ROOT_PARTITION_KEY].num_modified_rows +=
       batch->num_rows();
+  return Status::OK();
+}
+
+Status HBaseTableSink::FlushFinal(RuntimeState* state) {
+  // No buffered state to flush.
   return Status::OK();
 }
 
 void HBaseTableSink::Close(RuntimeState* state) {
   if (closed_) return;
-  SCOPED_TIMER(runtime_profile_->total_time_counter());
+  SCOPED_TIMER(profile()->total_time_counter());
 
   if (hbase_table_writer_.get() != NULL) {
     hbase_table_writer_->Close(state);
     hbase_table_writer_.reset(NULL);
   }
   Expr::Close(output_expr_ctxs_, state);
+  DataSink::Close(state);
   closed_ = true;
 }
 

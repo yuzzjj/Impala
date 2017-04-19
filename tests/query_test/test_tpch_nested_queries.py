@@ -1,11 +1,25 @@
-# Copyright (c) 2015 Cloudera, Inc. All rights reserved.
-# Functional tests running the TPCH workload.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-import logging
-import pytest
-from tests.common.impala_test_suite import ImpalaTestSuite,\
-    create_single_exec_option_dimension
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Functional tests running the TPCH workload.
+
+from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.skip import SkipIfOldAggsJoins
+from tests.common.test_dimensions import create_single_exec_option_dimension
 
 @SkipIfOldAggsJoins.nested_types
 class TestTpchNestedQuery(ImpalaTestSuite):
@@ -16,9 +30,9 @@ class TestTpchNestedQuery(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestTpchNestedQuery, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(create_single_exec_option_dimension())
+    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
     # The nested tpch data is currently only available in parquet.
-    cls.TestMatrix.add_constraint(lambda v:\
+    cls.ImpalaTestMatrix.add_constraint(lambda v:\
         v.get_value('table_format').file_format in ['parquet'])
 
   def test_tpch_q1(self, vector):

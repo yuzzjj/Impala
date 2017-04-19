@@ -76,6 +76,29 @@ LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypes/100901.txt' OVERW
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypes/101001.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2010, month=10);
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypes/101101.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2010, month=11);
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypes/101201.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2010, month=12);
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+CREATE TABLE {db_name}{db_suffix}.{table_name} (
+  id INT PRIMARY KEY,
+  bool_col BOOLEAN,
+  tinyint_col TINYINT,
+  smallint_col SMALLINT,
+  int_col INT,
+  bigint_col BIGINT,
+  float_col FLOAT,
+  double_col DOUBLE,
+  date_string_col STRING,
+  string_col STRING,
+  timestamp_col STRING,
+  year INT,
+  month INT
+)
+PARTITION BY HASH (id) PARTITIONS 3 STORED AS KUDU;
+---- DEPENDENT_LOAD_KUDU
+INSERT into TABLE {db_name}{db_suffix}.{table_name}
+SELECT id, bool_col, tinyint_col, smallint_col, int_col, bigint_col, float_col, double_col, date_string_col, string_col,
+       cast(timestamp_col as string), year, month
+FROM {db_name}.{table_name};
 ====
 ---- DATASET
 functional
@@ -131,6 +154,29 @@ LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesSmall/090101.txt' 
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesSmall/090201.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2009, month=2);
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesSmall/090301.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2009, month=3);
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesSmall/090401.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2009, month=4);
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+CREATE TABLE {db_name}{db_suffix}.{table_name} (
+  id INT PRIMARY KEY,
+  bool_col BOOLEAN,
+  tinyint_col TINYINT,
+  smallint_col SMALLINT,
+  int_col INT,
+  bigint_col BIGINT,
+  float_col FLOAT,
+  double_col DOUBLE,
+  date_string_col STRING,
+  string_col STRING,
+  timestamp_col STRING,
+  year INT,
+  month INT
+)
+PARTITION BY HASH (id) PARTITIONS 3 STORED AS KUDU;
+---- DEPENDENT_LOAD_KUDU
+INSERT into TABLE {db_name}{db_suffix}.{table_name}
+SELECT id, bool_col, tinyint_col, smallint_col, int_col, bigint_col, float_col, double_col, date_string_col, string_col,
+       cast(timestamp_col as string), year, month
+FROM {db_name}.{table_name};
 ====
 ---- DATASET
 functional
@@ -167,6 +213,29 @@ LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesTiny/090101.txt' O
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesTiny/090201.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2009, month=2);
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesTiny/090301.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2009, month=3);
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesTiny/090401.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2009, month=4);
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+CREATE TABLE {db_name}{db_suffix}.{table_name} (
+  id INT PRIMARY KEY,
+  bool_col BOOLEAN,
+  tinyint_col TINYINT,
+  smallint_col SMALLINT,
+  int_col INT,
+  bigint_col BIGINT,
+  float_col FLOAT,
+  double_col DOUBLE,
+  date_string_col STRING,
+  string_col STRING,
+  timestamp_col STRING,
+  year INT,
+  month INT
+)
+PARTITION BY HASH (id) PARTITIONS 3 STORED AS KUDU;
+---- DEPENDENT_LOAD_KUDU
+INSERT INTO TABLE {db_name}{db_suffix}.{table_name}
+SELECT id, bool_col, tinyint_col, smallint_col, int_col, bigint_col, float_col, double_col, date_string_col, string_col,
+       cast(timestamp_col as string), year, month
+FROM {db_name}.{table_name};
 ====
 ---- DATASET
 functional
@@ -476,6 +545,39 @@ LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesAgg/100108.txt' OV
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesAgg/100109.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2010, month=1, day=9);
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesAgg/100110.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2010, month=1, day=10);
 INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} partition (year, month, day) SELECT id, bool_col, tinyint_col, smallint_col, int_col, bigint_col, float_col, double_col, date_string_col, string_col, timestamp_col, year, month, tinyint_col as day FROM {db_name}.{table_name} WHERE year=2010 and month=1 and day IS NOT NULL and tinyint_col IS NULL order by id;
+---- CREATE_KUDU
+DROP VIEW IF EXISTS {db_name}{db_suffix}.{table_name};
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name}_idx;
+
+CREATE TABLE {db_name}{db_suffix}.{table_name}_idx (
+  kudu_idx BIGINT PRIMARY KEY,
+  id INT NULL,
+  bool_col BOOLEAN NULL,
+  tinyint_col TINYINT NULL,
+  smallint_col SMALLINT NULL,
+  int_col INT NULL,
+  bigint_col BIGINT NULL,
+  float_col FLOAT NULL,
+  double_col DOUBLE NULL,
+  date_string_col STRING NULL,
+  string_col STRING NULL,
+  timestamp_col STRING NULL,
+  year INT NULL,
+  month INT NULL,
+  day INT NULL
+)
+PARTITION BY HASH (kudu_idx) PARTITIONS 3 STORED AS KUDU;
+CREATE VIEW {db_name}{db_suffix}.{table_name} AS
+SELECT id, bool_col, tinyint_col, smallint_col, int_col, bigint_col, float_col,
+       double_col, date_string_col, string_col, timestamp_col, year, month, day
+FROM {db_name}{db_suffix}.{table_name}_idx;
+---- DEPENDENT_LOAD_KUDU
+INSERT into TABLE {db_name}{db_suffix}.{table_name}_idx
+SELECT row_number() over (order by year, month, id, day),
+       id, bool_col, tinyint_col, smallint_col, int_col, bigint_col, float_col,
+       double_col, date_string_col, string_col,
+       cast(timestamp_col as string), year, month, day
+FROM {db_name}.{table_name};
 ====
 ---- DATASET
 functional
@@ -525,6 +627,31 @@ LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesAggNoNulls/100107.
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesAggNoNulls/100108.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2010, month=1, day=8);
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesAggNoNulls/100109.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2010, month=1, day=9);
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/target/AllTypesAggNoNulls/100110.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name} PARTITION(year=2010, month=1, day=10);
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+CREATE TABLE {db_name}{db_suffix}.{table_name} (
+  id INT PRIMARY KEY,
+  bool_col BOOLEAN,
+  tinyint_col TINYINT,
+  smallint_col SMALLINT,
+  int_col INT,
+  bigint_col BIGINT,
+  float_col FLOAT,
+  double_col DOUBLE,
+  date_string_col STRING,
+  string_col STRING,
+  timestamp_col STRING,
+  year INT,
+  month INT,
+  day INT
+)
+PARTITION BY HASH (id) PARTITIONS 3 STORED AS KUDU;
+---- DEPENDENT_LOAD_KUDU
+INSERT into TABLE {db_name}{db_suffix}.{table_name}
+SELECT id, bool_col, tinyint_col, smallint_col, int_col, bigint_col, float_col,
+       double_col, date_string_col, string_col,
+       cast(timestamp_col as string), year, month, day
+FROM {db_name}.{table_name};
 ====
 ---- DATASET
 functional
@@ -562,7 +689,7 @@ int_array array<int>
 int_array_array array<array<int>>
 int_map map<string, int>
 int_map_array array<map<string, int>>
-nested_struct struct<a: int, b: array<int>, c: struct<d: array<array<struct<e: int, f: string>>>>, g: map<string, struct<h: struct<i: array<float>>>>>
+nested_struct struct<a: int, b: array<int>, c: struct<d: array<array<struct<e: int, f: string>>>>, g: map<string, struct<h: struct<i: array<double>>>>>
 ---- DEPENDENT_LOAD
 `hadoop fs -mkdir -p /test-warehouse/complextypestbl_parquet && \
 hadoop fs -put -f ${IMPALA_HOME}/testdata/ComplexTypesTbl/nullable.parq \
@@ -612,12 +739,14 @@ STORED AS {file_format};
 INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} PARTITION(p=1) SELECT id, named_struct("f1",string_col,"f2",int_col), array(1, 2, 3), map("k", cast(0 as bigint)) FROM functional.alltypestiny;
 INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} PARTITION(p=2) SELECT id, named_struct("f1",string_col,"f2",int_col), array(1, 2, 3), map("k", cast(0 as bigint)) FROM functional.alltypestiny;
 INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} PARTITION(p=3) SELECT id, named_struct("f1",string_col,"f2",int_col), array(1, 2, 3), map("k", cast(0 as bigint)) FROM functional.alltypestiny;
+INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} PARTITION(p=4) SELECT id, named_struct("f1",string_col,"f2",int_col), array(1, 2, 3), map("k", cast(0 as bigint)) FROM functional.alltypestiny;
 -- The order of insertions and alterations is deliberately chose to work around a Hive
 -- bug where the format of an altered partition is reverted back to the original format after
 -- an insert. So we first do the insert, and then alter the format.
 USE {db_name}{db_suffix};
 ALTER TABLE {table_name} PARTITION (p=2) SET FILEFORMAT PARQUET;
 ALTER TABLE {table_name} PARTITION (p=3) SET FILEFORMAT AVRO;
+ALTER TABLE {table_name} PARTITION (p=4) SET FILEFORMAT RCFILE;
 USE default;
 ====
 ---- DATASET
@@ -630,6 +759,15 @@ name string
 zip int
 ---- ROW_FORMAT
 delimited fields terminated by ','  escaped by '\\'
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+create table {db_name}{db_suffix}.{table_name} (
+  id bigint primary key,
+  name string null,
+  zip int null
+)
+partition by range(id) (partition values <= 1003, partition 1003 < values <= 1007,
+partition 1007 < values) stored as kudu;
 ====
 ---- DATASET
 functional
@@ -645,6 +783,15 @@ delimited fields terminated by ','  escaped by '\\'
 INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} SELECT * FROM {db_name}.{table_name};
 ---- LOAD
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/DimTbl/data.csv' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+create table {db_name}{db_suffix}.{table_name} (
+  id bigint primary key,
+  name string,
+  zip int
+)
+partition by range(id) (partition values <= 1003, partition 1003 < values <= 1007,
+partition 1007 < values) stored as kudu;
 ====
 ---- DATASET
 functional
@@ -661,6 +808,17 @@ delimited fields terminated by ','  escaped by '\\'
 INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} SELECT * FROM {db_name}.{table_name};
 ---- LOAD
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/JoinTbl/data.csv' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+create table {db_name}{db_suffix}.{table_name} (
+  test_id bigint,
+  test_name string,
+  test_zip int,
+  alltypes_id int,
+  primary key (test_id, test_name, test_zip, alltypes_id)
+)
+partition by range(test_id) (partition values <= 1003, partition 1003 < values <= 1007,
+partition 1007 < values) stored as kudu;
 ====
 ---- DATASET
 functional
@@ -844,6 +1002,16 @@ AS SELECT * FROM {db_name}{db_suffix}.alltypes_view;
 ---- DATASET
 functional
 ---- BASE_TABLE_NAME
+subquery_view
+---- CREATE
+CREATE VIEW IF NOT EXISTS {db_name}{db_suffix}.{table_name}
+AS SELECT COUNT(*) FROM {db_name}{db_suffix}.alltypes
+WHERE id IN (SELECT id FROM {db_name}{db_suffix}.alltypessmall where int_col < 5);
+---- LOAD
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
 alltypes_parens
 ---- CREATE
 CREATE VIEW IF NOT EXISTS {db_name}{db_suffix}.{table_name}
@@ -910,10 +1078,11 @@ int_col int
 bigint_col bigint
 float_col float
 double_col double
+decimal0_col DECIMAL(13,4)
+decimal1_col DECIMAL(38,0)
+decimal2_col DECIMAL(38,38)
 ---- ROW_FORMAT
 delimited fields terminated by ','  escaped by '\\'
----- DEPENDENT_LOAD
-INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} SELECT * FROM {db_name}.{table_name};
 ---- LOAD
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/data/overflow.txt' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
 ====
@@ -985,6 +1154,13 @@ emptytable
 f2 int
 ---- COLUMNS
 field string
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+CREATE TABLE {db_name}{db_suffix}.{table_name} (
+  field STRING PRIMARY KEY,
+  f2 INT
+)
+PARTITION BY HASH (field) PARTITIONS 3 STORED AS KUDU;
 ====
 ---- DATASET
 functional
@@ -1085,6 +1261,14 @@ delimited fields terminated by ','
 INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} SELECT * FROM {db_name}.{table_name};
 ---- LOAD
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/TinyTable/data.csv' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+create table {db_name}{db_suffix}.{table_name} (
+  a string primary key,
+  b string
+)
+partition by range(a) (partition values <= 'b', partition 'b' < values <= 'd',
+partition 'd' < values) stored as kudu;
 ====
 ---- DATASET
 functional
@@ -1098,6 +1282,14 @@ delimited fields terminated by ','
 INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} SELECT * FROM {db_name}.{table_name};
 ---- LOAD
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/TinyIntTable/data.csv' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+create table {db_name}{db_suffix}.{table_name} (
+  int_col int primary key
+)
+partition by range(int_col) (partition values <= 2, partition 2 < values <= 4,
+partition 4 < values <= 6, partition 6 < values <= 8, partition 8 < values)
+stored as kudu;
 ====
 ---- DATASET
 functional
@@ -1118,6 +1310,13 @@ INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} select * from functiona
 ---- LOAD
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/NullTable/data.csv'
 OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+create table {db_name}{db_suffix}.{table_name} (
+  a string primary key, b string null, c string null, d int null, e double null,
+  f string null, g string null
+)
+partition by hash(a) partitions 3 stored as kudu;
 ====
 ---- DATASET
 functional
@@ -1138,6 +1337,13 @@ INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} select * from functiona
 ---- LOAD
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/NullTable/data.csv'
 OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+create table {db_name}{db_suffix}.{table_name} (
+  a string primary key, b string null, c string null, d int null, e double null,
+  f string null, g string null
+)
+partition by hash(a) partitions 3 stored as kudu;
 ====
 ---- DATASET
 functional
@@ -1207,6 +1413,20 @@ DELIMITED FIELDS TERMINATED BY ','
 INSERT OVERWRITE TABLE {db_name}{db_suffix}.{table_name} SELECT * FROM {db_name}.{table_name};
 ---- LOAD
 LOAD DATA LOCAL INPATH '{impala_home}/testdata/ImpalaDemoDataset/DEC_00_SF3_P077_with_ann_noheader.csv' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+---- CREATE_KUDU
+DROP TABLE IF EXISTS {db_name}{db_suffix}.{table_name};
+create table {db_name}{db_suffix}.{table_name} (
+  id string primary key,
+  zip string null,
+  description1 string null,
+  description2 string null,
+  income int null)
+partition by range(id)
+(partition values <= '8600000US01475',
+ partition '8600000US01475' < values <= '8600000US63121',
+ partition '8600000US63121' < values <= '8600000US84712',
+ partition '8600000US84712' < values
+) stored as kudu;
 ====
 ---- DATASET
 functional
@@ -1219,6 +1439,7 @@ unsupported_types
 CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}{db_suffix}.{table_name} (
   int_col INT,
   dec_col DECIMAL,
+  date_col DATE,
   str_col STRING,
   bin_col BINARY,
   bigint_col BIGINT)
@@ -1283,6 +1504,36 @@ field STRING
 LOAD DATA LOCAL INPATH '${{env:IMPALA_HOME}}/testdata/bad_seq_snap/bad_file' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
 ====
 ---- DATASET
+functional
+---- BASE_TABLE_NAME
+bad_avro_snap_strings
+---- COLUMNS
+s STRING
+---- DEPENDENT_LOAD
+LOAD DATA LOCAL INPATH '${{env:IMPALA_HOME}}/testdata/bad_avro_snap/negative_string_len.avro' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+LOAD DATA LOCAL INPATH '${{env:IMPALA_HOME}}/testdata/bad_avro_snap/invalid_union.avro' INTO TABLE {db_name}{db_suffix}.{table_name};
+LOAD DATA LOCAL INPATH '${{env:IMPALA_HOME}}/testdata/bad_avro_snap/truncated_string.avro' INTO TABLE {db_name}{db_suffix}.{table_name};
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+bad_avro_snap_floats
+---- COLUMNS
+c1 FLOAT
+---- DEPENDENT_LOAD
+LOAD DATA LOCAL INPATH '${{env:IMPALA_HOME}}/testdata/bad_avro_snap/truncated_float.avro' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+bad_avro_decimal_schema
+---- COLUMNS
+name STRING
+value DECIMAL(5,2)
+---- DEPENDENT_LOAD
+LOAD DATA LOCAL INPATH '${{env:IMPALA_HOME}}/testdata/bad_avro_snap/invalid_decimal_schema.avro' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+====
+---- DATASET
 -- IMPALA-694: uses data file produced by parquet-mr version 1.2.5-cdh4.5.0
 -- (can't use LOAD DATA LOCAL with Impala so copied in create-load-data.sh)
 functional
@@ -1290,6 +1541,22 @@ functional
 bad_parquet
 ---- COLUMNS
 field STRING
+====
+---- DATASET
+-- Can't use LOAD DATA LOCAL with Impala so copied in create-load-data.sh.
+functional
+---- BASE_TABLE_NAME
+bad_parquet_strings_negative_len
+---- COLUMNS
+s STRING
+====
+---- DATASET
+-- Can't use LOAD DATA LOCAL with Impala so copied in create-load-data.sh.
+functional
+---- BASE_TABLE_NAME
+bad_parquet_strings_out_of_bounds
+---- COLUMNS
+s STRING
 ====
 ---- DATASET
 -- IMPALA-2130: Wrong verification of parquet file version
@@ -1721,6 +1988,127 @@ L_RECEIPTDATE STRING
 L_SHIPINSTRUCT STRING
 L_SHIPMODE STRING
 L_COMMENT STRING
+====
+---- DATASET
+-- IMPALA-2466: Add more tests to the HDFS Parquet scanner
+functional
+---- BASE_TABLE_NAME
+lineitem_sixblocks
+---- COLUMNS
+L_ORDERKEY BIGINT
+L_PARTKEY BIGINT
+L_SUPPKEY BIGINT
+L_LINENUMBER INT
+L_QUANTITY DECIMAL(12,2)
+L_EXTENDEDPRICE DECIMAL(12,2)
+L_DISCOUNT DECIMAL(12,2)
+L_TAX DECIMAL(12,2)
+L_RETURNFLAG STRING
+L_LINESTATUS STRING
+L_SHIPDATE STRING
+L_COMMITDATE STRING
+L_RECEIPTDATE STRING
+L_SHIPINSTRUCT STRING
+L_SHIPMODE STRING
+L_COMMENT STRING
+====
+---- DATASET
+-- IMPALA-2466: Add more tests to the HDFS Parquet scanner (this has only one row group)
+functional
+---- BASE_TABLE_NAME
+lineitem_multiblock_one_row_group
+---- COLUMNS
+L_ORDERKEY BIGINT
+L_PARTKEY BIGINT
+L_SUPPKEY BIGINT
+L_LINENUMBER INT
+L_QUANTITY DECIMAL(12,2)
+L_EXTENDEDPRICE DECIMAL(12,2)
+L_DISCOUNT DECIMAL(12,2)
+L_TAX DECIMAL(12,2)
+L_RETURNFLAG STRING
+L_LINESTATUS STRING
+L_SHIPDATE STRING
+L_COMMITDATE STRING
+L_RECEIPTDATE STRING
+L_SHIPINSTRUCT STRING
+L_SHIPMODE STRING
+L_COMMENT STRING
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+bzip2_tbl
+---- COLUMNS
+col string
+---- DEPENDENT_LOAD
+`hadoop fs -mkdir -p /test-warehouse/bzip2_tbl_text_bzip/ && \
+hadoop fs -put -f ${IMPALA_HOME}/testdata/data/data-bzip2.bz2 /test-warehouse/bzip2_tbl_text_bzip/
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+large_bzip2_tbl
+---- COLUMNS
+col string
+---- DEPENDENT_LOAD
+`hadoop fs -mkdir -p /test-warehouse/large_bzip2_tbl_text_bzip/ && \
+hadoop fs -put -f ${IMPALA_HOME}/testdata/data/large_bzip2.bz2 /test-warehouse/large_bzip2_tbl_text_bzip/
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+multistream_bzip2_tbl
+---- COLUMNS
+col string
+---- DEPENDENT_LOAD
+`hadoop fs -mkdir -p /test-warehouse/multistream_bzip2_tbl_text_bzip/ && \
+hadoop fs -put -f ${IMPALA_HOME}/testdata/data/data-pbzip2.bz2 /test-warehouse/multistream_bzip2_tbl_text_bzip/
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+large_multistream_bzip2_tbl
+---- COLUMNS
+col string
+---- DEPENDENT_LOAD
+`hdfs dfs -mkdir -p /test-warehouse/large_multistream_bzip2_tbl_text_bzip/ && \
+hdfs dfs -put -f ${IMPALA_HOME}/testdata/data/large_pbzip2.bz2 /test-warehouse/large_multistream_bzip2_tbl_text_bzip/
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+table_with_header
+---- COLUMNS
+c1 int
+c2 double
 ---- ROW_FORMAT
-DELIMITED FIELDS TERMINATED BY '|'
+delimited fields terminated by ','  escaped by '\\'
+---- ALTER
+ALTER TABLE {table_name} SET TBLPROPERTIES('skip.header.line.count'='1');
+---- LOAD
+LOAD DATA LOCAL INPATH '{impala_home}/testdata/data/table_with_header.csv' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+table_with_header_2
+---- COLUMNS
+c1 int
+c2 double
+---- ROW_FORMAT
+delimited fields terminated by ','  escaped by '\\'
+---- ALTER
+ALTER TABLE {table_name} SET TBLPROPERTIES('skip.header.line.count'='2');
+---- LOAD
+LOAD DATA LOCAL INPATH '{impala_home}/testdata/data/table_with_header_2.csv' OVERWRITE INTO TABLE {db_name}{db_suffix}.{table_name};
+====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+table_with_header_insert
+---- CREATE
+CREATE TABLE IF NOT EXISTS {db_name}{db_suffix}.{table_name} (i1 integer)
+STORED AS {file_format}
+TBLPROPERTIES('skip.header.line.count'='2');
 ====

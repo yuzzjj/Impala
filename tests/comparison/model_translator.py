@@ -1,35 +1,41 @@
-# Copyright (c) 2014 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 from inspect import getmro
 from logging import getLogger
 from re import sub
 from sqlparse import format
 
-from common import StructColumn, CollectionColumn
-from db_types import (
+from tests.comparison.common import StructColumn, CollectionColumn
+from tests.comparison.db_types import (
     Char,
     Decimal,
+    Double,
     Float,
     Int,
     String,
     Timestamp,
+    TinyInt,
     VarChar)
-from query import Query
-from query_flattener import QueryFlattener
+from tests.comparison.query import InsertClause, Query
+from tests.comparison.query_flattener import QueryFlattener
 
 LOG = getLogger(__name__)
+
 
 class SqlWriter(object):
   '''Subclasses of SQLWriter will take a Query and provide the SQL representation for a
@@ -86,12 +92,26 @@ class SqlWriter(object):
         'IsNull': '({0}) IS NULL',
         'IsNotNull': '({0}) IS NOT NULL'}
 
-  def write_query(self, query, pretty=False):
-    '''Return SQL as a string for the given query.
+  def write_query(self, statement, pretty=False):
+    """
+    Return SQL as a string for the given query.
 
-       If "pretty" is True, the SQL will be formatted (though not very well) with new
-       lines and indentation.
-    '''
+    If "pretty" is True, the SQL will be formatted (though not very well) with new
+    lines and indentation.
+    """
+    sql = self._write(statement)
+    if pretty:
+      sql = self.make_pretty_sql(sql)
+    return sql
+
+  def _write_query(self, query):
+    """
+    Taking in a Query object with some attributes set, return a string
+    representation of the query in the correct dialect.
+
+    This is just another dispatch destination of self._write(). When
+    self._write(Query) is called, that's dispatched to self._write_query(Query)
+    """
     sql = list()
     # Write out each section in the proper order
     for clause in (
@@ -103,12 +123,36 @@ class SqlWriter(object):
         query.having_clause,
         query.union_clause,
         query.order_by_clause,
-        query.limit_clause):
+        query.limit_clause
+    ):
       if clause:
         sql.append(self._write(clause))
     sql = '\n'.join(sql)
-    if pretty:
-      sql = self.make_pretty_sql(sql)
+    return sql
+
+  def _write_insert_statement(self, insert_statement):
+    """
+    Taking in a InsertStatement object with some attributes set, return a string
+    representation of the query in the correct dialect.
+    """
+    sql = list()
+
+    if insert_statement.with_clause:
+      sql.append(self._write(insert_statement.with_clause))
+
+    if insert_statement.insert_clause:
+      sql.append(self._write(insert_statement.insert_clause))
+    else:
+      raise Exception('InsertStatement is missing insert_clause attribute')
+
+    if insert_statement.select_query and not insert_statement.values_clause:
+      sql.append(self._write(insert_statement.select_query))
+    elif not insert_statement.select_query and insert_statement.values_clause:
+      sql.append(self._write(insert_statement.values_clause))
+    else:
+      raise Exception('InsertStatement must have a select_query xor a values clause')
+
+    sql = '\n'.join(sql)
     return sql
 
   def make_pretty_sql(self, sql):
@@ -147,14 +191,14 @@ class SqlWriter(object):
 
   def _write_struct_column(self, struct_col):
     if isinstance(struct_col.owner, StructColumn) or \
-        (isinstance(struct_col.owner, CollectionColumn) and not struct_col.owner.alias):
+       (isinstance(struct_col.owner, CollectionColumn) and not struct_col.owner.alias):
       return '%s.%s' % (self._write(struct_col.owner), struct_col.name)
     else:
       return '%s.%s' % (struct_col.owner.identifier, struct_col.name)
 
   def _write_collection_column(self, collection_col):
-    if isinstance(collection_col.owner,
-        (StructColumn, CollectionColumn)) and not collection_col.owner.alias:
+    if isinstance(collection_col.owner, (StructColumn, CollectionColumn)) and \
+       not collection_col.owner.alias:
       if collection_col.alias:
         return '%s.%s %s' % (
             self._write(collection_col.owner),
@@ -272,6 +316,12 @@ class SqlWriter(object):
   def _write_cast(self, arg, type):
     return 'CAST(%s AS %s)' % (self._write(arg), type)
 
+  def _write_cast_func(self, func):
+    val_expr = func.args[0]
+    type_ = func.args[1]
+    return 'CAST({val_expr} AS {type_})'.format(
+        val_expr=self._write(val_expr), type_=self._write(type_))
+
   def _write_date_add_year(self, func):
     return "%s + INTERVAL %s YEAR" \
         % (self._write(func.args[0]), self._write(func.args[1]))
@@ -357,11 +407,17 @@ class SqlWriter(object):
     return sql
 
   def _write_data_type_metaclass(self, data_type_class):
-    '''Write a data type class such as Int or Boolean.'''
-    aliases = getattr(data_type_class, self.DIALECT, None)
-    if aliases:
-      return aliases[0]
-    return data_type_class.__name__.upper()
+    '''Write a data type class such as Int, Boolean, or Decimal(4, 2).'''
+    if data_type_class == Char:
+      return 'CHAR({0})'.format(data_type_class.MAX)
+    elif data_type_class == VarChar:
+      return 'VARCHAR({0})'.format(data_type_class.MAX)
+    elif data_type_class == Decimal:
+      return 'DECIMAL({scale},{precision})'.format(
+          scale=data_type_class.MAX_DIGITS,
+          precision=data_type_class.MAX_FRACTIONAL_DIGITS)
+    else:
+      return data_type_class.__name__.upper()
 
   def _write_subquery(self, subquery):
     return '({0})'.format(self._write(subquery.query))
@@ -381,6 +437,35 @@ class SqlWriter(object):
 
   def _write_limit_clause(self, limit_clause):
     return 'LIMIT {0}'.format(limit_clause.limit)
+
+  def _write_insert_clause(self, insert_clause):
+    """
+    Given an InsertClause, return a string representing that portion of the query. The
+    InsertClause object may have the column_list attribute set, which is a
+    sequence of columns.
+    """
+    if insert_clause.column_list is None:
+      column_list = ''
+    else:
+      column_list = ' ({column_list})'.format(
+          column_list=', '.join([col.name for col in insert_clause.column_list]))
+    return 'INSERT INTO {table_name}{column_list}'.format(
+        table_name=insert_clause.table.name, column_list=column_list)
+
+  def _write_values_row(self, values_row):
+    """
+    Return a string representing 1 row of a VALUES clause.
+    """
+    return '({values_row})'.format(
+        values_row=', '.join([self._write(item) for item in values_row.items]))
+
+  def _write_values_clause(self, values_clause):
+    """
+    Return a string representing the VALUES clause of an INSERT query.
+    """
+    return 'VALUES\n{values_rows}'.format(
+        values_rows=',\n'.join([self._write(values_row)
+                                for values_row in values_clause.values_rows]))
 
   def _write(self, object_):
     '''Return a sql string representation of the given object.'''
@@ -443,6 +528,20 @@ class ImpalaSqlWriter(SqlWriter):
       result = 'TRIM(%s)' % result
     return result
 
+  def _write_insert_clause(self, insert_clause):
+    sql = super(ImpalaSqlWriter, self)._write_insert_clause(insert_clause)
+    if insert_clause.conflict_action == InsertClause.CONFLICT_ACTION_UPDATE:
+      # The value of sql at this point would be something like:
+      #
+      # INSERT INTO <table name> [(column list)]
+      #
+      # If it happens that the table name or column list contains the text INSERT in an
+      # identifier, we want to ensure that the replace() call below does not alter their
+      # names but instead only modifiers the INSERT keyword to UPSERT.
+      return sql.replace('INSERT', 'UPSERT', 1)
+    else:
+      return sql
+
 
 class OracleSqlWriter(SqlWriter):
 
@@ -453,6 +552,15 @@ class HiveSqlWriter(SqlWriter):
 
   DIALECT = 'HIVE'
 
+  def __init__(self, *args, **kwargs):
+    super(HiveSqlWriter, self).__init__(*args, **kwargs)
+
+    self.operator_funcs.update({
+        'IsNotDistinctFrom': '({0}) <=> ({1})',
+        'IsNotDistinctFromOp': '({0}) <=> ({1})',
+        'IsDistinctFrom': 'NOT(({0}) <=> ({1}))'
+    })
+
   # Hive greatest UDF is strict on type equality
   # Hive Profile already restricts to signatures with the same types,
   # but sometimes expression with UDF's like 'count'
@@ -462,11 +570,9 @@ class HiveSqlWriter(SqlWriter):
     args = func.args
     if args[0].type in (Int, Decimal, Float):
       argtype = args[0].type.__name__.lower()
-      sql = '%s(%s)' % \
-            (self._to_sql_name(func.name()),
-             (self._write_cast(args[0], argtype)
-              + ", "
-              + self._write_cast(args[1], argtype)))
+      sql = '%s(%s)' % (
+          self._to_sql_name(func.name()),
+          self._write_cast(args[0], argtype) + ", " + self._write_cast(args[1], argtype))
     else:
       sql = self._write_func(func)
     return sql
@@ -480,11 +586,9 @@ class HiveSqlWriter(SqlWriter):
     args = func.args
     if args[0].type in (Int, Decimal, Float):
       argtype = args[0].type.__name__.lower()
-      sql = '%s(%s)' % \
-            (self._to_sql_name(func.name()),
-             (self._write_cast(args[0], argtype)
-              + ", "
-              + self._write_cast(args[1], argtype)))
+      sql = '%s(%s)' % (
+          self._to_sql_name(func.name()),
+          self._write_cast(args[0], argtype) + ", " + self._write_cast(args[1], argtype))
     else:
       sql = self._write_func(func)
     return sql
@@ -504,12 +608,13 @@ class HiveSqlWriter(SqlWriter):
   def arithmetic_cast(self, func, symbol):
     args = func.args
     if args[0].type is Int and args[1].type is Int:
-      return 'CAST (%s AS BIGINT) %s CAST (%s AS BIGINT)' % \
-        (self._write(args[0]), symbol, self._write(args[1]))
+      return 'CAST (%s AS BIGINT) %s CAST (%s AS BIGINT)' % (
+          self._write(args[0]), symbol, self._write(args[1]))
     else:
       return self._write_func(func)
 
-  # Hive partition by clause throws exception if sorted by more than one key, unless 'rows unbounded preceding' added.
+  # Hive partition by clause throws exception if sorted by more than one key, unless
+  # 'rows unbounded preceding' added.
   def _write_analytic_func(self, func):
     sql = self._to_sql_name(func.name()) \
         + '(' + self._write_as_comma_list(func.args) \
@@ -527,10 +632,48 @@ class HiveSqlWriter(SqlWriter):
           options.append('rows unbounded preceding')
     return sql + ' '.join(options) + ')'
 
+  def _write_extract_year(self, func):
+    return 'YEAR(%s)' % self._write(func.args[0])
+
+  def _write_extract_month(self, func):
+    return 'MONTH(%s)' % self._write(func.args[0])
+
+  def _write_extract_day(self, func):
+    return 'DAY(%s)' % self._write(func.args[0])
+
+  def _write_extract_hour(self, func):
+    return 'HOUR(%s)' % self._write(func.args[0])
+
+  def _write_extract_minute(self, func):
+    return 'MINUTE(%s)' % self._write(func.args[0])
+
+  def _write_extract_second(self, func):
+    return 'SECOND(%s)' % self._write(func.args[0])
+
 
 class PostgresqlSqlWriter(SqlWriter):
 
   DIALECT = 'POSTGRESQL'
+
+  def _write_insert_statement(self, insert_statement):
+    sql = SqlWriter._write_insert_statement(self, insert_statement)
+    if insert_statement.conflict_action == InsertClause.CONFLICT_ACTION_DEFAULT:
+      pass
+    elif insert_statement.conflict_action == InsertClause.CONFLICT_ACTION_IGNORE:
+      sql += '\nON CONFLICT DO NOTHING'
+    elif insert_statement.conflict_action == InsertClause.CONFLICT_ACTION_UPDATE:
+      if insert_statement.updatable_column_names:
+        primary_keys = insert_statement.primary_key_string
+        columns = ',\n'.join('{name} = EXCLUDED.{name}'.format(name=name) for name in
+                             insert_statement.updatable_column_names)
+        sql += '\nON CONFLICT {primary_keys}\nDO UPDATE SET\n{columns}'.format(
+            primary_keys=primary_keys, columns=columns)
+      else:
+        sql += '\nON CONFLICT DO NOTHING'
+    else:
+      raise Exception('InsertStatement has unsupported conflict_action: {0}'.format(
+          insert_statement.conflict_action))
+    return sql
 
   def _write_date_add_year(self, func):
     return "%s + (%s) * INTERVAL '1' YEAR" \
@@ -572,11 +715,11 @@ class PostgresqlSqlWriter(SqlWriter):
         col = col.owner
       return col
     return '%s.%s' % (first_non_struct_ancestor(col).identifier,
-        QueryFlattener.flat_column_name(col))
+                      QueryFlattener.flat_column_name(col))
 
   def _write_collection_column(self, collection_col):
     return '%s %s' % (QueryFlattener.flat_collection_name(collection_col),
-        collection_col.identifier)
+                      collection_col.identifier)
 
   def _write_extract_second(self, func):
     # For some reason Postgresql decided that extracting second should return a FLOAT...
@@ -588,9 +731,18 @@ class PostgresqlSqlWriter(SqlWriter):
 
   def _write_data_type_metaclass(self, data_type_class):
     '''Write a data type class such as Int or Boolean.'''
-    if data_type_class in (Char, String, VarChar):
+    if data_type_class == Double:
+      return 'DOUBLE PRECISION'
+    elif data_type_class == Float:
+      return 'REAL'
+    elif data_type_class == String:
       return 'VARCHAR(%s)' % data_type_class.MAX
-    return data_type_class.__name__.upper()
+    elif data_type_class == Timestamp:
+      return 'TIMESTAMP WITHOUT TIME ZONE'
+    elif data_type_class == TinyInt:
+      return 'SMALLINT'
+    else:
+      return super(PostgresqlSqlWriter, self)._write_data_type_metaclass(data_type_class)
 
   def _write_order_by_clause(self, order_by_clause):
     sql = 'ORDER BY '
@@ -618,6 +770,12 @@ class PostgresqlSqlWriter(SqlWriter):
       return "'%s' || ''" % data_type.val
     return SqlWriter._write_data_type(self, data_type)
 
+  def _write_concat(self, func):
+    # PostgreSQL CONCAT() doesn't behave like Impala CONCAT(). PostgreSQL || does.
+    return '({concat_list})'.format(
+        concat_list=' || '.join(['({written_item})'.format(written_item=self._write(item))
+                                 for item in func.args]))
+
 
 class MySQLSqlWriter(SqlWriter):
 
@@ -636,7 +794,8 @@ class MySQLSqlWriter(SqlWriter):
         query.having_clause,
         query.union_clause,
         query.order_by_clause,
-        query.limit_clause):
+        query.limit_clause
+    ):
       if clause:
         sql.append(self._write(clause))
     sql = '\n'.join(sql)

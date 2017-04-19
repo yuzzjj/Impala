@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/exchange-node.h"
 
@@ -20,11 +23,15 @@
 #include "runtime/data-stream-recvr.h"
 #include "runtime/runtime-state.h"
 #include "runtime/row-batch.h"
+#include "runtime/exec-env.h"
 #include "util/debug-util.h"
-#include "util/runtime-profile.h"
+#include "util/runtime-profile-counters.h"
+#include "util/time.h"
 #include "gen-cpp/PlanNodes_types.h"
 
 #include "common/names.h"
+
+DECLARE_int32(stress_datastream_recvr_delay_ms);
 
 using namespace impala;
 
@@ -61,6 +68,13 @@ Status ExchangeNode::Init(const TPlanNode& tnode, RuntimeState* state) {
 Status ExchangeNode::Prepare(RuntimeState* state) {
   RETURN_IF_ERROR(ExecNode::Prepare(state));
   convert_row_batch_timer_ = ADD_TIMER(runtime_profile(), "ConvertRowBatchTime");
+
+#ifndef NDEBUG
+  if (FLAGS_stress_datastream_recvr_delay_ms > 0) {
+    SleepForMs(FLAGS_stress_datastream_recvr_delay_ms);
+  }
+#endif
+
   // TODO: figure out appropriate buffer size
   DCHECK_GT(num_senders_, 0);
   stream_recvr_ = ExecEnv::GetInstance()->stream_mgr()->CreateRecvr(state,
@@ -70,8 +84,22 @@ Status ExchangeNode::Prepare(RuntimeState* state) {
     RETURN_IF_ERROR(sort_exec_exprs_.Prepare(
         state, row_descriptor_, row_descriptor_, expr_mem_tracker()));
     AddExprCtxsToFree(sort_exec_exprs_);
+    less_than_.reset(
+        new TupleRowComparator(sort_exec_exprs_, is_asc_order_, nulls_first_));
+    AddCodegenDisabledMessage(state);
   }
   return Status::OK();
+}
+
+void ExchangeNode::Codegen(RuntimeState* state) {
+  DCHECK(state->ShouldCodegen());
+  ExecNode::Codegen(state);
+  if (IsNodeCodegenDisabled()) return;
+
+  if (is_merging_) {
+    Status codegen_status = less_than_->Codegen(state);
+    runtime_profile()->AddCodegenMsg(codegen_status.ok(), codegen_status);
+  }
 }
 
 Status ExchangeNode::Open(RuntimeState* state) {
@@ -79,10 +107,9 @@ Status ExchangeNode::Open(RuntimeState* state) {
   RETURN_IF_ERROR(ExecNode::Open(state));
   if (is_merging_) {
     RETURN_IF_ERROR(sort_exec_exprs_.Open(state));
-    TupleRowComparator less_than(sort_exec_exprs_, is_asc_order_, nulls_first_);
     // CreateMerger() will populate its merging heap with batches from the stream_recvr_,
     // so it is not necessary to call FillInputRowBatch().
-    RETURN_IF_ERROR(stream_recvr_->CreateMerger(less_than));
+    RETURN_IF_ERROR(stream_recvr_->CreateMerger(*less_than_.get()));
   } else {
     RETURN_IF_ERROR(FillInputRowBatch(state));
   }
@@ -166,7 +193,7 @@ Status ExchangeNode::GetNext(RuntimeState* state, RowBatch* output_batch, bool* 
     *eos = (input_batch_ == NULL);
     if (*eos) return Status::OK();
     next_row_idx_ = 0;
-    DCHECK(input_batch_->row_desc().IsPrefixOf(output_batch->row_desc()));
+    DCHECK(input_batch_->row_desc().LayoutIsPrefixOf(output_batch->row_desc()));
   }
 }
 
@@ -194,6 +221,7 @@ Status ExchangeNode::GetNextMerging(RuntimeState* state, RowBatch* output_batch,
   num_rows_returned_ += output_batch->num_rows();
   if (ReachedLimit()) {
     output_batch->set_num_rows(output_batch->num_rows() - (num_rows_returned_ - limit_));
+    num_rows_returned_ = limit_;
     *eos = true;
   }
 

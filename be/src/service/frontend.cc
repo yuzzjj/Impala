@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "service/frontend.h"
 
@@ -19,17 +22,12 @@
 
 #include "common/logging.h"
 #include "rpc/jni-thrift-util.h"
+#include "util/backend-gflag-util.h"
 #include "util/jni-util.h"
-#include "util/logging-support.h"
 
 #include "common/names.h"
 
 using namespace impala;
-
-DECLARE_string(sentry_config);
-DECLARE_int32(non_impala_java_vlog);
-
-DEFINE_bool(load_catalog_at_startup, false, "if true, load all catalog data at startup");
 
 // Authorization related flags. Must be set to valid values to properly configure
 // authorization.
@@ -53,16 +51,19 @@ DEFINE_string(authorized_proxy_user_config, "",
     "users. For example: hue=user1,user2;admin=*");
 DEFINE_string(authorized_proxy_user_config_delimiter, ",",
     "Specifies the delimiter used in authorized_proxy_user_config. ");
+DEFINE_string(kudu_master_hosts, "", "Specifies the default Kudu master(s). The given "
+    "value should be a comma separated list of hostnames or IP addresses; ports are "
+    "optional.");
+
 Frontend::Frontend() {
   JniMethodDescriptor methods[] = {
-    {"<init>", "(ZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;"
-        "Ljava/lang/String;II)V", &fe_ctor_},
+    {"<init>", "([B)V", &fe_ctor_},
     {"createExecRequest", "([B)[B", &create_exec_request_id_},
     {"getExplainPlan", "([B)Ljava/lang/String;", &get_explain_plan_id_},
     {"getHadoopConfig", "([B)[B", &get_hadoop_config_id_},
     {"getAllHadoopConfigs", "()[B", &get_hadoop_configs_id_},
     {"checkConfiguration", "()Ljava/lang/String;", &check_config_id_},
-    {"updateCatalogCache", "([B)[B", &update_catalog_cache_id_},
+    {"updateCatalogCache", "([[B)[B", &update_catalog_cache_id_},
     {"updateMembership", "([B)V", &update_membership_id_},
     {"getTableNames", "([B)[B", &get_table_names_id_},
     {"describeDb", "([B)[B", &describe_db_id_},
@@ -80,35 +81,28 @@ Frontend::Frontend() {
     {"loadTableData", "([B)[B", &load_table_data_id_},
     {"getTableFiles", "([B)[B", &get_table_files_id_},
     {"showCreateFunction", "([B)Ljava/lang/String;", &show_create_function_id_},
-};
+    {"buildTestDescriptorTable", "([B)[B", &build_test_descriptor_table_id_}
+  };
 
   JNIEnv* jni_env = getJNIEnv();
   // create instance of java class JniFrontend
-  fe_class_ = jni_env->FindClass("com/cloudera/impala/service/JniFrontend");
+  fe_class_ = jni_env->FindClass("org/apache/impala/service/JniFrontend");
   EXIT_IF_EXC(jni_env);
 
   uint32_t num_methods = sizeof(methods) / sizeof(methods[0]);
   for (int i = 0; i < num_methods; ++i) {
-    EXIT_IF_ERROR(JniUtil::LoadJniMethod(jni_env, fe_class_, &(methods[i])));
+    ABORT_IF_ERROR(JniUtil::LoadJniMethod(jni_env, fe_class_, &(methods[i])));
   };
 
-  jboolean lazy = (FLAGS_load_catalog_at_startup ? false : true);
-  jstring policy_file_path =
-      jni_env->NewStringUTF(FLAGS_authorization_policy_file.c_str());
-  jstring server_name =
-      jni_env->NewStringUTF(FLAGS_server_name.c_str());
-  jstring sentry_config =
-      jni_env->NewStringUTF(FLAGS_sentry_config.c_str());
-  jstring auth_provider_class =
-      jni_env->NewStringUTF(FLAGS_authorization_policy_provider_class.c_str());
-  jobject fe = jni_env->NewObject(fe_class_, fe_ctor_, lazy, server_name,
-      policy_file_path, sentry_config, auth_provider_class, FlagToTLogLevel(FLAGS_v),
-      FlagToTLogLevel(FLAGS_non_impala_java_vlog));
+  jbyteArray cfg_bytes;
+  ABORT_IF_ERROR(GetThriftBackendGflags(jni_env, &cfg_bytes));
+
+  jobject fe = jni_env->NewObject(fe_class_, fe_ctor_, cfg_bytes);
   EXIT_IF_EXC(jni_env);
-  EXIT_IF_ERROR(JniUtil::LocalToGlobalRef(jni_env, fe, &fe_));
+  ABORT_IF_ERROR(JniUtil::LocalToGlobalRef(jni_env, fe, &fe_));
 }
 
-Status Frontend::UpdateCatalogCache(const TUpdateCatalogCacheRequest& req,
+Status Frontend::UpdateCatalogCache(const vector<TUpdateCatalogCacheRequest>& req,
     TUpdateCatalogCacheResponse* resp) {
   return JniUtil::CallJniMethod(fe_, update_catalog_cache_id_, req, resp);
 }
@@ -255,4 +249,9 @@ Status Frontend::SetCatalogInitialized() {
 
 Status Frontend::GetTableFiles(const TShowFilesParams& params, TResultSet* result) {
   return JniUtil::CallJniMethod(fe_, get_table_files_id_, params, result);
+}
+
+Status Frontend::BuildTestDescriptorTable(const TBuildTestDescriptorTableParams& params,
+    TDescriptorTable* result) {
+  return JniUtil::CallJniMethod(fe_, build_test_descriptor_table_id_, params, result);
 }

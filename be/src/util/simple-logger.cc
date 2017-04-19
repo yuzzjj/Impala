@@ -1,24 +1,30 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/simple-logger.h"
 
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <boost/filesystem.hpp>
+#include <gutil/strings/substitute.h>
+#include <boost/thread/lock_guard.hpp>
 
 #include "common/names.h"
+#include "util/logging-support.h"
 
 using boost::filesystem::create_directory;
 using boost::filesystem::exists;
@@ -59,11 +65,12 @@ void SimpleLogger::GenerateLogFileName() {
 }
 
 SimpleLogger::SimpleLogger(const string& log_dir, const string& log_file_name_prefix,
-    uint64_t max_entries_per_file)
+    uint64_t max_entries_per_file, int max_log_files)
     : log_dir_(log_dir),
       log_file_name_prefix_(log_file_name_prefix),
       num_log_file_entries_(0),
-      max_entries_per_file_(max_entries_per_file) {
+      max_entries_per_file_(max_entries_per_file),
+      max_log_files_(max_log_files) {
 }
 
 Status SimpleLogger::Init() {
@@ -79,10 +86,11 @@ Status SimpleLogger::Init() {
 
 Status SimpleLogger::AppendEntry(const std::string& entry) {
   lock_guard<mutex> l(log_file_lock_);
-  if (num_log_file_entries_ > max_entries_per_file_) {
+  if (num_log_file_entries_ >= max_entries_per_file_) {
     num_log_file_entries_ = 0;
     GenerateLogFileName();
     RETURN_IF_ERROR(FlushInternal());
+    RotateLogFiles();
   }
   if (!log_file_.is_open()) return Status("Log file is not open: " + log_file_name_);
    // Not std::endl, since that causes an implicit flush
@@ -106,4 +114,10 @@ Status SimpleLogger::FlushInternal() {
   log_file_.open(log_file_name_.c_str(), std::ios_base::app | std::ios_base::out);
   if (!log_file_.is_open()) return Status("Could not open log file: " + log_file_name_);
   return Status::OK();
+}
+
+void SimpleLogger::RotateLogFiles() {
+  string log_file_name = strings::Substitute("$0/$1*", log_dir_, log_file_name_prefix_);
+
+  impala::LoggingSupport::DeleteOldLogs(log_file_name, max_log_files_);
 }

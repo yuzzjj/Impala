@@ -1,10 +1,28 @@
 #!/usr/bin/env impala-python
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # This script is used to load the proper datasets for the specified workloads. It loads
 # all data via Hive except for parquet data which needs to be loaded via Impala.
 # Most ddl commands are executed by Impala.
 import collections
+import getpass
+import logging
 import os
 import re
 import sqlparse
@@ -12,12 +30,17 @@ import subprocess
 import sys
 import tempfile
 import time
-import getpass
+import traceback
+
 from itertools import product
 from optparse import OptionParser
 from Queue import Queue
 from tests.beeswax.impala_beeswax import *
 from threading import Thread
+
+logging.basicConfig()
+LOG = logging.getLogger('load-data.py')
+LOG.setLevel(logging.DEBUG)
 
 parser = OptionParser()
 parser.add_option("-e", "--exploration_strategy", dest="exploration_strategy",
@@ -60,7 +83,7 @@ parser.add_option("--principal", default=None, dest="principal",
 
 options, args = parser.parse_args()
 
-DATA_LOAD_DIR = '/tmp/data-load-files'
+SQL_OUTPUT_DIR = os.environ['IMPALA_DATA_LOADING_SQL_DIR']
 WORKLOAD_DIR = options.workload_dir
 DATASET_DIR = options.dataset_dir
 TESTDATA_BIN_DIR = os.path.join(os.environ['IMPALA_HOME'], 'testdata/bin')
@@ -68,7 +91,7 @@ AVRO_SCHEMA_DIR = "avro_schemas"
 
 GENERATE_SCHEMA_CMD = "generate-schema-statements.py --exploration_strategy=%s "\
                       "--workload=%s --scale_factor=%s --verbose"
-# Load data using Hive's beeline because the Hive shell has regressed (CDH-17222).
+# Load data using Hive's beeline because the Hive shell has regressed (HIVE-5515).
 # The Hive shell is stateful, meaning that certain series of actions lead to problems.
 # Examples of problems due to the statefullness of the Hive shell:
 # - Creating an HBase table changes the replication factor to 1 for subsequent LOADs.
@@ -137,9 +160,11 @@ def exec_impala_query_from_file(file_name):
     for query in queries:
       query = sqlparse.format(query.rstrip(';'), strip_comments=True)
       print '(%s):\n%s\n' % (file_name, query.strip())
-      result = impala_client.execute(query)
+      if query.strip() != "":
+        result = impala_client.execute(query)
   except Exception as e:
     print "Data Loading from Impala failed with error: %s" % str(e)
+    traceback.print_exc()
     is_success = False
   finally:
     impala_client.close_connection()
@@ -149,6 +174,15 @@ def exec_bash_script(file_name):
   bash_cmd = "bash %s" % file_name
   print 'Executing Bash Command: ' + bash_cmd
   exec_cmd(bash_cmd, 'Error bash script: ' + file_name)
+
+def run_dataset_preload(dataset):
+  """Execute a preload script if present in dataset directory. E.g. to generate data
+  before loading"""
+  dataset_preload_script = os.path.join(DATASET_DIR, dataset, "preload")
+  if os.path.exists(dataset_preload_script):
+    print("Running preload script for " + dataset)
+    exec_cmd(dataset_preload_script, "Error executing preload script for " + dataset,
+        exit_on_error=True)
 
 def generate_schema_statements(workload):
   generate_cmd = GENERATE_SCHEMA_CMD % (options.exploration_strategy, workload,
@@ -163,6 +197,7 @@ def generate_schema_statements(workload):
     generate_cmd += " --hive_warehouse_dir=%s" % options.hive_warehouse_dir
   if options.hdfs_namenode is not None:
     generate_cmd += " --hdfs_namenode=%s" % options.hdfs_namenode
+  generate_cmd += " --backend=%s" % options.impalad
   print 'Executing Generate Schema Command: ' + generate_cmd
   schema_cmd = os.path.join(TESTDATA_BIN_DIR, generate_cmd)
   error_msg = 'Error generating schema statements for workload: ' + workload
@@ -237,6 +272,11 @@ def invalidate_impala_metadata():
     impala_client.close_connection()
 
 if __name__ == "__main__":
+  # Having the actual command line at the top of each data-load-* log can help
+  # when debugging dataload issues.
+  #
+  LOG.debug(' '.join(sys.argv))
+
   all_workloads = available_workloads(WORKLOAD_DIR)
   workloads = []
   if options.workloads is None:
@@ -256,10 +296,13 @@ if __name__ == "__main__":
   for workload in workloads:
     start_time = time.time()
     dataset = get_dataset_for_workload(workload)
+    run_dataset_preload(dataset)
     generate_schema_statements(workload)
-    assert os.path.isdir(os.path.join(DATA_LOAD_DIR, dataset)), ("Data loading files "
-        "do not exist for (%s)" % dataset)
-    os.chdir(os.path.join(DATA_LOAD_DIR, dataset))
+    sql_dir = os.path.join(SQL_OUTPUT_DIR, dataset)
+    assert os.path.isdir(sql_dir),\
+      ("Could not find the generated SQL files for loading dataset '%s'.\
+        \nExpected to find the SQL files in: %s" % (dataset, sql_dir))
+    os.chdir(os.path.join(SQL_OUTPUT_DIR, dataset))
     copy_avro_schemas_to_hdfs(AVRO_SCHEMA_DIR)
     dataset_dir_contents = os.listdir(os.getcwd())
     load_file_substr = "%s-%s" % (workload, options.exploration_strategy)

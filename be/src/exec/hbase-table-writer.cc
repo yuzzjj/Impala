@@ -1,30 +1,35 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/hbase-table-writer.h"
 
-#include <boost/foreach.hpp>
 #include <boost/scoped_array.hpp>
 #include <sstream>
 
 #include "common/logging.h"
+#include "exprs/expr.h"
 #include "exprs/expr-context.h"
 #include "runtime/hbase-table-factory.h"
+#include "runtime/mem-tracker.h"
+#include "runtime/raw-value.h"
+#include "runtime/tuple.h"
+#include "runtime/tuple-row.h"
 #include "util/bit-util.h"
 #include "util/jni-util.h"
-#include "exprs/expr.h"
-#include "runtime/raw-value.h"
 
 #include "common/names.h"
 
@@ -74,13 +79,13 @@ Status HBaseTableWriter::Init(RuntimeState* state) {
     // Setup column family and qualifier byte array for non-rowkey column
     const HBaseTableDescriptor::HBaseColumnDescriptor& col = table_desc_->cols()[i];
     jbyteArray byte_array;
-    jobject global_ref;
+    jbyteArray global_ref;
     RETURN_IF_ERROR(CreateByteArray(env, col.family, &byte_array));
     RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(env, byte_array, &global_ref));
-    cf_arrays_.push_back(reinterpret_cast<jbyteArray>(global_ref));
+    cf_arrays_.push_back(global_ref);
     RETURN_IF_ERROR(CreateByteArray(env, col.qualifier, &byte_array));
     RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(env, byte_array, &global_ref));
-    qual_arrays_.push_back(reinterpret_cast<jbyteArray>(global_ref));
+    qual_arrays_.push_back(global_ref);
   }
 
   return Status::OK();
@@ -109,7 +114,7 @@ Status HBaseTableWriter::InitJNI() {
   return Status::OK();
 }
 
-Status HBaseTableWriter::AppendRowBatch(RowBatch* batch) {
+Status HBaseTableWriter::AppendRows(RowBatch* batch) {
   JNIEnv* env = getJNIEnv();
   if (env == NULL) return Status("Error getting JNIEnv.");
 
@@ -190,8 +195,7 @@ Status HBaseTableWriter::AppendRowBatch(RowBatch* batch) {
     RETURN_IF_ERROR(table_->Put(put_list_));
   }
   // Now clean put_list_.
-  env->DeleteGlobalRef(put_list_);
-  RETURN_ERROR_IF_EXC(env);
+  RETURN_IF_ERROR(JniUtil::FreeGlobalRef(env, put_list_));
   put_list_ = NULL;
   return Status::OK();
 }
@@ -201,16 +205,15 @@ Status HBaseTableWriter::CleanUpJni() {
   if (env == NULL) return Status("Error getting JNIEnv.");
 
   if (put_list_ != NULL) {
-    env->DeleteGlobalRef(put_list_);
-    RETURN_ERROR_IF_EXC(env);
+    RETURN_IF_ERROR(JniUtil::FreeGlobalRef(env, put_list_));
     put_list_ = NULL;
   }
 
-  BOOST_FOREACH(jbyteArray ref, cf_arrays_) {
-    env->DeleteGlobalRef(reinterpret_cast<jobject>(ref));
+  for (jbyteArray ref: cf_arrays_) {
+    RETURN_IF_ERROR(JniUtil::FreeGlobalRef(env, ref));
   }
-  BOOST_FOREACH(jbyteArray ref, qual_arrays_) {
-    env->DeleteGlobalRef(reinterpret_cast<jobject>(ref));
+  for (jbyteArray ref: qual_arrays_) {
+    RETURN_IF_ERROR(JniUtil::FreeGlobalRef(env, ref));
   }
 
   return Status::OK();
@@ -267,9 +270,9 @@ void HBaseTableWriter::Close(RuntimeState* state) {
     table_.reset();
   }
 
-  // The jni should already have everything cleaned at this point
-  // but try again just in case there was an error that caused
-  // AppendRowBatch to exit out before calling CleanUpJni.
+  // The jni should already have everything cleaned at this point but try again just in
+  // case there was an error that caused AppendRows() to exit out before calling
+  // CleanUpJni.
   Status status = CleanUpJni();
   if (!status.ok()) {
     stringstream ss;

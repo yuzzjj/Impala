@@ -1,24 +1,25 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UTIL_CODEC_H
 #define IMPALA_UTIL_CODEC_H
 
 #include "common/status.h"
-#include "runtime/mem-pool.h"
-#include "util/runtime-profile.h"
 
 #include <boost/scoped_ptr.hpp>
 #include "gen-cpp/Descriptors_types.h"
@@ -26,7 +27,6 @@
 namespace impala {
 
 class MemPool;
-class RuntimeState;
 
 /// Create a compression object.  This is the base class for all compression algorithms. A
 /// compression algorithm is either a compressor or a decompressor.  To add a new
@@ -46,6 +46,9 @@ class Codec {
   static const char* const BZIP2_COMPRESSION;
   static const char* const SNAPPY_COMPRESSION;
   static const char* const UNKNOWN_CODEC_ERROR;
+
+  // Output buffer size for streaming compressed file.
+  static const int64_t STREAM_OUT_BUF_SIZE = 8 * 1024 * 1024;
 
   /// Map from codec string to compression format
   typedef std::map<const std::string, const THdfsCompression::type> CodecMap;
@@ -113,9 +116,23 @@ class Codec {
   /// Process data like ProcessBlock(), but can consume partial input and may only produce
   /// partial output. *input_bytes_read returns the number of bytes of input that have
   /// been consumed. Even if all input has been consumed, the caller must continue calling
-  /// to fetch output until *eos returns true.
+  /// to fetch output until *output_length==0.
+  ///
+  /// On the same codec object, we should call either ProcessBlock() or
+  /// ProcessBlockStreaming() but not both. Use ProcessBlockStreaming() when decompressing
+  /// file. Use ProcessBlock() when decompressing blocks.
+  ///
+  /// Inputs:
+  ///   input_length: length, in bytes of the data to decompress
+  ///   input: data to decompress
+  ///
+  /// Outputs:
+  ///   input_bytes_read: number of bytes of 'input' that were decompressed
+  ///   output_length: length of decompresed data
+  ///   output: decompressed data
+  ///   stream_end: end of output buffer corresponds to the end of a compressed stream.
   virtual Status ProcessBlockStreaming(int64_t input_length, const uint8_t* input,
-      int64_t* input_bytes_read, int64_t* output_length, uint8_t** output, bool* eos) {
+      int64_t* input_bytes_read, int64_t* output_length, uint8_t** output, bool* stream_end) {
     return Status("Not implemented.");
   }
 
@@ -134,10 +151,7 @@ class Codec {
 
   bool reuse_output_buffer() const { return reuse_buffer_; }
 
-  /// Largest block we will compress/decompress: 2GB.
-  /// We are dealing with compressed blocks that are never this big but we want to guard
-  /// against a corrupt file that has the block length as some large number.
-  static const int MAX_BLOCK_SIZE = (2L * 1024 * 1024 * 1024) - 1;
+  bool supports_streaming() const { return supports_streaming_; }
 
  protected:
   /// Create a compression operator
@@ -145,7 +159,7 @@ class Codec {
   ///   mem_pool: memory pool to allocate the output buffer. If mem_pool is NULL then the
   ///             caller must always preallocate *output in ProcessBlock().
   ///   reuse_buffer: if false always allocate a new buffer rather than reuse.
-  Codec(MemPool* mem_pool, bool reuse_buffer);
+  Codec(MemPool* mem_pool, bool reuse_buffer, bool supports_streaming = false);
 
   /// Initialize the codec. This should only be called once.
   virtual Status Init() = 0;
@@ -166,6 +180,10 @@ class Codec {
 
   /// Length of the output buffer.
   int64_t buffer_length_;
+
+  /// Can decompressor support streaming mode.
+  /// This is set to true for codecs that implement ProcessBlockStreaming().
+  bool supports_streaming_;
 };
 
 }

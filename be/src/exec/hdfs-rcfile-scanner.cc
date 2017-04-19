@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/hdfs-rcfile-scanner.h"
 
@@ -24,12 +27,12 @@
 #include "runtime/descriptors.h"
 #include "runtime/runtime-state.h"
 #include "runtime/mem-pool.h"
-#include "runtime/raw-value.h"
 #include "runtime/tuple-row.h"
 #include "runtime/tuple.h"
 #include "runtime/string-value.h"
 #include "util/codec.h"
 #include "util/string-parser.h"
+#include "util/runtime-profile-counters.h"
 
 #include "gen-cpp/PlanNodes_types.h"
 
@@ -50,15 +53,15 @@ const uint8_t HdfsRCFileScanner::RCFILE_VERSION_HEADER[4] = {'R', 'C', 'F', 1};
 // Macro to convert between SerdeUtil errors to Status returns.
 #define RETURN_IF_FALSE(x) if (UNLIKELY(!(x))) return parse_status_
 
-HdfsRCFileScanner::HdfsRCFileScanner(HdfsScanNode* scan_node, RuntimeState* state)
+HdfsRCFileScanner::HdfsRCFileScanner(HdfsScanNodeBase* scan_node, RuntimeState* state)
     : BaseSequenceScanner(scan_node, state) {
 }
 
 HdfsRCFileScanner::~HdfsRCFileScanner() {
 }
 
-Status HdfsRCFileScanner::Prepare(ScannerContext* context) {
-  RETURN_IF_ERROR(BaseSequenceScanner::Prepare(context));
+Status HdfsRCFileScanner::Open(ScannerContext* context) {
+  RETURN_IF_ERROR(BaseSequenceScanner::Open(context));
   text_converter_.reset(
       new TextConverter(0, scan_node_->hdfs_table()->null_column_value()));
   scan_node_->IncNumScannersCodegenDisabled();
@@ -228,7 +231,7 @@ BaseSequenceScanner::FileHeader* HdfsRCFileScanner::AllocateFileHeader() {
   return new RcFileHeader;
 }
 
-void HdfsRCFileScanner::ResetRowGroup() {
+Status HdfsRCFileScanner::ResetRowGroup() {
   num_rows_ = 0;
   row_pos_ = 0;
   key_length_ = 0;
@@ -246,13 +249,14 @@ void HdfsRCFileScanner::ResetRowGroup() {
 
   // We are done with this row group, pass along external buffers if necessary.
   if (!reuse_row_group_buffer_) {
-    AttachPool(data_buffer_pool_.get(), true);
+    RETURN_IF_ERROR(AttachPool(data_buffer_pool_.get(), true));
     row_group_buffer_size_ = 0;
   }
+  return Status::OK();
 }
 
 Status HdfsRCFileScanner::ReadRowGroup() {
-  ResetRowGroup();
+  RETURN_IF_ERROR(ResetRowGroup());
 
   while (num_rows_ == 0) {
     RETURN_IF_ERROR(ReadRowGroupHeader());
@@ -264,9 +268,10 @@ Status HdfsRCFileScanner::ReadRowGroup() {
       // The row group length depends on the user data and can be very big. This
       // can cause us to go way over the mem limit so use TryAllocate instead.
       row_group_buffer_ = data_buffer_pool_->TryAllocate(row_group_length_);
-      if (row_group_length_ > 0 && row_group_buffer_ == NULL) {
-        return state_->SetMemLimitExceeded(
-            scan_node_->mem_tracker(), row_group_length_);
+      if (UNLIKELY(row_group_buffer_ == NULL)) {
+        string details("RC file scanner failed to allocate row group buffer.");
+        return scan_node_->mem_tracker()->MemLimitExceeded(state_, details,
+            row_group_length_);
       }
       row_group_buffer_size_ = row_group_length_;
     }
@@ -449,7 +454,7 @@ Status HdfsRCFileScanner::ReadColumnBuffers() {
 }
 
 Status HdfsRCFileScanner::ProcessRange() {
-  ResetRowGroup();
+  RETURN_IF_ERROR(ResetRowGroup());
 
   // HdfsRCFileScanner effectively does buffered IO, in that it reads all the
   // materialized columns into a row group buffer.
@@ -481,7 +486,7 @@ Status HdfsRCFileScanner::ProcessRange() {
         // If there are no materialized slots (e.g. count(*) or just partition cols)
         // we can shortcircuit the parse loop
         row_pos_ += max_tuples;
-        int num_to_commit = WriteEmptyTuples(context_, current_row, max_tuples);
+        int num_to_commit = WriteTemplateTuples(current_row, max_tuples);
         COUNTER_ADD(scan_node_->rows_read_counter(), max_tuples);
         RETURN_IF_ERROR(CommitRows(num_to_commit));
         continue;
@@ -523,15 +528,8 @@ Status HdfsRCFileScanner::ProcessRange() {
 
         if (error_in_row) {
           error_in_row = false;
-          if (state_->LogHasSpace()) {
-            stringstream ss;
-            ss << "file: " << stream_->filename();
-            state_->LogError(ErrorMsg(TErrorCode::GENERAL, ss.str()), 2);
-          }
-          if (state_->abort_on_error()) {
-            state_->ReportFileErrors(stream_->filename(), 1);
-            return Status(state_->ErrorLog());
-          }
+          ErrorMsg msg(TErrorCode::GENERAL, Substitute("file: $0", stream_->filename()));
+          RETURN_IF_ERROR(state_->LogOrReturnError(msg));
         }
 
         current_row->SetTuple(scan_node_->tuple_idx(), tuple);

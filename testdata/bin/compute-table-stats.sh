@@ -1,12 +1,34 @@
 #!/bin/bash
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # Runs compute table stats over a curated set of Impala test tables.
 #
 set -euo pipefail
 trap 'echo Error in $0 at line $LINENO: $(cd "'$PWD'" && awk "NR == $LINENO" $0)' ERR
 
 . ${IMPALA_HOME}/bin/impala-config.sh > /dev/null 2>&1
-COMPUTE_STATS_SCRIPT="${IMPALA_HOME}/tests/util/compute_table_stats.py"
+
+# TODO: We need a better way of managing how these get set. See:
+# https://issues.cloudera.org/browse/IMPALA-4346
+IMPALAD=${IMPALAD:-localhost:21000}
+
+COMPUTE_STATS_SCRIPT="${IMPALA_HOME}/tests/util/compute_table_stats.py --impalad=${IMPALAD}"
 
 # Run compute stats over as many of the tables used in the Planner tests as possible.
 ${COMPUTE_STATS_SCRIPT} --db_names=functional\
@@ -22,3 +44,8 @@ ${COMPUTE_STATS_SCRIPT} --db_names=tpch,tpch_parquet \
     --table_names=customer,lineitem,nation,orders,part,partsupp,region,supplier
 ${COMPUTE_STATS_SCRIPT} --db_names=tpch_nested_parquet
 ${COMPUTE_STATS_SCRIPT} --db_names=tpcds
+
+if "$KUDU_IS_SUPPORTED"; then
+  ${COMPUTE_STATS_SCRIPT} --db_names=functional_kudu
+  ${COMPUTE_STATS_SCRIPT} --db_names=tpch_kudu
+fi

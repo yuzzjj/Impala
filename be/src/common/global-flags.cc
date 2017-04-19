@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 //
 // This file contains global flags, ie, flags which don't belong to a particular
@@ -67,9 +70,64 @@ DEFINE_string(redaction_rules_file, "", "Absolute path to sensitive data redacti
     "Web UI and audit records. Query results will not be affected. Refer to the "
     "documentation for the rule file format.");
 
-// Stress option for testing failed memory allocation. Debug builds only.
+DEFINE_string(minidump_path, "minidumps", "Directory to write minidump files to. This "
+    "can be either an absolute path or a path relative to log_dir. Each daemon will "
+    "create an additional sub-directory to prevent naming conflicts and to make it "
+    "easier to identify a crashing daemon. Minidump files contain crash-related "
+    "information in a compressed format and will only be written when a daemon exits "
+    "unexpectedly, for example on an unhandled exception or signal. Set to empty to "
+    "disable writing minidump files.");
+
+DEFINE_int32(max_minidumps, 9, "Maximum number of minidump files to keep per daemon. "
+    "Older files are removed first. Set to 0 to keep all minidump files.");
+
+DEFINE_int32(minidump_size_limit_hint_kb, 20480, "Size limit hint for minidump files in "
+    "KB. If a minidump exceeds this value, then breakpad will reduce the stack memory it "
+    "collects for each thread from 8KB to 2KB. However it will always include the full "
+    "stack memory for the first 20 threads, including the thread that crashed.");
+
+DEFINE_bool(load_auth_to_local_rules, false, "If true, load auth_to_local configuration "
+    "from hdfs' core-site.xml. When enabled, impalad reads the rules from the property "
+    "hadoop.security.auth_to_local and applies them to translate the Kerberos principal "
+    "to its corresponding local user name for authorization.");
+
+// Stress options that are only enabled in debug builds for testing.
 #ifndef NDEBUG
 DEFINE_int32(stress_free_pool_alloc, 0, "A stress option which causes memory allocations "
     "to fail once every n allocations where n is the value of this flag. Effective in "
     "debug builds only.");
+DEFINE_int32(stress_datastream_recvr_delay_ms, 0, "A stress option that causes data "
+    "stream receiver registration to be delayed. Effective in debug builds only.");
+DEFINE_bool(skip_file_runtime_filtering, false, "Skips file-based runtime filtering in "
+    "order to provide a regression test for IMPALA-3798. Effective in debug builds "
+    "only.");
+DEFINE_int32(fault_injection_rpc_delay_ms, 0, "A fault injection option that causes "
+    "rpc server handling to be delayed to trigger an RPC timeout on the caller side. "
+    "Effective in debug builds only.");
+DEFINE_int32(fault_injection_rpc_type, 0, "A fault injection option that specifies "
+    "which rpc call will be injected with the delay. Effective in debug builds only.");
+DEFINE_int32(stress_scratch_write_delay_ms, 0, "A stress option which causes writes to "
+    "scratch files to be to be delayed to simulate slow writes.");
 #endif
+
+// Used for testing the path where the Kudu client is stubbed.
+DEFINE_bool(disable_kudu, false, "If true, Kudu features will be disabled.");
+
+// Timeout (ms) used in the FE for admin and metadata operations (set on the KuduClient),
+// and in the BE for scans and writes (set on the KuduScanner and KuduSession
+// accordingly).
+DEFINE_int32(kudu_operation_timeout_ms, 3 * 60 * 1000, "Timeout (milliseconds) set for "
+    "all Kudu operations. This must be a positive value, and there is no way to disable "
+    "timeouts.");
+
+DEFINE_bool(enable_accept_queue_server, true,
+    "If true, uses a modified version of "
+    "TThreadedServer that accepts connections as quickly as possible and hands them off "
+    "to a thread pool to finish setup, reducing the chances that connections time out "
+    "waiting to be accepted.");
+
+DEFINE_int64(inc_stats_size_limit_bytes, 200 * (1LL<<20), "Maximum size of "
+    "incremental stats the catalog is allowed to serialize per table. "
+    "This limit is set as a safety check, to prevent the JVM from "
+    "hitting a maximum array limit of 1GB (or OOM) while building "
+    "the thrift objects to send to impalads. By default, it's set to 200MB");

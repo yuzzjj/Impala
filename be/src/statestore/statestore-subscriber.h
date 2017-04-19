@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef STATESTORE_STATESTORE_SUBSCRIBER_H
@@ -21,23 +24,22 @@
 #include <boost/scoped_ptr.hpp>
 #include <boost/shared_ptr.hpp>
 #include <boost/thread/mutex.hpp>
-#include <boost/thread/thread.hpp>
 
 #include "statestore/statestore.h"
 #include "util/stopwatch.h"
 #include "rpc/thrift-util.h"
 #include "rpc/thrift-client.h"
-#include "util/thread.h"
 #include "util/metrics.h"
 #include "gen-cpp/StatestoreService.h"
 #include "gen-cpp/StatestoreSubscriber.h"
 
 namespace impala {
 
-class TimeoutFailureDetector;
 class Status;
-class TNetworkAddress;
+class TimeoutFailureDetector;
+class Thread;
 class ThriftServer;
+class TNetworkAddress;
 
 typedef ClientCache<StatestoreServiceClient> StatestoreClientCache;
 
@@ -134,7 +136,7 @@ class StatestoreSubscriber {
   boost::shared_ptr<StatestoreSubscriberIf> thrift_iface_;
 
   /// Container for the heartbeat server.
-  boost::shared_ptr<ThriftServer> heartbeat_server_;
+  std::shared_ptr<ThriftServer> heartbeat_server_;
 
   /// Failure detector that tracks heartbeat messages from the statestore.
   boost::scoped_ptr<impala::TimeoutFailureDetector> failure_detector_;
@@ -261,7 +263,7 @@ class StatestoreSubscriber {
   /// During recovery mode, any public methods that are started will block on lock_, which
   /// is only released when recovery finishes. In practice, all registrations are made
   /// early in the life of an impalad before the statestore could be detected as failed.
-  void RecoveryModeChecker();
+  [[noreturn]] void RecoveryModeChecker();
 
   /// Creates a client of the remote statestore and sends a list of
   /// topics to register for. Returns OK unless there is some problem

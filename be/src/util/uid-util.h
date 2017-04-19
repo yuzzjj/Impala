@@ -1,43 +1,90 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UTIL_UID_UTIL_H
 #define IMPALA_UTIL_UID_UTIL_H
 
+#include <boost/functional/hash.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 
 #include "gen-cpp/Types_types.h"  // for TUniqueId
 #include "util/debug-util.h"
-#include "common/names.h"
 
 namespace impala {
-/// This function must be called 'hash_value' to be picked up by boost.
-inline std::size_t hash_value(const impala::TUniqueId& id) {
+
+inline std::size_t hash_value(const TUniqueId& id) {
   std::size_t seed = 0;
   boost::hash_combine(seed, id.lo);
   boost::hash_combine(seed, id.hi);
   return seed;
 }
 
-/// Templated so that this method is not namespace-specific (since we also call this on
-/// llama::TUniqueId)
-template <typename T>
-inline void UUIDToTUniqueId(const boost::uuids::uuid& uuid, T* unique_id) {
+}
+
+/// Hash function for std:: containers
+namespace std {
+
+template<> struct hash<impala::TUniqueId> {
+  std::size_t operator()(const impala::TUniqueId& id) const {
+    return impala::hash_value(id);
+  }
+};
+
+}
+
+namespace impala {
+
+inline void UUIDToTUniqueId(const boost::uuids::uuid& uuid, TUniqueId* unique_id) {
   memcpy(&(unique_id->hi), &uuid.data[0], 8);
   memcpy(&(unique_id->lo), &uuid.data[8], 8);
+}
+
+/// Query id: uuid with bottom 4 bytes set to 0
+/// Fragment instance id: query id with instance index stored in the bottom 4 bytes
+
+constexpr int64_t FRAGMENT_IDX_MASK = (1L << 32) - 1;
+
+inline TUniqueId UuidToQueryId(const boost::uuids::uuid& uuid) {
+  TUniqueId result;
+  memcpy(&result.hi, &uuid.data[0], 8);
+  memcpy(&result.lo, &uuid.data[8], 8);
+  result.lo &= ~FRAGMENT_IDX_MASK;  // zero out bottom 4 bytes
+  return result;
+}
+
+inline TUniqueId GetQueryId(const TUniqueId& fragment_instance_id) {
+  TUniqueId result = fragment_instance_id;
+  result.lo &= ~FRAGMENT_IDX_MASK;  // zero out bottom 4 bytes
+  return result;
+}
+
+inline int32_t GetInstanceIdx(const TUniqueId& fragment_instance_id) {
+  return fragment_instance_id.lo & FRAGMENT_IDX_MASK;
+}
+
+inline TUniqueId CreateInstanceId(
+    const TUniqueId& query_id, int32_t instance_idx) {
+  DCHECK_EQ(GetInstanceIdx(query_id), 0);  // well-formed query id
+  DCHECK_GE(instance_idx, 0);
+  TUniqueId result = query_id;
+  result.lo += instance_idx;
+  return result;
 }
 
 template <typename F, typename T>

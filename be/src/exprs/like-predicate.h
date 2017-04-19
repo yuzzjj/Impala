@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXPRS_LIKE_PREDICATE_H_
@@ -34,11 +37,13 @@ namespace impala {
 /// This class handles the Like, Regexp, and Rlike predicates and uses the udf interface.
 class LikePredicate: public Predicate {
  public:
-  ~LikePredicate();
+  ~LikePredicate() { }
 
  protected:
   friend class Expr;
-  LikePredicate(const TExprNode& node);
+
+  LikePredicate(const TExprNode& node)
+      : Predicate(node) { }
 
  private:
   typedef impala_udf::BooleanVal (*LikePredicateFunction) (impala_udf::FunctionContext*,
@@ -117,8 +122,15 @@ class LikePredicate: public Predicate {
   static void RegexpLikePrepare(impala_udf::FunctionContext* context,
       impala_udf::FunctionContext::FunctionStateScope scope);
 
-  /// Handles regexp_like() when 3 parameters are passed to it
+  /// The cross-compiled wrapper to call RegexpLikeInternal() which is not cross-compiled.
   static impala_udf::BooleanVal RegexpLike(impala_udf::FunctionContext* context,
+      const impala_udf::StringVal& val, const impala_udf::StringVal& pattern,
+      const impala_udf::StringVal& match_parameter);
+
+  /// Handles regexp_like() when 3 parameters are passed to it. This is intentionally
+  /// not cross-compiled as there is no performance benefit in doing so and it will
+  /// consume extra codegen time.
+  static impala_udf::BooleanVal RegexpLikeInternal(impala_udf::FunctionContext* context,
       const impala_udf::StringVal& val, const impala_udf::StringVal& pattern,
       const impala_udf::StringVal& match_parameter);
 

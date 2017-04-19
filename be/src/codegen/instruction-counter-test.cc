@@ -1,31 +1,32 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <boost/thread/thread.hpp>
-#include <gtest/gtest.h>
 #include <string>
 
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Function.h"
-#include "llvm/PassManager.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/CallingConv.h"
-#include "llvm/Analysis/Verifier.h"
-#include "llvm/Assembly/PrintModulePass.h"
 #include "llvm/IR/IRBuilder.h"
 
 #include "codegen/llvm-codegen.h"
 #include "codegen/instruction-counter.h"
+#include "testutil/gtest-util.h"
 
 #include "common/names.h"
 using namespace llvm;
@@ -52,11 +53,14 @@ Module* CodegenMulAdd(LLVMContext* context) {
   Function* mul_add = cast<Function>(c);
   mul_add->setCallingConv(CallingConv::C);
   Function::arg_iterator args = mul_add->arg_begin();
-  Value* x = args++;
+  Value* x = &*args;
+  ++args;
   x->setName("x");
-  Value* y = args++;
+  Value* y = &*args;
+  ++args;
   y->setName("y");
-  Value* z = args++;
+  Value* z = &*args;
+  ++args;
   z->setName("z");
   BasicBlock* block = BasicBlock::Create(*context, "entry", mul_add);
   IRBuilder<> builder(block);
@@ -113,9 +117,11 @@ Module* CodegenGcd(LLVMContext* context) {
       IntegerType::get(*context, 32), IntegerType::get(*context, 32), NULL);
   Function* gcd = cast<Function>(c);
   Function::arg_iterator args = gcd->arg_begin();
-  Value* x = args++;
+  Value* x = &*args;
+  ++args;
   x->setName("x");
-  Value* y = args++;
+  Value* y = &*args;
+  ++args;
   y->setName("y");
   BasicBlock* entry = BasicBlock::Create(*context, "entry", gcd);
   BasicBlock* ret = BasicBlock::Create(*context, "return", gcd);
@@ -167,8 +173,5 @@ TEST_F(InstructionCounterTest, TestMemInstrCount) {
 
 }  // namespace impala
 
-int main(int argc, char **argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
+IMPALA_TEST_MAIN();
 

@@ -1,16 +1,19 @@
-// Copyright 2013 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_ROW_BATCH_LIST_H
@@ -55,12 +58,15 @@ class RowBatchList {
       return (*batch_it_)->GetRow(row_idx_);
     }
 
-    /// Increments the iterator. No-op if the iterator is at the end.
+    /// Moves the iterator to the next row. If the current row is the last row in the
+    /// batch, advances to either the next non-empty batch or the end. No-op if the
+    /// iterator is already at the end.
     void Next() {
-      if (batch_it_ == list_->row_batches_.end()) return;
+      if (AtEnd()) return;
       DCHECK_GE((*batch_it_)->num_rows(), 0);
       if (++row_idx_ == (*batch_it_)->num_rows()) {
         ++batch_it_;
+        SkipEmptyBatches();
         row_idx_ = 0;
       }
     }
@@ -72,17 +78,26 @@ class RowBatchList {
       : list_(list),
         batch_it_(list->row_batches_.begin()),
         row_idx_(0) {
+      SkipEmptyBatches();
+    }
+
+    void SkipEmptyBatches() {
+      while (!AtEnd() && (*batch_it_)->num_rows() == 0) ++batch_it_;
     }
 
     RowBatchList* list_;
+
+    /// The current batch. Either a batch with > 0 rows or the end() iterator.
     BatchIterator batch_it_;
+
+    /// The index of the current row in the current batch. Always the index of a valid
+    /// row if 'batch_it_' points to a valid batch.
     int64_t row_idx_;
   };
 
   /// Add the 'row_batch' to the list. The RowBatch* and all of its resources are owned
   /// by the caller.
   void AddRowBatch(RowBatch* row_batch) {
-    if (row_batch->num_rows() == 0) return;
     row_batches_.push_back(row_batch);
     total_num_rows_ += row_batch->num_rows();
   }

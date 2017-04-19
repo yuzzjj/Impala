@@ -1,27 +1,37 @@
-// Copyright 2015 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
+#include "common/init.h"
 #include "testutil/gtest-util.h"
 #include "runtime/collection-value.h"
 #include "runtime/collection-value-builder.h"
+#include "runtime/mem-tracker.h"
 #include "runtime/raw-value.h"
+#include "runtime/raw-value.inline.h"
 #include "runtime/row-batch.h"
 #include "runtime/tuple-row.h"
+#include "service/fe-support.h"
+#include "service/frontend.h"
 #include "util/stopwatch.h"
 #include "testutil/desc-tbl-builder.h"
 
 #include "common/names.h"
+
+using namespace impala;
 
 namespace impala {
 
@@ -35,13 +45,18 @@ class RowBatchSerializeTest : public testing::Test {
   ObjectPool pool_;
   scoped_ptr<MemTracker> tracker_;
 
+  // For computing tuple mem layouts.
+  scoped_ptr<Frontend> fe_;
+
   virtual void SetUp() {
+    fe_.reset(new Frontend());
     tracker_.reset(new MemTracker());
   }
 
   virtual void TearDown() {
     pool_.Clear();
     tracker_.reset();
+    fe_.reset();
   }
 
   // Serializes and deserializes 'batch', then checks that the deserialized batch is valid
@@ -158,9 +173,10 @@ class RowBatchSerializeTest : public testing::Test {
         const TupleDescriptor* item_desc = slot_desc.collection_item_descriptor();
         int array_len = rand() % (MAX_ARRAY_LEN + 1);
         CollectionValue cv;
-        CollectionValueBuilder builder(&cv, *item_desc, pool, array_len);
+        CollectionValueBuilder builder(&cv, *item_desc, pool, NULL, array_len);
         Tuple* tuple_mem;
-        int n = builder.GetFreeMemory(&tuple_mem);
+        int n;
+        EXPECT_OK(builder.GetFreeMemory(&tuple_mem, &n));
         ASSERT_GE(n, array_len);
         memset(tuple_mem, 0, item_desc->byte_size() * array_len);
         for (int i = 0; i < array_len; ++i) {
@@ -241,7 +257,7 @@ class RowBatchSerializeTest : public testing::Test {
   // Create a row batch from preconstructed tuples. Each tuple instance for tuple i
   // is consecutively repeated repeats[i] times. The tuple instances are used in the
   // order provided, starting at the beginning once all are used.
-  void AddTuplesToRowBatch(int num_rows, const vector<vector<Tuple*> >& tuples,
+  void AddTuplesToRowBatch(int num_rows, const vector<vector<Tuple*>>& tuples,
       const vector<int>& repeats, RowBatch* batch) {
     int tuples_per_row = batch->row_desc().tuple_descriptors().size();
     ASSERT_EQ(tuples_per_row, tuples.size());
@@ -265,7 +281,7 @@ class RowBatchSerializeTest : public testing::Test {
   // Helper to build a row batch with only one tuple per row.
   void AddTuplesToRowBatch(int num_rows, const vector<Tuple*>& tuples, int repeats,
       RowBatch* batch) {
-    vector<vector<Tuple*> > tmp_tuples(1, tuples);
+    vector<vector<Tuple*>> tmp_tuples(1, tuples);
     vector<int> tmp_repeats(1, repeats);
     AddTuplesToRowBatch(num_rows, tmp_tuples, tmp_repeats, batch);
   }
@@ -284,7 +300,7 @@ class RowBatchSerializeTest : public testing::Test {
 
 TEST_F(RowBatchSerializeTest, Basic) {
   // tuple: (int)
-  DescriptorTblBuilder builder(&pool_);
+  DescriptorTblBuilder builder(fe_.get(), &pool_);
   builder.DeclareTuple() << TYPE_INT;
   DescriptorTbl* desc_tbl = builder.Build();
 
@@ -299,7 +315,7 @@ TEST_F(RowBatchSerializeTest, Basic) {
 
 TEST_F(RowBatchSerializeTest, String) {
   // tuple: (int, string)
-  DescriptorTblBuilder builder(&pool_);
+  DescriptorTblBuilder builder(fe_.get(), &pool_);
   builder.DeclareTuple() << TYPE_INT << TYPE_STRING;
   DescriptorTbl* desc_tbl = builder.Build();
 
@@ -318,7 +334,7 @@ TEST_F(RowBatchSerializeTest, BasicArray) {
   array_type.type = TYPE_ARRAY;
   array_type.children.push_back(TYPE_INT);
 
-  DescriptorTblBuilder builder(&pool_);
+  DescriptorTblBuilder builder(fe_.get(), &pool_);
   builder.DeclareTuple() << TYPE_INT << TYPE_STRING << array_type;
   DescriptorTbl* desc_tbl = builder.Build();
 
@@ -346,7 +362,7 @@ TEST_F(RowBatchSerializeTest, StringArray) {
   array_type.type = TYPE_ARRAY;
   array_type.children.push_back(struct_type);
 
-  DescriptorTblBuilder builder(&pool_);
+  DescriptorTblBuilder builder(fe_.get(), &pool_);
   builder.DeclareTuple() << TYPE_INT << TYPE_STRING << array_type;
   DescriptorTbl* desc_tbl = builder.Build();
 
@@ -387,7 +403,7 @@ TEST_F(RowBatchSerializeTest, NestedArrays) {
   array_type.type = TYPE_ARRAY;
   array_type.children.push_back(struct_type);
 
-  DescriptorTblBuilder builder(&pool_);
+  DescriptorTblBuilder builder(fe_.get(), &pool_);
   builder.DeclareTuple() << array_type;
   DescriptorTbl* desc_tbl = builder.Build();
 
@@ -411,7 +427,7 @@ TEST_F(RowBatchSerializeTest, DupCorrectnessFull) {
 
 void RowBatchSerializeTest::TestDupCorrectness(bool full_dedup) {
   // tuples: (int), (string)
-  DescriptorTblBuilder builder(&pool_);
+  DescriptorTblBuilder builder(fe_.get(), &pool_);
   builder.DeclareTuple() << TYPE_INT;
   builder.DeclareTuple() << TYPE_STRING;
   DescriptorTbl* desc_tbl = builder.Build();
@@ -432,7 +448,7 @@ void RowBatchSerializeTest::TestDupCorrectness(bool full_dedup) {
   // All string dups are consecutive
   repeats.push_back(num_rows / distinct_string_tuples + 1);
   RowBatch* batch = pool_.Add(new RowBatch(row_desc, num_rows, tracker_.get()));
-  vector<vector<Tuple*> > distinct_tuples(2);
+  vector<vector<Tuple*>> distinct_tuples(2);
   CreateTuples(*row_desc.tuple_descriptors()[0], batch->tuple_data_pool(),
       distinct_int_tuples, 0, 10, &distinct_tuples[0]);
   CreateTuples(*row_desc.tuple_descriptors()[1], batch->tuple_data_pool(),
@@ -452,7 +468,7 @@ TEST_F(RowBatchSerializeTest, DupRemovalFull) {
 // Test that tuple deduplication results in the expected reduction in serialized size.
 void RowBatchSerializeTest::TestDupRemoval(bool full_dedup) {
   // tuples: (int, string)
-  DescriptorTblBuilder builder(&pool_);
+  DescriptorTblBuilder builder(fe_.get(), &pool_);
   builder.DeclareTuple() << TYPE_INT << TYPE_STRING;
   DescriptorTbl* desc_tbl = builder.Build();
 
@@ -491,7 +507,7 @@ TEST_F(RowBatchSerializeTest, ConsecutiveNullsFull) {
 // Test that deduplication handles NULL tuples correctly.
 void RowBatchSerializeTest::TestConsecutiveNulls(bool full_dedup) {
   // tuples: (int)
-  DescriptorTblBuilder builder(&pool_);
+  DescriptorTblBuilder builder(fe_.get(), &pool_);
   builder.DeclareTuple() << TYPE_INT;
   DescriptorTbl* desc_tbl = builder.Build();
   vector<bool> nullable_tuples(1, true);
@@ -519,7 +535,7 @@ TEST_F(RowBatchSerializeTest, ZeroLengthTuplesDedup) {
 
 void RowBatchSerializeTest::TestZeroLengthTuple(bool full_dedup) {
   // tuples: (int), (string), ()
-  DescriptorTblBuilder builder(&pool_);
+  DescriptorTblBuilder builder(fe_.get(), &pool_);
   builder.DeclareTuple() << TYPE_INT;
   builder.DeclareTuple() << TYPE_STRING;
   builder.DeclareTuple();
@@ -546,7 +562,7 @@ TEST_F(RowBatchSerializeTest, DedupPathologicalFull) {
   ColumnType array_type;
   array_type.type = TYPE_ARRAY;
   array_type.children.push_back(TYPE_STRING);
-  DescriptorTblBuilder builder(&pool_);
+  DescriptorTblBuilder builder(fe_.get(), &pool_);
   builder.DeclareTuple() << TYPE_INT;
   builder.DeclareTuple() << TYPE_INT;
   builder.DeclareTuple() << array_type;
@@ -568,7 +584,7 @@ TEST_F(RowBatchSerializeTest, DedupPathologicalFull) {
   string huge_string;
   LOG(INFO) << "Try to resize to " << huge_string_size;
   huge_string.resize(huge_string_size, 'z');
-  vector<vector<Tuple*> > tuples(num_tuples);
+  vector<vector<Tuple*>> tuples(num_tuples);
   vector<int> repeats(num_tuples, 1); // Don't repeat tuples adjacently
   int64_t total_byte_size = 0;
   RowBatch* batch = pool_.Add(new RowBatch(row_desc, num_rows, tracker_.get()));
@@ -640,7 +656,8 @@ TEST_F(RowBatchSerializeTest, DedupPathologicalFull) {
 
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
-  impala::CpuInfo::Init();
+  InitCommonRuntime(argc, argv, true, impala::TestInfo::BE_TEST);
+  InitFeSupport();
   uint32_t seed = time(NULL);
   cout << "seed = " << seed << endl;
   srand(seed);

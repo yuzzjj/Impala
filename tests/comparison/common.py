@@ -1,16 +1,19 @@
-# Copyright (c) 2014 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 import json
 
@@ -24,10 +27,13 @@ from copy import deepcopy
 # lazyily imported using the following function. Keep in mind that python "globals" are
 # module local, there is no such thing as a cross-module global.
 __ALREADY_IMPORTED = False
+
+
 def get_import(name):
+  # noqa below tells flake8 to not warn when it thinks imports are not used
   global __ALREADY_IMPORTED
   if not __ALREADY_IMPORTED:
-    from db_types import (
+    from tests.comparison.db_types import (  # noqa
         BigInt,
         Boolean,
         Char,
@@ -38,12 +44,13 @@ def get_import(name):
         JOINABLE_TYPES,
         Number,
         Timestamp)
-    from funcs import AggFunc, AnalyticFunc, Func
-    from query import InlineView, Subquery, WithClauseInlineView
+    from tests.comparison.funcs import AggFunc, AnalyticFunc, Func  # noqa
+    from tests.comparison.query import InlineView, Subquery, WithClauseInlineView  # noqa
     for key, value in locals().items():
       globals()[key] = value
     __ALREADY_IMPORTED = True
   return globals()[name]
+
 
 class ValExpr(object):
   '''This is class that represents a generic expr that results in a scalar.'''
@@ -256,6 +263,7 @@ class Column(ValExpr):
     self.owner = owner
     self.name = name
     self._exact_type = exact_type
+    self.is_primary_key = False
 
   @property
   def exact_type(self):
@@ -281,7 +289,7 @@ class Column(ValExpr):
 
   def __repr__(self):
     return '%s<name: %s, type: %s>' % (
-        type(self).__name__, self.name, self.type.__name__)
+        type(self).__name__, self.name, self.exact_type.__name__)
 
   def __deepcopy__(self, memo):
     # Don't return a deep copy of owner, since that is a circular reference
@@ -486,7 +494,7 @@ class Table(TableExpr):
 
   def __init__(self, name):
     self.name = name
-    self._cols = [] # can include CollectionColumns and StructColumns
+    self._cols = []  # can include CollectionColumns and StructColumns
     self._unique_cols = []
     self.alias = None
     self.is_visible = True   # Tables used in SEMI or ANTI JOINs are invisible
@@ -507,6 +515,39 @@ class Table(TableExpr):
   @property
   def identifier(self):
     return self.alias or self.name
+
+  @property
+  def primary_keys(self):
+    """
+    Return immutable sequence of primary keys.
+    """
+    return tuple(col for col in self._cols if col.is_primary_key)
+
+  @property
+  def primary_key_names(self):
+    """
+    Return immutable sequence for primary key names.
+    """
+    return tuple(col.name for col in self.primary_keys)
+
+  @property
+  def updatable_columns(self):
+    """
+    Return immutable sequence of columns that may be updated (i.e., not primary keys).
+
+    If the table doesn't have primary keys, no columns are updatable.
+    """
+    if self.primary_keys:
+      return tuple(col for col in self._cols if not col.is_primary_key)
+    else:
+      return ()
+
+  @property
+  def updatable_column_names(self):
+    """
+    Return immutable sequence of column names that may be updated
+    """
+    return tuple(col.name for col in self.updatable_columns)
 
   @property
   def cols(self):

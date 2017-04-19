@@ -388,6 +388,27 @@ double
 105
 ====
 ---- QUERY
+select var_sum_multiply2(5.0, 1, 2, 3, 4, 5, 6)
+---- TYPES
+double
+---- RESULTS
+105
+====
+---- QUERY
+select to_lower("HELLO")
+---- TYPES
+string
+---- RESULTS
+'hello'
+====
+---- QUERY
+select to_upper("foobar")
+---- TYPES
+string
+---- RESULTS
+'FOOBAR'
+====
+---- QUERY
 select tinyint_col, int_col, var_sum_multiply(2, tinyint_col, int_col)
 from functional.alltypestiny
 ---- TYPES
@@ -424,20 +445,6 @@ select validate_arg_type("dummy")
 BOOLEAN
 ---- RESULTS
 true
-====
----- QUERY
-select count_rows() from functional.alltypestiny
----- TYPES
-BIGINT
----- RESULTS
-1
-2
-3
-4
-5
-6
-7
-8
 ====
 ---- QUERY
 select constant_arg(1), constant_arg(int_col) from functional.alltypestiny limit 1;
@@ -514,4 +521,18 @@ select eight_args(1,2,3,4,5,6,7,8);
 INT
 ---- RESULTS
 36
+====
+---- QUERY
+select twenty_args(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20);
+---- TYPES
+INT
+---- RESULTS
+210
+====
+---- QUERY
+select pow(3,2), xpow(3,2);
+---- TYPES
+DOUBLE, DOUBLE
+---- RESULTS
+9,9
 ====

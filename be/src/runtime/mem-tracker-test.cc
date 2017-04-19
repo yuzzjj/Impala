@@ -1,22 +1,25 @@
-// Copyright 2013 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <string>
 #include <boost/bind.hpp>
-#include <gtest/gtest.h>
 
 #include "runtime/mem-tracker.h"
+#include "testutil/gtest-util.h"
 #include "util/metrics.h"
 
 #include "common/names.h"
@@ -33,6 +36,8 @@ TEST(MemTestTest, SingleTrackerNoLimit) {
   t.Release(15);
   EXPECT_EQ(t.consumption(), 5);
   EXPECT_FALSE(t.LimitExceeded());
+  // Clean up.
+  t.Release(5);
 }
 
 TEST(MemTestTest, SingleTrackerWithLimit) {
@@ -47,6 +52,8 @@ TEST(MemTestTest, SingleTrackerWithLimit) {
   t.Release(15);
   EXPECT_EQ(t.consumption(), 5);
   EXPECT_FALSE(t.LimitExceeded());
+  // Clean up.
+  t.Release(5);
 }
 
 TEST(MemTestTest, ConsumptionMetric) {
@@ -57,7 +64,7 @@ TEST(MemTestTest, ConsumptionMetric) {
   UIntGauge metric(md, 0);
   EXPECT_EQ(metric.value(), 0);
 
-  MemTracker t(&metric, 100, -1, "");
+  MemTracker t(&metric, 100, "");
   EXPECT_TRUE(t.has_limit());
   EXPECT_EQ(t.consumption(), 0);
 
@@ -98,12 +105,15 @@ TEST(MemTestTest, ConsumptionMetric) {
   EXPECT_EQ(t.consumption(), 5);
   EXPECT_EQ(t.peak_consumption(), 155);
   EXPECT_FALSE(t.LimitExceeded());
+  // Clean up.
+  metric.Increment(-15);
+  t.Consume(-1);
 }
 
 TEST(MemTestTest, TrackerHierarchy) {
   MemTracker p(100);
-  MemTracker c1(80, -1, "", &p);
-  MemTracker c2(50, -1, "", &p);
+  MemTracker c1(80, "", &p);
+  MemTracker c2(50, "", &p);
 
   // everything below limits
   c1.Consume(60);
@@ -139,6 +149,10 @@ TEST(MemTestTest, TrackerHierarchy) {
   EXPECT_TRUE(c2.AnyLimitExceeded());
   EXPECT_EQ(p.consumption(), 100);
   EXPECT_FALSE(p.LimitExceeded());
+
+  // Clean up.
+  c1.Release(40);
+  c2.Release(60);
 }
 
 class GcFunctionHelper {
@@ -198,11 +212,11 @@ TEST(MemTestTest, GcFunctions) {
   EXPECT_EQ(t.consumption(), 11);
   EXPECT_FALSE(t.LimitExceeded());
   EXPECT_EQ(t.consumption(), 10);
+
+  //Clean up.
+  t.Release(10);
 }
 
 }
 
-int main(int argc, char **argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
+IMPALA_TEST_MAIN();

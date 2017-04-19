@@ -1,27 +1,33 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # Targeted tests to validate per-query memory limit.
 
 import pytest
-import sys
 import re
+import sys
 from copy import copy
-from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
-from tests.common.test_vector import *
-from tests.common.impala_test_suite import *
 
+from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
+from tests.common.impala_test_suite import ImpalaTestSuite
+from tests.common.test_dimensions import (
+    ImpalaTestDimension,
+    create_single_exec_option_dimension,
+    create_uncompressed_text_dimension)
 
 class TestQueryMemLimit(ImpalaTestSuite):
   """Test class to do functional validation of per query memory limits.
@@ -62,21 +68,24 @@ class TestQueryMemLimit(ImpalaTestSuite):
   def add_test_dimensions(cls):
     super(TestQueryMemLimit, cls).add_test_dimensions()
     # Only run the query for text
-    cls.TestMatrix.add_dimension(create_uncompressed_text_dimension(cls.get_workload()))
+    cls.ImpalaTestMatrix.add_dimension(
+        create_uncompressed_text_dimension(cls.get_workload()))
 
     # add mem_limit as a test dimension.
     if cls.exploration_strategy() == 'core':
-      cls.TestMatrix.add_dimension(\
-          TestDimension('mem_limit', *TestQueryMemLimit.MEM_LIMITS_CORE))
+      cls.ImpalaTestMatrix.add_dimension(\
+          ImpalaTestDimension('mem_limit', *TestQueryMemLimit.MEM_LIMITS_CORE))
     else:
-      cls.TestMatrix.add_dimension(\
-          TestDimension('mem_limit', *TestQueryMemLimit.MEM_LIMITS))
+      cls.ImpalaTestMatrix.add_dimension(\
+          ImpalaTestDimension('mem_limit', *TestQueryMemLimit.MEM_LIMITS))
 
     # Make query a test dimension so we can support more queries.
-    cls.TestMatrix.add_dimension(TestDimension('query', *TestQueryMemLimit.QUERIES))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('query', *TestQueryMemLimit.QUERIES))
     # This query takes a very long time to finish with a bound on the batch_size.
     # Remove the bound on the batch size.
-    cls.TestMatrix.add_constraint(lambda v: v.get_value('exec_option')['batch_size'] == 0)
+    cls.ImpalaTestMatrix.add_constraint(
+        lambda v: v.get_value('exec_option')['batch_size'] == 0)
 
   @pytest.mark.execute_serially
   def test_mem_limit(self, vector):
@@ -98,3 +107,21 @@ class TestQueryMemLimit(ImpalaTestSuite):
       assert should_succeed, "Query was expected to fail"
     except ImpalaBeeswaxException, e:
       assert not should_succeed, "Query should not have failed: %s" % e
+
+
+class TestCodegenMemLimit(ImpalaTestSuite):
+  """Tests that memory limit applies to codegen """
+  @classmethod
+  def get_workload(self):
+    return 'functional-query'
+
+  @classmethod
+  def add_test_dimensions(cls):
+    super(TestCodegenMemLimit, cls).add_test_dimensions()
+    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
+    # Only run the query for parquet
+    cls.ImpalaTestMatrix.add_constraint(
+      lambda v: v.get_value('table_format').file_format == 'parquet')
+
+  def test_codegen_mem_limit(self, vector):
+    self.run_test_case('QueryTest/codegen-mem-limit', vector)

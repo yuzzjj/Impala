@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/hdfs-avro-table-writer.h"
 
@@ -26,10 +29,13 @@
 #include "util/uid-util.h"
 #include "exprs/expr.h"
 #include "exprs/expr-context.h"
+#include "runtime/mem-pool.h"
+#include "runtime/mem-tracker.h"
 #include "runtime/raw-value.h"
 #include "runtime/row-batch.h"
 #include "runtime/runtime-state.h"
 #include "runtime/hdfs-fs-cache.h"
+#include "util/runtime-profile-counters.h"
 #include "write-stream.inline.h"
 
 #include "common/names.h"
@@ -68,7 +74,8 @@ inline void HdfsAvroTableWriter::AppendField(const ColumnType& type, const void*
   // Each avro field is written as union, which is a ZLong indicating the union
   // field followed by the encoded value. Impala/Hive always stores values as
   // a union of [ColumnType, NULL].
-  // TODO check if we want to support [NULL, ColumnType] union
+  // TODO: the writer may be asked to write [NULL, ColumnType] unions. It is wrong
+  // for us to assume [ColumnType, NULL].
 
   if (value == NULL) {
     // indicate the second field of the union
@@ -164,8 +171,12 @@ Status HdfsAvroTableWriter::Init() {
   return Status::OK();
 }
 
-Status HdfsAvroTableWriter::AppendRowBatch(RowBatch* batch,
-    const vector<int32_t>& row_group_indices, bool* new_file) {
+void HdfsAvroTableWriter::Close() {
+  mem_pool_->FreeAll();
+}
+
+Status HdfsAvroTableWriter::AppendRows(
+    RowBatch* batch, const vector<int32_t>& row_group_indices, bool* new_file) {
   int32_t limit;
   bool all_rows = row_group_indices.empty();
   if (all_rows) {

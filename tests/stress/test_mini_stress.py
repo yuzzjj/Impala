@@ -1,13 +1,26 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-import os
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 import pytest
 import re
-from time import sleep
+
 from tests.common.impala_cluster import ImpalaCluster
-from tests.common.test_vector import TestDimension
 from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.util.test_file_parser import QueryTestSectionReader
+from tests.common.test_vector import ImpalaTestDimension
 
 # Number of times to execute each query
 NUM_ITERATIONS = 5
@@ -25,19 +38,23 @@ class TestMiniStress(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestMiniStress, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(TestDimension('test_id', *TEST_IDS))
+    cls.ImpalaTestMatrix.add_dimension(ImpalaTestDimension('test_id', *TEST_IDS))
     if cls.exploration_strategy() != 'exhaustive':
-      cls.TestMatrix.add_constraint(lambda v:\
+      cls.ImpalaTestMatrix.add_constraint(lambda v:\
           v.get_value('exec_option')['batch_size'] == 0)
     else:
-      cls.TestMatrix.add_constraint(lambda v:\
+      cls.ImpalaTestMatrix.add_constraint(lambda v:\
           v.get_value('exec_option')['batch_size'] != 1)
 
+  @pytest.mark.xfail(run=False, reason="IMPALA-2605: the stress tests have a history of "
+                     "causing the end-to-end tests to hang")
   @pytest.mark.stress
   def test_mini_stress(self, vector):
     for i in xrange(NUM_ITERATIONS):
       self.run_test_case('stress', vector)
 
+  @pytest.mark.xfail(run=False, reason="IMPALA-2605: the stress tests have a history of "
+                     "causing the end-to-end tests to hang")
   @pytest.mark.stress
   def test_sort_stress(self, vector):
     if self.exploration_strategy() == 'core':

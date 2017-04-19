@@ -1,21 +1,23 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "runtime/lib-cache.h"
 
 #include <boost/filesystem.hpp>
-#include <boost/foreach.hpp>
 #include <boost/thread/locks.hpp>
 
 #include "codegen/llvm-codegen.h"
@@ -30,14 +32,14 @@
 #include "common/names.h"
 
 namespace filesystem = boost::filesystem;
-using namespace impala;
 
-DEFINE_string(local_library_dir, "/tmp",
-              "Local directory to copy UDF libraries from HDFS into");
+DECLARE_string(local_library_dir);
+
+namespace impala {
 
 scoped_ptr<LibCache> LibCache::instance_;
 
-struct LibCache::LibCacheEntry {
+struct LibCacheEntry {
   // Lock protecting all fields in this entry
   boost::mutex lock;
 
@@ -54,7 +56,7 @@ struct LibCache::LibCacheEntry {
   bool check_needs_refresh;
 
   // The type of this file.
-  LibType type;
+  LibCache::LibType type;
 
   // The path on the local file system for this library.
   std::string local_path;
@@ -118,7 +120,7 @@ Status LibCache::InitInternal() {
   return Status::OK();
 }
 
-LibCache::LibCacheEntry::~LibCacheEntry() {
+LibCacheEntry::~LibCacheEntry() {
   if (shared_object_handle != NULL) {
     DCHECK_EQ(use_count, 0);
     DCHECK(should_remove);
@@ -261,7 +263,7 @@ void LibCache::RemoveEntryInternal(const string& hdfs_lib_file,
 
 void LibCache::DropCache() {
   unique_lock<mutex> lib_cache_lock(lock_);
-  BOOST_FOREACH(LibMap::value_type& v, lib_cache_) {
+  for (LibMap::value_type& v: lib_cache_) {
     bool can_delete = false;
     {
       // Lock to wait for any threads currently processing the entry.
@@ -396,13 +398,10 @@ Status LibCache::GetCacheEntryInternal(const string& hdfs_lib_file, LibType type
     RETURN_IF_ERROR(
         DynamicOpen((*entry)->local_path.c_str(), &(*entry)->shared_object_handle));
   } else if (type == TYPE_IR) {
-    // Load the module and populate all symbols.
-    ObjectPool pool;
-    scoped_ptr<LlvmCodeGen> codegen;
-    string module_id = filesystem::path((*entry)->local_path).stem().string();
-    RETURN_IF_ERROR(LlvmCodeGen::LoadFromFile(
-        &pool, (*entry)->local_path, module_id, &codegen));
-    codegen->GetSymbols(&(*entry)->symbols);
+    // Load the module temporarily and populate all symbols.
+    const string file = (*entry)->local_path;
+    const string module_id = filesystem::path(file).stem().string();
+    RETURN_IF_ERROR(LlvmCodeGen::GetSymbols(file, module_id, &(*entry)->symbols));
   } else {
     DCHECK_EQ(type, TYPE_JAR);
     // Nothing to do.
@@ -416,6 +415,8 @@ string LibCache::MakeLocalPath(const string& hdfs_path, const string& local_dir)
   filesystem::path src(hdfs_path);
   stringstream dst;
   dst << local_dir << "/" << src.stem().native() << "." << getpid() << "."
-      << (num_libs_copied_++) << src.extension().native();
+      << (num_libs_copied_.Add(1) - 1) << src.extension().native();
   return dst.str();
+}
+
 }

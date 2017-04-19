@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "catalog/catalog-server.h"
 
@@ -20,6 +23,8 @@
 #include "catalog/catalog-util.h"
 #include "statestore/statestore-subscriber.h"
 #include "util/debug-util.h"
+#include "util/logging-support.h"
+#include "util/webserver.h"
 #include "gen-cpp/CatalogInternalService_types.h"
 #include "gen-cpp/CatalogObjects_types.h"
 #include "gen-cpp/CatalogService_types.h"
@@ -199,6 +204,8 @@ void CatalogServer::RegisterWebpages(Webserver* webserver) {
       bind<void>(mem_fn(&CatalogServer::CatalogObjectsUrlCallback), this, _1, _2);
   webserver->RegisterUrlCallback(CATALOG_OBJECT_WEB_PAGE, CATALOG_OBJECT_TEMPLATE,
       catalog_objects_callback, false);
+
+  RegisterLogLevelCallbacks(webserver, true);
 }
 
 void CatalogServer::UpdateCatalogTopicCallback(
@@ -229,7 +236,7 @@ void CatalogServer::UpdateCatalogTopicCallback(
     LOG_EVERY_N(INFO, 300) << "Catalog Version: " << catalog_objects_max_version_
                            << " Last Catalog Version: " << last_sent_catalog_version_;
 
-    BOOST_FOREACH(const TTopicItem& catalog_object, pending_topic_updates_) {
+    for (const TTopicItem& catalog_object: pending_topic_updates_) {
       if (subscriber_topic_updates->size() == 0) {
         subscriber_topic_updates->push_back(TTopicDelta());
         subscriber_topic_updates->back().topic_name = IMPALA_CATALOG_TOPIC;
@@ -247,7 +254,7 @@ void CatalogServer::UpdateCatalogTopicCallback(
   catalog_update_cv_.notify_one();
 }
 
-void CatalogServer::GatherCatalogUpdatesThread() {
+[[noreturn]] void CatalogServer::GatherCatalogUpdatesThread() {
   while (1) {
     unique_lock<mutex> unique_lock(catalog_lock_);
     // Protect against spurious wakups by checking the value of topic_updates_ready_.
@@ -294,7 +301,7 @@ void CatalogServer::BuildTopicUpdates(const vector<TCatalogObject>& catalog_obje
   unordered_set<string> current_entry_keys;
 
   // Add any new/updated catalog objects to the topic.
-  BOOST_FOREACH(const TCatalogObject& catalog_object, catalog_objects) {
+  for (const TCatalogObject& catalog_object: catalog_objects) {
     const string& entry_key = TCatalogObjectToEntryKey(catalog_object);
     if (entry_key.empty()) {
       LOG_EVERY_N(WARNING, 60) << "Unable to build topic entry key for TCatalogObject: "
@@ -325,7 +332,7 @@ void CatalogServer::BuildTopicUpdates(const vector<TCatalogObject>& catalog_obje
 
   // Any remaining items in catalog_topic_entry_keys_ indicate the object was removed
   // since the last update.
-  BOOST_FOREACH(const string& key, catalog_topic_entry_keys_) {
+  for (const string& key: catalog_topic_entry_keys_) {
     pending_topic_updates_.push_back(TTopicItem());
     TTopicItem& item = pending_topic_updates_.back();
     item.key = key;
@@ -345,7 +352,7 @@ void CatalogServer::CatalogUrlCallback(const Webserver::ArgumentMap& args,
     return;
   }
   Value databases(kArrayType);
-  BOOST_FOREACH(const TDatabase& db, get_dbs_result.dbs) {
+  for (const TDatabase& db: get_dbs_result.dbs) {
     Value database(kObjectType);
     Value str(db.db_name.c_str(), document->GetAllocator());
     database.AddMember("name", str, document->GetAllocator());
@@ -359,7 +366,7 @@ void CatalogServer::CatalogUrlCallback(const Webserver::ArgumentMap& args,
     }
 
     Value table_array(kArrayType);
-    BOOST_FOREACH(const string& table, get_table_results.tables) {
+    for (const string& table: get_table_results.tables) {
       Value table_obj(kObjectType);
       Value fq_name(Substitute("$0.$1", db.db_name, table).c_str(),
           document->GetAllocator());

@@ -1,23 +1,29 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/hdfs-parquet-table-writer.h"
 
 #include "common/version.h"
-#include "exprs/expr.h"
+#include "exec/parquet-column-stats.inline.h"
 #include "exprs/expr-context.h"
+#include "exprs/expr.h"
+#include "rpc/thrift-util.h"
 #include "runtime/decimal-value.h"
+#include "runtime/mem-tracker.h"
 #include "runtime/raw-value.h"
 #include "runtime/row-batch.h"
 #include "runtime/runtime-state.h"
@@ -30,7 +36,6 @@
 #include "util/dict-encoding.h"
 #include "util/hdfs-util.h"
 #include "util/rle-encoding.h"
-#include "rpc/thrift-util.h"
 
 #include <sstream>
 
@@ -84,14 +89,20 @@ class HdfsParquetTableWriter::BaseColumnWriter {
   // expr - the expression to generate output values for this column.
   BaseColumnWriter(HdfsParquetTableWriter* parent, ExprContext* expr_ctx,
       const THdfsCompression::type& codec)
-    : parent_(parent), expr_ctx_(expr_ctx), codec_(codec),
-      page_size_(DEFAULT_DATA_PAGE_SIZE), current_page_(NULL), num_values_(0),
+    : parent_(parent),
+      expr_ctx_(expr_ctx),
+      codec_(codec),
+      page_size_(DEFAULT_DATA_PAGE_SIZE),
+      current_page_(nullptr),
+      num_values_(0),
       total_compressed_byte_size_(0),
       total_uncompressed_byte_size_(0),
-      dict_encoder_base_(NULL),
-      def_levels_(NULL),
-      values_buffer_len_(DEFAULT_DATA_PAGE_SIZE) {
-    Codec::CreateCompressor(NULL, false, codec, &compressor_);
+      dict_encoder_base_(nullptr),
+      def_levels_(nullptr),
+      values_buffer_len_(DEFAULT_DATA_PAGE_SIZE),
+      page_stats_base_(nullptr),
+      row_group_stats_base_(nullptr) {
+    Codec::CreateCompressor(nullptr, false, codec, &compressor_);
 
     def_levels_ = parent_->state_->obj_pool()->Add(
         new RleEncoder(parent_->reusable_col_mem_pool_->Allocate(DEFAULT_DATA_PAGE_SIZE),
@@ -118,23 +129,40 @@ class HdfsParquetTableWriter::BaseColumnWriter {
   Status Flush(int64_t* file_pos, int64_t* first_data_page,
       int64_t* first_dictionary_page);
 
+  // Encodes the row group statistics into a parquet::Statistics object and attaches it to
+  // 'meta_data'.
+  void EncodeRowGroupStats(ColumnMetaData* meta_data) {
+    DCHECK(row_group_stats_base_ != nullptr);
+    if (row_group_stats_base_->has_values()
+        && row_group_stats_base_->BytesNeeded() <= MAX_COLUMN_STATS_SIZE) {
+      row_group_stats_base_->EncodeToThrift(&meta_data->statistics);
+      meta_data->__isset.statistics = true;
+    }
+  }
+
   // Resets all the data accumulated for this column.  Memory can now be reused for
   // the next row group
   // Any data for previous row groups must be reset (e.g. dictionaries).
   // Subclasses must call this if they override this function.
   virtual void Reset() {
     num_data_pages_ = 0;
-    current_page_ = NULL;
+    current_page_ = nullptr;
     num_values_ = 0;
     total_compressed_byte_size_ = 0;
     current_encoding_ = Encoding::PLAIN;
+    column_encodings_.clear();
+    dict_encoding_stats_.clear();
+    data_encoding_stats_.clear();
+    // Repetition/definition level encodings are constant. Incorporate them here.
+    column_encodings_.insert(Encoding::RLE);
+    column_encodings_.insert(Encoding::BIT_PACKED);
   }
 
   // Close this writer. This is only called after Flush() and no more rows will
   // be added.
   void Close() {
-    if (compressor_.get() != NULL) compressor_->Close();
-    if (dict_encoder_base_ != NULL) dict_encoder_base_->ClearIndices();
+    if (compressor_.get() != nullptr) compressor_->Close();
+    if (dict_encoder_base_ != nullptr) dict_encoder_base_->ClearIndices();
   }
 
   const ColumnType& type() const { return expr_ctx_->root()->type(); }
@@ -148,13 +176,14 @@ class HdfsParquetTableWriter::BaseColumnWriter {
  protected:
   friend class HdfsParquetTableWriter;
 
-  // Encode value into the current page output buffer. Returns true if the value fits
-  // on the current page. If this function returned false, the caller should create a
-  // new page and try again with the same value.
+  // Encodes value into the current page output buffer and updates the column statistics
+  // aggregates. Returns true if the value fits on the current page. If this function
+  // returned false, the caller should create a new page and try again with the same
+  // value.
   // *bytes_needed will contain the (estimated) number of bytes needed to successfully
   // encode the value in the page.
   // Implemented in the subclass.
-  virtual bool EncodeValue(void* value, int64_t* bytes_needed) = 0;
+  virtual bool ProcessValue(void* value, int64_t* bytes_needed) = 0;
 
   // Encodes out all data for the current page and updates the metadata.
   virtual void FinalizeCurrentPage();
@@ -190,7 +219,8 @@ class HdfsParquetTableWriter::BaseColumnWriter {
 
   THdfsCompression::type codec_;
 
-  // Compression codec for this column.  If NULL, this column is will not be compressed.
+  // Compression codec for this column.  If nullptr, this column is will not be
+  // compressed.
   scoped_ptr<Codec> compressor_;
 
   vector<DataPage> pages_;
@@ -206,25 +236,41 @@ class HdfsParquetTableWriter::BaseColumnWriter {
   // TODO: Consider removing and only creating a single large page as necessary.
   int64_t page_size_;
 
+  // Pointer to the current page in 'pages_'. Not owned.
   DataPage* current_page_;
-  int64_t num_values_; // Total number of values across all pages, including NULLs.
+
+  int64_t num_values_; // Total number of values across all pages, including nullptr.
   int64_t total_compressed_byte_size_;
   int64_t total_uncompressed_byte_size_;
   Encoding::type current_encoding_;
 
-  // Created and set by the base class.
+  // Set of all encodings used in the column chunk
+  unordered_set<Encoding::type> column_encodings_;
+
+  // Map from the encoding to the number of pages in the column chunk with this encoding
+  // These are used to construct the PageEncodingStats, which provide information
+  // about encoding usage for each different page type. Currently, only dictionary
+  // and data pages are used.
+  unordered_map<Encoding::type, int> dict_encoding_stats_;
+  unordered_map<Encoding::type, int> data_encoding_stats_;
+
+  // Created, owned, and set by the derived class.
   DictEncoderBase* dict_encoder_base_;
 
-  // Rle encoder object for storing definition levels. For non-nested schemas,
-  // this always uses 1 bit per row.
-  // This is reused across pages since the underlying buffer is copied out when
-  // the page is finalized.
+  // Rle encoder object for storing definition levels, owned by instances of this class.
+  // For non-nested schemas, this always uses 1 bit per row. This is reused across pages
+  // since the underlying buffer is copied out when the page is finalized.
   RleEncoder* def_levels_;
 
-  // Data for buffered values. This is reused across pages.
+  // Data for buffered values. This is owned by instances of this class and gets reused
+  // across pages.
   uint8_t* values_buffer_;
   // The size of values_buffer_.
   int values_buffer_len_;
+
+  // Pointers to statistics, created, owned, and set by the derived class.
+  ColumnStatsBase* page_stats_base_;
+  ColumnStatsBase* row_group_stats_base_;
 };
 
 // Per type column writer.
@@ -233,10 +279,16 @@ class HdfsParquetTableWriter::ColumnWriter :
     public HdfsParquetTableWriter::BaseColumnWriter {
  public:
   ColumnWriter(HdfsParquetTableWriter* parent, ExprContext* ctx,
-      const THdfsCompression::type& codec) : BaseColumnWriter(parent, ctx, codec),
-      num_values_since_dict_size_check_(0) {
+      const THdfsCompression::type& codec)
+    : BaseColumnWriter(parent, ctx, codec),
+      num_values_since_dict_size_check_(0),
+      plain_encoded_value_size_(
+          ParquetPlainEncoder::EncodedByteSize(ctx->root()->type())),
+      page_stats_(plain_encoded_value_size_),
+      row_group_stats_(plain_encoded_value_size_) {
     DCHECK_NE(ctx->root()->type().type, TYPE_BOOLEAN);
-    encoded_value_size_ = ParquetPlainEncoder::ByteSize(ctx->root()->type());
+    page_stats_base_ = &page_stats_;
+    row_group_stats_base_ = &row_group_stats_;
   }
 
   virtual void Reset() {
@@ -245,12 +297,14 @@ class HdfsParquetTableWriter::ColumnWriter :
     // it will fall back to plain.
     current_encoding_ = Encoding::PLAIN_DICTIONARY;
     dict_encoder_.reset(
-        new DictEncoder<T>(parent_->per_file_mem_pool_.get(), encoded_value_size_));
+        new DictEncoder<T>(parent_->per_file_mem_pool_.get(), plain_encoded_value_size_));
     dict_encoder_base_ = dict_encoder_.get();
+    page_stats_.Reset();
+    row_group_stats_.Reset();
   }
 
  protected:
-  virtual bool EncodeValue(void* value, int64_t* bytes_needed) {
+  virtual bool ProcessValue(void* value, int64_t* bytes_needed) {
     if (current_encoding_ == Encoding::PLAIN_DICTIONARY) {
       if (UNLIKELY(num_values_since_dict_size_check_ >=
                    DICTIONARY_DATA_PAGE_SIZE_CHECK_PERIOD)) {
@@ -269,20 +323,22 @@ class HdfsParquetTableWriter::ColumnWriter :
       parent_->file_size_estimate_ += *bytes_needed;
     } else if (current_encoding_ == Encoding::PLAIN) {
       T* v = CastValue(value);
-      *bytes_needed = encoded_value_size_ < 0 ?
-          ParquetPlainEncoder::ByteSize<T>(*v) : encoded_value_size_;
+      *bytes_needed = plain_encoded_value_size_ < 0 ?
+          ParquetPlainEncoder::ByteSize<T>(*v) :
+          plain_encoded_value_size_;
       if (current_page_->header.uncompressed_page_size + *bytes_needed > page_size_) {
         return false;
       }
       uint8_t* dst_ptr = values_buffer_ + current_page_->header.uncompressed_page_size;
       int64_t written_len =
-          ParquetPlainEncoder::Encode(dst_ptr, encoded_value_size_, *v);
+          ParquetPlainEncoder::Encode(dst_ptr, plain_encoded_value_size_, *v);
       DCHECK_EQ(*bytes_needed, written_len);
       current_page_->header.uncompressed_page_size += written_len;
     } else {
       // TODO: support other encodings here
       DCHECK(false);
     }
+    page_stats_.Update(*CastValue(value));
     return true;
   }
 
@@ -297,16 +353,22 @@ class HdfsParquetTableWriter::ColumnWriter :
   static const int DICTIONARY_DATA_PAGE_SIZE_CHECK_PERIOD = 100;
 
   // Encoder for dictionary encoding for different columns. Only one is set.
-  scoped_ptr<DictEncoder<T> > dict_encoder_;
+  scoped_ptr<DictEncoder<T>> dict_encoder_;
 
   // The number of values added since we last checked the dictionary.
   int num_values_since_dict_size_check_;
 
-  // Size of each encoded value. -1 if the size is type is variable-length.
-  int64_t encoded_value_size_;
+  // Size of each encoded value in plain encoding. -1 if the type is variable-length.
+  int64_t plain_encoded_value_size_;
 
   // Temporary string value to hold CHAR(N)
   StringValue temp_;
+
+  // Tracks statistics per page.
+  ColumnStats<T> page_stats_;
+
+  // Tracks statistics per row group. This gets reset when starting a new row group.
+  ColumnStats<T> row_group_stats_;
 
   // Converts a slot pointer to a raw value suitable for encoding
   inline T* CastValue(void* value) {
@@ -330,23 +392,30 @@ class HdfsParquetTableWriter::BoolColumnWriter :
     public HdfsParquetTableWriter::BaseColumnWriter {
  public:
   BoolColumnWriter(HdfsParquetTableWriter* parent, ExprContext* ctx,
-      const THdfsCompression::type& codec) : BaseColumnWriter(parent, ctx, codec) {
+      const THdfsCompression::type& codec)
+    : BaseColumnWriter(parent, ctx, codec), page_stats_(-1), row_group_stats_(-1) {
     DCHECK_EQ(ctx->root()->type().type, TYPE_BOOLEAN);
     bool_values_ = parent_->state_->obj_pool()->Add(
         new BitWriter(values_buffer_, values_buffer_len_));
     // Dictionary encoding doesn't make sense for bools and is not allowed by
     // the format.
     current_encoding_ = Encoding::PLAIN;
-    dict_encoder_base_ = NULL;
+    dict_encoder_base_ = nullptr;
+
+    page_stats_base_ = &page_stats_;
+    row_group_stats_base_ = &row_group_stats_;
   }
 
  protected:
-  virtual bool EncodeValue(void* value, int64_t* bytes_needed) {
-    return bool_values_->PutValue(*reinterpret_cast<bool*>(value), 1);
+  virtual bool ProcessValue(void* value, int64_t* bytes_needed) {
+    bool v = *reinterpret_cast<bool*>(value);
+    if (!bool_values_->PutValue(v, 1)) return false;
+    page_stats_.Update(v);
+    return true;
   }
 
   virtual void FinalizeCurrentPage() {
-    DCHECK(current_page_ != NULL);
+    DCHECK(current_page_ != nullptr);
     if (current_page_->finalized) return;
     bool_values_->Flush();
     int num_bytes = bool_values_->bytes_written();
@@ -359,6 +428,12 @@ class HdfsParquetTableWriter::BoolColumnWriter :
  private:
   // Used to encode bools as single bit values. This is reused across pages.
   BitWriter* bool_values_;
+
+  // Tracks statistics per page.
+  ColumnStats<bool> page_stats_;
+
+  // Tracks statistics per row group. This gets reset when starting a new file.
+  ColumnStats<bool> row_group_stats_;
 };
 
 }
@@ -366,32 +441,37 @@ class HdfsParquetTableWriter::BoolColumnWriter :
 inline Status HdfsParquetTableWriter::BaseColumnWriter::AppendRow(TupleRow* row) {
   ++num_values_;
   void* value = expr_ctx_->GetValue(row);
-  if (current_page_ == NULL) NewPage();
+  if (current_page_ == nullptr) NewPage();
 
-  // We might need to try again if this current page is not big enough
+  // Ensure that we have enough space for the definition level, but don't write it yet in
+  // case we don't have enough space for the value.
+  if (def_levels_->buffer_full()) {
+    FinalizeCurrentPage();
+    NewPage();
+  }
+
+  // Encoding may fail for several reasons - because the current page is not big enough,
+  // because we've encoded the maximum number of unique dictionary values and need to
+  // switch to plain encoding, etc. so we may need to try again more than once.
+  // TODO: Have a clearer set of state transitions here, to make it easier to see that
+  // this won't loop forever.
   while (true) {
-    if (!def_levels_->Put(value != NULL)) {
-      FinalizeCurrentPage();
-      NewPage();
-      bool ret = def_levels_->Put(value != NULL);
-      DCHECK(ret);
-    }
-
     // Nulls don't get encoded.
-    if (value == NULL) break;
-    ++current_page_->num_non_null;
+    if (value == nullptr) break;
 
     int64_t bytes_needed = 0;
-    if (EncodeValue(value, &bytes_needed)) break;
+    if (ProcessValue(value, &bytes_needed)) {
+      ++current_page_->num_non_null;
+      break;
+    }
 
     // Value didn't fit on page, try again on a new page.
     FinalizeCurrentPage();
 
-    // Check how much space it is needed to write this value. If that is larger than the
+    // Check how much space is needed to write this value. If that is larger than the
     // page size then increase page size and try again.
     if (UNLIKELY(bytes_needed > page_size_)) {
-      page_size_ = bytes_needed;
-      if (page_size_ > MAX_DATA_PAGE_SIZE) {
+      if (bytes_needed > MAX_DATA_PAGE_SIZE) {
         stringstream ss;
         ss << "Cannot write value of size "
            << PrettyPrinter::Print(bytes_needed, TUnit::BYTES) << " bytes to a Parquet "
@@ -399,17 +479,25 @@ inline Status HdfsParquetTableWriter::BaseColumnWriter::AppendRow(TupleRow* row)
            << PrettyPrinter::Print(MAX_DATA_PAGE_SIZE , TUnit::BYTES) << ".";
         return Status(ss.str());
       }
+      page_size_ = bytes_needed;
       values_buffer_len_ = page_size_;
       values_buffer_ = parent_->reusable_col_mem_pool_->Allocate(values_buffer_len_);
     }
     NewPage();
   }
+
+  // Now that the value has been successfully written, write the definition level.
+  bool ret = def_levels_->Put(value != nullptr);
+  // Writing the def level will succeed because we ensured there was enough space for it
+  // above, and new pages will always have space for at least a single def level.
+  DCHECK(ret);
+
   ++current_page_->header.data_page_header.num_values;
   return Status::OK();
 }
 
 inline void HdfsParquetTableWriter::BaseColumnWriter::WriteDictDataPage() {
-  DCHECK(dict_encoder_base_ != NULL);
+  DCHECK(dict_encoder_base_ != nullptr);
   DCHECK_EQ(current_page_->header.uncompressed_page_size, 0);
   if (current_page_->num_non_null == 0) return;
   int len = dict_encoder_base_->WriteData(values_buffer_, values_buffer_len_);
@@ -426,7 +514,7 @@ inline void HdfsParquetTableWriter::BaseColumnWriter::WriteDictDataPage() {
 
 Status HdfsParquetTableWriter::BaseColumnWriter::Flush(int64_t* file_pos,
    int64_t* first_data_page, int64_t* first_dictionary_page) {
-  if (current_page_ == NULL) {
+  if (current_page_ == nullptr) {
     // This column/file is empty
     *first_data_page = *file_pos;
     *first_dictionary_page = -1;
@@ -437,12 +525,13 @@ Status HdfsParquetTableWriter::BaseColumnWriter::Flush(int64_t* file_pos,
 
   *first_dictionary_page = -1;
   // First write the dictionary page before any of the data pages.
-  if (dict_encoder_base_ != NULL) {
+  if (dict_encoder_base_ != nullptr) {
     *first_dictionary_page = *file_pos;
     // Write dictionary page header
     DictionaryPageHeader dict_header;
     dict_header.num_values = dict_encoder_base_->num_entries();
     dict_header.encoding = Encoding::PLAIN_DICTIONARY;
+    ++dict_encoding_stats_[dict_header.encoding];
 
     PageHeader header;
     header.type = PageType::DICTIONARY_PAGE;
@@ -453,7 +542,7 @@ Status HdfsParquetTableWriter::BaseColumnWriter::Flush(int64_t* file_pos,
     uint8_t* dict_buffer = parent_->per_file_mem_pool_->Allocate(
         header.uncompressed_page_size);
     dict_encoder_base_->WriteDict(dict_buffer);
-    if (compressor_.get() != NULL) {
+    if (compressor_.get() != nullptr) {
       SCOPED_TIMER(parent_->parent_->compress_timer());
       int64_t max_compressed_size =
           compressor_->MaxOutputLen(header.uncompressed_page_size);
@@ -492,15 +581,13 @@ Status HdfsParquetTableWriter::BaseColumnWriter::Flush(int64_t* file_pos,
   for (int i = 0; i < num_data_pages_; ++i) {
     DataPage& page = pages_[i];
 
-    // Last page might be empty
     if (page.header.data_page_header.num_values == 0) {
-      DCHECK_EQ(page.header.compressed_page_size, 0);
-      DCHECK_EQ(i, num_data_pages_ - 1);
+      // Skip empty pages
       continue;
     }
 
     // Write data page header
-    uint8_t* buffer = NULL;
+    uint8_t* buffer = nullptr;
     uint32_t len = 0;
     RETURN_IF_ERROR(
         parent_->thrift_serializer_->Serialize(&page.header, &len, &buffer));
@@ -515,10 +602,10 @@ Status HdfsParquetTableWriter::BaseColumnWriter::Flush(int64_t* file_pos,
 }
 
 void HdfsParquetTableWriter::BaseColumnWriter::FinalizeCurrentPage() {
-  DCHECK(current_page_ != NULL);
+  DCHECK(current_page_ != nullptr);
   if (current_page_->finalized) return;
 
-  // If the entire page was NULL, encode it as PLAIN since there is no
+  // If the entire page was nullptr, encode it as PLAIN since there is no
   // data anyway. We don't output a useless dictionary page and it works
   // around a parquet MR bug (see IMPALA-759 for more details).
   if (current_page_->num_non_null == 0) current_encoding_ = Encoding::PLAIN;
@@ -528,14 +615,18 @@ void HdfsParquetTableWriter::BaseColumnWriter::FinalizeCurrentPage() {
   PageHeader& header = current_page_->header;
   header.data_page_header.encoding = current_encoding_;
 
+  // Accumulate encoding statistics
+  column_encodings_.insert(header.data_page_header.encoding);
+  ++data_encoding_stats_[header.data_page_header.encoding];
+
   // Compute size of definition bits
   def_levels_->Flush();
   current_page_->num_def_bytes = sizeof(int32_t) + def_levels_->len();
   header.uncompressed_page_size += current_page_->num_def_bytes;
 
   // At this point we know all the data for the data page.  Combine them into one buffer.
-  uint8_t* uncompressed_data = NULL;
-  if (compressor_.get() == NULL) {
+  uint8_t* uncompressed_data = nullptr;
+  if (compressor_.get() == nullptr) {
     uncompressed_data =
         parent_->per_file_mem_pool_->Allocate(header.uncompressed_page_size);
   } else {
@@ -556,8 +647,8 @@ void HdfsParquetTableWriter::BaseColumnWriter::FinalizeCurrentPage() {
   buffer.Append(values_buffer_, buffer.capacity() - buffer.size());
 
   // Apply compression if necessary
-  if (compressor_.get() == NULL) {
-    current_page_->data = reinterpret_cast<uint8_t*>(uncompressed_data);
+  if (compressor_.get() == nullptr) {
+    current_page_->data = uncompressed_data;
     header.compressed_page_size = header.uncompressed_page_size;
   } else {
     SCOPED_TIMER(parent_->parent_->compress_timer());
@@ -575,6 +666,18 @@ void HdfsParquetTableWriter::BaseColumnWriter::FinalizeCurrentPage() {
     parent_->per_file_mem_pool_->ReturnPartialAllocation(
         max_compressed_size - header.compressed_page_size);
   }
+
+  // Build page statistics and add them to the header.
+  DCHECK(page_stats_base_ != nullptr);
+  if (page_stats_base_->has_values()
+      && page_stats_base_->BytesNeeded() <= MAX_COLUMN_STATS_SIZE) {
+    page_stats_base_->EncodeToThrift(&header.data_page_header.statistics);
+    header.data_page_header.__isset.statistics = true;
+  }
+
+  // Update row group statistics from page statistics.
+  DCHECK(row_group_stats_base_ != nullptr);
+  row_group_stats_base_->Merge(*page_stats_base_);
 
   // Add the size of the data page header
   uint8_t* header_buffer;
@@ -602,27 +705,29 @@ void HdfsParquetTableWriter::BaseColumnWriter::NewPage() {
 
     DataPageHeader header;
     header.num_values = 0;
+    // The code that populates the column chunk metadata's encodings field
+    // relies on these specific values for the definition/repetition level
+    // encodings.
     header.definition_level_encoding = Encoding::RLE;
     header.repetition_level_encoding = Encoding::BIT_PACKED;
     current_page_->header.__set_data_page_header(header);
   }
   current_page_->finalized = false;
   current_page_->num_non_null = 0;
+  page_stats_base_->Reset();
 }
 
 HdfsParquetTableWriter::HdfsParquetTableWriter(HdfsTableSink* parent, RuntimeState* state,
     OutputPartition* output, const HdfsPartitionDescriptor* part_desc,
     const HdfsTableDescriptor* table_desc, const vector<ExprContext*>& output_expr_ctxs)
-    : HdfsTableWriter(
-        parent, state, output, part_desc, table_desc, output_expr_ctxs),
-      thrift_serializer_(new ThriftSerializer(true)),
-      current_row_group_(NULL),
-      row_count_(0),
-      file_size_limit_(0),
-      reusable_col_mem_pool_(new MemPool(parent_->mem_tracker())),
-      per_file_mem_pool_(new MemPool(parent_->mem_tracker())),
-      row_idx_(0) {
-}
+  : HdfsTableWriter(parent, state, output, part_desc, table_desc, output_expr_ctxs),
+    thrift_serializer_(new ThriftSerializer(true)),
+    current_row_group_(nullptr),
+    row_count_(0),
+    file_size_limit_(0),
+    reusable_col_mem_pool_(new MemPool(parent_->mem_tracker())),
+    per_file_mem_pool_(new MemPool(parent_->mem_tracker())),
+    row_idx_(0) {}
 
 HdfsParquetTableWriter::~HdfsParquetTableWriter() {
 }
@@ -632,8 +737,8 @@ Status HdfsParquetTableWriter::Init() {
   file_metadata_.version = PARQUET_CURRENT_VERSION;
 
   stringstream created_by;
-  created_by << "impala version " << IMPALA_BUILD_VERSION
-             << " (build " << IMPALA_BUILD_HASH << ")";
+  created_by << "impala version " << GetDaemonBuildVersion()
+             << " (build " << GetDaemonBuildHash() << ")";
   file_metadata_.__set_created_by(created_by.str());
 
   // Default to snappy compressed
@@ -656,7 +761,7 @@ Status HdfsParquetTableWriter::Init() {
   columns_.resize(table_desc_->num_cols() - table_desc_->num_clustering_cols());
   // Initialize each column structure.
   for (int i = 0; i < columns_.size(); ++i) {
-    BaseColumnWriter* writer = NULL;
+    BaseColumnWriter* writer = nullptr;
     const ColumnType& type = output_expr_ctxs_[i]->root()->type();
     switch (type.type) {
       case TYPE_BOOLEAN:
@@ -718,7 +823,7 @@ Status HdfsParquetTableWriter::Init() {
       default:
         DCHECK(false);
     }
-    columns_[i] = state_->obj_pool()->Add(writer);
+    columns_[i].reset(writer);
     columns_[i]->Reset();
   }
   RETURN_IF_ERROR(CreateSchema());
@@ -750,7 +855,9 @@ Status HdfsParquetTableWriter::CreateSchema() {
           ParquetPlainEncoder::DecimalSize(output_expr_ctxs_[i]->root()->type()));
       node.__set_scale(output_expr_ctxs_[i]->root()->type().scale);
       node.__set_precision(output_expr_ctxs_[i]->root()->type().precision);
-    } else if (type.type == TYPE_VARCHAR || type.type == TYPE_CHAR) {
+    } else if (type.type == TYPE_VARCHAR || type.type == TYPE_CHAR ||
+        (type.type == TYPE_STRING &&
+         state_->query_options().parquet_annotate_strings_utf8)) {
       node.__set_converted_type(ConvertedType::UTF8);
     }
   }
@@ -759,7 +866,7 @@ Status HdfsParquetTableWriter::CreateSchema() {
 }
 
 Status HdfsParquetTableWriter::AddRowGroup() {
-  if (current_row_group_ != NULL) RETURN_IF_ERROR(FlushCurrentRowGroup());
+  if (current_row_group_ != nullptr) RETURN_IF_ERROR(FlushCurrentRowGroup());
   file_metadata_.row_groups.push_back(RowGroup());
   current_row_group_ = &file_metadata_.row_groups[file_metadata_.row_groups.size() - 1];
 
@@ -769,13 +876,6 @@ Status HdfsParquetTableWriter::AddRowGroup() {
   for (int i = 0; i < columns_.size(); ++i) {
     ColumnMetaData metadata;
     metadata.type = IMPALA_TO_PARQUET_TYPES[columns_[i]->expr_ctx_->root()->type().type];
-    // Add all encodings that were used in this file.  Currently we use PLAIN and
-    // PLAIN_DICTIONARY for data values and RLE for the definition levels.
-    metadata.encodings.push_back(Encoding::RLE);
-    // Columns are initially dictionary encoded
-    // TODO: we might not have PLAIN encoding in this case
-    metadata.encodings.push_back(Encoding::PLAIN_DICTIONARY);
-    metadata.encodings.push_back(Encoding::PLAIN);
     metadata.path_in_schema.push_back(
         table_desc_->col_descs()[i + num_clustering_cols].name());
     metadata.codec = columns_[i]->codec();
@@ -808,12 +908,12 @@ uint64_t HdfsParquetTableWriter::default_block_size() const {
 }
 
 Status HdfsParquetTableWriter::InitNewFile() {
-  DCHECK(current_row_group_ == NULL);
+  DCHECK(current_row_group_ == nullptr);
 
   per_file_mem_pool_->Clear();
 
   // Get the file limit
-  RETURN_IF_ERROR(HdfsTableSink::GetFileBlockSize(output_, &file_size_limit_));
+  file_size_limit_ = output_->block_size;
   if (file_size_limit_ < HDFS_MIN_FILE_SIZE) {
     stringstream ss;
     ss << "Hdfs file size (" << file_size_limit_ << ") is too small.";
@@ -855,8 +955,8 @@ Status HdfsParquetTableWriter::InitNewFile() {
   return Status::OK();
 }
 
-Status HdfsParquetTableWriter::AppendRowBatch(RowBatch* batch,
-    const vector<int32_t>& row_group_indices, bool* new_file) {
+Status HdfsParquetTableWriter::AppendRows(
+    RowBatch* batch, const vector<int32_t>& row_group_indices, bool* new_file) {
   SCOPED_TIMER(parent_->encode_timer());
   *new_file = false;
   int limit;
@@ -898,7 +998,7 @@ Status HdfsParquetTableWriter::Finalize() {
   file_metadata_.num_rows = row_count_;
   RETURN_IF_ERROR(FlushCurrentRowGroup());
   RETURN_IF_ERROR(WriteFileFooter());
-  stats_.__set_parquet_stats(parquet_stats_);
+  stats_.__set_parquet_stats(parquet_insert_stats_);
   COUNTER_ADD(parent_->rows_inserted_counter(), row_count_);
   return Status::OK();
 }
@@ -922,7 +1022,7 @@ Status HdfsParquetTableWriter::WriteFileHeader() {
 }
 
 Status HdfsParquetTableWriter::FlushCurrentRowGroup() {
-  if (current_row_group_ == NULL) return Status::OK();
+  if (current_row_group_ == nullptr) return Status::OK();
 
   int num_clustering_cols = table_desc_->num_clustering_cols();
   for (int i = 0; i < columns_.size(); ++i) {
@@ -931,49 +1031,89 @@ Status HdfsParquetTableWriter::FlushCurrentRowGroup() {
     RETURN_IF_ERROR(columns_[i]->Flush(&file_pos_, &data_page_offset, &dict_page_offset));
     DCHECK_GT(data_page_offset, 0);
 
-    current_row_group_->columns[i].meta_data.data_page_offset = data_page_offset;
+    ColumnChunk& col_chunk = current_row_group_->columns[i];
+    ColumnMetaData& col_metadata = col_chunk.meta_data;
+    col_metadata.data_page_offset = data_page_offset;
     if (dict_page_offset >= 0) {
-      current_row_group_->columns[i].meta_data.__set_dictionary_page_offset(
-          dict_page_offset);
+      col_metadata.__set_dictionary_page_offset(dict_page_offset);
     }
 
-    current_row_group_->columns[i].meta_data.num_values = columns_[i]->num_values();
-    current_row_group_->columns[i].meta_data.total_uncompressed_size =
-        columns_[i]->total_uncompressed_size();
-    current_row_group_->columns[i].meta_data.total_compressed_size =
-        columns_[i]->total_compressed_size();
-    current_row_group_->total_byte_size += columns_[i]->total_compressed_size();
-    current_row_group_->num_rows = columns_[i]->num_values();
+    BaseColumnWriter* col_writer = columns_[i].get();
+    col_metadata.num_values = col_writer->num_values();
+    col_metadata.total_uncompressed_size = col_writer->total_uncompressed_size();
+    col_metadata.total_compressed_size = col_writer->total_compressed_size();
+    current_row_group_->total_byte_size += col_writer->total_compressed_size();
+    current_row_group_->num_rows = col_writer->num_values();
     current_row_group_->columns[i].file_offset = file_pos_;
     const string& col_name = table_desc_->col_descs()[i + num_clustering_cols].name();
-    parquet_stats_.per_column_size[col_name] += columns_[i]->total_compressed_size();
+    parquet_insert_stats_.per_column_size[col_name] +=
+        col_writer->total_compressed_size();
+
+    // Write encodings and encoding stats for this column
+    col_metadata.encodings.clear();
+    for (Encoding::type encoding : col_writer->column_encodings_) {
+      col_metadata.encodings.push_back(encoding);
+    }
+
+    vector<PageEncodingStats> encoding_stats;
+    // Add dictionary page encoding stats
+    for (const auto& entry: col_writer->dict_encoding_stats_) {
+      PageEncodingStats dict_enc_stat;
+      dict_enc_stat.page_type = PageType::DICTIONARY_PAGE;
+      dict_enc_stat.encoding = entry.first;
+      dict_enc_stat.count = entry.second;
+      encoding_stats.push_back(dict_enc_stat);
+    }
+    // Add data page encoding stats
+    for (const auto& entry: col_writer->data_encoding_stats_) {
+      PageEncodingStats data_enc_stat;
+      data_enc_stat.page_type = PageType::DATA_PAGE;
+      data_enc_stat.encoding = entry.first;
+      data_enc_stat.count = entry.second;
+      encoding_stats.push_back(data_enc_stat);
+    }
+    col_metadata.__set_encoding_stats(encoding_stats);
+
+    // Build column statistics and add them to the header.
+    col_writer->EncodeRowGroupStats(&current_row_group_->columns[i].meta_data);
 
     // Since we don't supported complex schemas, all columns should have the same
     // number of values.
     DCHECK_EQ(current_row_group_->columns[0].meta_data.num_values,
-        columns_[i]->num_values());
+        col_writer->num_values());
 
     // Metadata for this column is complete, write it out to file.  The column metadata
     // goes at the end so that when we have collocated files, the column data can be
     // written without buffering.
-    uint8_t* buffer = NULL;
+    uint8_t* buffer = nullptr;
     uint32_t len = 0;
     RETURN_IF_ERROR(
         thrift_serializer_->Serialize(&current_row_group_->columns[i], &len, &buffer));
     RETURN_IF_ERROR(Write(buffer, len));
     file_pos_ += len;
 
-    columns_[i]->Reset();
+    col_writer->Reset();
   }
 
-  current_row_group_ = NULL;
+  // Populate RowGroup::sorting_columns with all columns specified by the Frontend.
+  for (int col_idx : parent_->sort_by_columns()) {
+    current_row_group_->sorting_columns.push_back(parquet::SortingColumn());
+    parquet::SortingColumn& sorting_column = current_row_group_->sorting_columns.back();
+    sorting_column.column_idx = col_idx;
+    sorting_column.descending = false;
+    sorting_column.nulls_first = false;
+  }
+  current_row_group_->__isset.sorting_columns =
+      !current_row_group_->sorting_columns.empty();
+
+  current_row_group_ = nullptr;
   return Status::OK();
 }
 
 Status HdfsParquetTableWriter::WriteFileFooter() {
   // Write file_meta_data
   uint32_t file_metadata_len = 0;
-  uint8_t* buffer = NULL;
+  uint8_t* buffer = nullptr;
   RETURN_IF_ERROR(
       thrift_serializer_->Serialize(&file_metadata_, &file_metadata_len, &buffer));
   RETURN_IF_ERROR(Write(buffer, file_metadata_len));
@@ -983,4 +1123,3 @@ Status HdfsParquetTableWriter::WriteFileFooter() {
   RETURN_IF_ERROR(Write(PARQUET_VERSION_NUMBER, sizeof(PARQUET_VERSION_NUMBER)));
   return Status::OK();
 }
-

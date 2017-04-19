@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_SERVICE_IMPALA_SERVER_H
 #define IMPALA_SERVICE_IMPALA_SERVER_H
@@ -42,14 +45,14 @@
 #include "runtime/runtime-state.h"
 #include "runtime/timestamp-value.h"
 #include "runtime/types.h"
-#include "rapidjson/rapidjson.h"
+#include "statestore/statestore-subscriber.h"
 
 namespace impala {
 
 class ExecEnv;
 class DataSink;
 class CancellationWork;
-class Coordinator;
+class ImpalaHttpHandler;
 class RowDescriptor;
 class TCatalogUpdate;
 class TPlanExecRequest;
@@ -70,9 +73,34 @@ class TGetExecSummaryReq;
 /// An ImpalaServer contains both frontend and backend functionality;
 /// it implements ImpalaService (Beeswax), ImpalaHiveServer2Service (HiveServer2)
 /// and ImpalaInternalService APIs.
-/// This class is partially thread-safe. To ensure freedom from deadlock,
-/// locks on the maps are obtained before locks on the items contained in the maps.
-//
+///
+/// Locking
+/// -------
+/// This class is partially thread-safe. To ensure freedom from deadlock, if multiple
+/// locks are acquired, lower-numbered locks must be acquired before higher-numbered
+/// locks:
+/// 1. session_state_map_lock_
+/// 2. SessionState::lock
+/// 3. query_expiration_lock_
+/// 4. query_exec_state_map_lock_
+/// 5. QueryExecState::fetch_rows_lock
+/// 6. QueryExecState::lock
+/// 7. QueryExecState::expiration_data_lock_
+/// 8. Coordinator::exec_summary_lock
+///
+/// Coordinator::lock_ should not be acquired at the same time as the
+/// ImpalaServer/SessionState/QueryExecState locks. Aside from
+/// Coordinator::exec_summary_lock_ the Coordinator's lock ordering is independent of
+/// the above lock ordering.
+///
+/// The following locks are not held in conjunction with other locks:
+/// * query_log_lock_
+/// * session_timeout_lock_
+/// * query_locations_lock_
+/// * uuid_lock_
+/// * catalog_version_lock_
+/// * connection_to_sessions_map_lock_
+///
 /// TODO: The state of a running query is currently not cleaned up if the
 /// query doesn't experience any errors at runtime and close() doesn't get called.
 /// The solution is to have a separate thread that cleans up orphaned
@@ -232,62 +260,27 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   ///  - incoming_topic_deltas: all changes to registered statestore topics
   ///  - subscriber_topic_updates: output parameter to publish any topic updates to.
   ///                              Currently unused.
-  void MembershipCallback(const StatestoreSubscriber::TopicDeltaMap&
-      incoming_topic_deltas, std::vector<TTopicDelta>* subscriber_topic_updates);
+  void MembershipCallback(
+      const StatestoreSubscriber::TopicDeltaMap& incoming_topic_deltas,
+      std::vector<TTopicDelta>* subscriber_topic_updates);
 
   void CatalogUpdateCallback(const StatestoreSubscriber::TopicDeltaMap& topic_deltas,
       std::vector<TTopicDelta>* topic_updates);
 
-  /// Returns true if Impala is offline (and not accepting queries), false otherwise.
-  bool IsOffline() {
-    boost::lock_guard<boost::mutex> l(is_offline_lock_);
-    return is_offline_;
-  }
-
   /// Returns true if lineage logging is enabled, false otherwise.
   bool IsLineageLoggingEnabled();
 
+  /// Retuns true if this is a coordinator, false otherwise.
+  bool IsCoordinator();
+
+  /// The prefix of audit event log filename.
+  static const string AUDIT_EVENT_LOG_FILE_PREFIX;
+
  private:
   friend class ChildQuery;
+  friend class ImpalaHttpHandler;
 
-  /// Query result set stores converted rows returned by QueryExecState.fetchRows(). It
-  /// provides an interface to convert Impala rows to external API rows.
-  /// It is an abstract class. Subclass must implement AddOneRow().
-  class QueryResultSet {
-   public:
-    QueryResultSet() {}
-    virtual ~QueryResultSet() {}
-
-    /// Add the row (list of expr value) from a select query to this result set. When a row
-    /// comes from a select query, the row is in the form of expr values (void*). 'scales'
-    /// contains the values' scales (# of digits after decimal), with -1 indicating no
-    /// scale specified.
-    virtual Status AddOneRow(
-        const std::vector<void*>& row, const std::vector<int>& scales) = 0;
-
-    /// Add the TResultRow to this result set. When a row comes from a DDL/metadata
-    /// operation, the row in the form of TResultRow.
-    virtual Status AddOneRow(const TResultRow& row) = 0;
-
-    /// Copies rows in the range [start_idx, start_idx + num_rows) from the other result
-    /// set into this result set. Returns the number of rows added to this result set.
-    /// Returns 0 if the given range is out of bounds of the other result set.
-    virtual int AddRows(const QueryResultSet* other, int start_idx, int num_rows) = 0;
-
-    /// Returns the approximate size of this result set in bytes.
-    int64_t ByteSize() { return ByteSize(0, size()); }
-
-    /// Returns the approximate size of the given range of rows in bytes.
-    virtual int64_t ByteSize(int start_idx, int num_rows) = 0;
-
-    /// Returns the size of this result set in number of rows.
-    virtual size_t size() = 0;
-  };
-
-  /// Result set implementations for Beeswax and HS2
-  class AsciiQueryResultSet;
-  class HS2RowOrientedResultSet;
-  class HS2ColumnarResultSet;
+  boost::scoped_ptr<ImpalaHttpHandler> http_handler_;
 
   struct SessionState;
 
@@ -300,22 +293,14 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   static const char* SQLSTATE_GENERAL_ERROR;
   static const char* SQLSTATE_OPTIONAL_FEATURE_NOT_IMPLEMENTED;
 
-  /// Ascii output precision for double/float
-  static const int ASCII_PRECISION;
-
-  QueryResultSet* CreateHS2ResultSet(
-      apache::hive::service::cli::thrift::TProtocolVersion::type version,
-      const TResultSetMetadata& metadata,
-      apache::hive::service::cli::thrift::TRowSet* rowset = NULL);
-
   /// Return exec state for given query_id, or NULL if not found.
   /// If 'lock' is true, the returned exec state's lock() will be acquired before
   /// the query_exec_state_map_lock_ is released.
-  boost::shared_ptr<QueryExecState> GetQueryExecState(
+  std::shared_ptr<QueryExecState> GetQueryExecState(
       const TUniqueId& query_id, bool lock);
 
-  /// Writes the session id, if found, for the given query to the output parameter. Returns
-  /// false if no query with the given ID is found.
+  /// Writes the session id, if found, for the given query to the output
+  /// parameter. Returns false if no query with the given ID is found.
   bool GetSessionIdForQuery(const TUniqueId& query_id, TUniqueId* session_id);
 
   /// Updates the number of databases / tables metrics from the FE catalog
@@ -330,20 +315,20 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   /// query_session_state is a snapshot of session state that changes when the
   /// query was run. (e.g. default database).
   Status Execute(TQueryCtx* query_ctx,
-                 boost::shared_ptr<SessionState> session_state,
-                 boost::shared_ptr<QueryExecState>* exec_state);
+                 std::shared_ptr<SessionState> session_state,
+                 std::shared_ptr<QueryExecState>* exec_state);
 
   /// Implements Execute() logic, but doesn't unregister query on error.
   Status ExecuteInternal(const TQueryCtx& query_ctx,
-                         boost::shared_ptr<SessionState> session_state,
+                         std::shared_ptr<SessionState> session_state,
                          bool* registered_exec_state,
-                         boost::shared_ptr<QueryExecState>* exec_state);
+                         std::shared_ptr<QueryExecState>* exec_state);
 
   /// Registers the query exec state with query_exec_state_map_ using the globally
   /// unique query_id and add the query id to session state's open query list.
   /// The caller must have checked out the session state.
-  Status RegisterQuery(boost::shared_ptr<SessionState> session_state,
-      const boost::shared_ptr<QueryExecState>& exec_state);
+  Status RegisterQuery(std::shared_ptr<SessionState> session_state,
+      const std::shared_ptr<QueryExecState>& exec_state);
 
   /// Adds the query to the set of in-flight queries for the session. The query remains
   /// in-flight until the query is unregistered.  Until a query is in-flight, an attempt
@@ -354,8 +339,8 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   /// (e.g. via an RPC) and the session close path can close (cancel and unregister) it.
   /// The query must have already been registered using RegisterQuery().  The caller
   /// must have checked out the session state.
-  Status SetQueryInflight(boost::shared_ptr<SessionState> session_state,
-      const boost::shared_ptr<QueryExecState>& exec_state);
+  Status SetQueryInflight(std::shared_ptr<SessionState> session_state,
+      const std::shared_ptr<QueryExecState>& exec_state);
 
   /// Unregister the query by cancelling it, removing exec_state from
   /// query_exec_state_map_, and removing the query id from session state's in-flight
@@ -393,108 +378,10 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   /// Returns the exec summary for this query.
   Status GetExecSummary(const TUniqueId& query_id, TExecSummary* result);
 
-  /// Json callback for /hadoop-varz. Produces Json with a list, 'configs', of (key, value)
-  /// pairs, one for each Hadoop configuration value.
-  void HadoopVarzUrlCallback(const Webserver::ArgumentMap& args,
-      rapidjson::Document* document);
-
-  /// Webserver callback. Returns two sorted lists of queries, one in-flight and one
-  /// completed, as well as a list of active backends and their plan-fragment count.
-  //
-  /// "in_flight_queries": [],
-  /// "num_in_flight_queries": 0,
-  /// "completed_queries": [
-  ///       {
-  ///         "effective_user": "henry",
-  ///         "default_db": "default",
-  ///         "stmt": "select sleep(10000)",
-  ///         "stmt_type": "QUERY",
-  ///         "start_time": "2014-08-07 18:37:47.923614000",
-  ///         "end_time": "2014-08-07 18:37:58.146494000",
-  ///         "progress": "0 / 0 (0%)",
-  ///         "state": "FINISHED",
-  ///         "rows_fetched": 1,
-  ///         "query_id": "7c459a59fb8cefe3:8b7042d55bf19887"
-  ///       }
-  /// ],
-  /// "completed_log_size": 25,
-  /// "query_locations": [
-  ///     {
-  ///       "location": "henry-impala:22000",
-  ///        "count": 0
-  ///     }
-  /// ]
-  void QueryStateUrlCallback(const Webserver::ArgumentMap& args,
-      rapidjson::Document* document);
-
-  /// Json callback for /query_profile. Expects query_id as an argument, produces Json with
-  /// 'profile' set to the profile string, and 'query_id' set to the query ID.
-  void QueryProfileUrlCallback(const Webserver::ArgumentMap& args,
-      rapidjson::Document* document);
-
-  /// Webserver callback. Produces a Json structure with query summary information.
-  /// Example:
-  /// { "summary": <....>,
-  ///   "plan": <....>,
-  ///   "stmt": "select count(*) from functional.alltypes"
-  ///   "id": <...>,
-  ///   "state": "FINISHED"
-  /// }
-  /// If include_plan_json is true, 'plan_json' will be set to a JSON representation of the
-  /// query plan. If include_summary is true, 'summary' will be a text rendering of the
-  /// query summary.
-  void QuerySummaryCallback(bool include_plan_json, bool include_summary,
-      const Webserver::ArgumentMap& args, rapidjson::Document* document);
-
-  /// Webserver callback. Cancels an in-flight query and writes the result to 'contents'.
-  void CancelQueryUrlCallback(const Webserver::ArgumentMap& args,
-      rapidjson::Document* document);
-
-  /// Webserver callback.  Upon return, 'document' will contain the query profile as a
-  /// base64 encoded object in 'contents'.
-  void QueryProfileEncodedUrlCallback(const Webserver::ArgumentMap& args,
-      rapidjson::Document* document);
-
-  /// Webserver callback. Produces a list of inflight query IDs printed as text in
-  /// 'contents'.
-  void InflightQueryIdsUrlCallback(const Webserver::ArgumentMap& args,
-      rapidjson::Document* document);
-
-  /// Json callback for /sessions, which prints a table of active client sessions.
-  /// "sessions": [
-  /// {
-  ///     "type": "BEESWAX",
-  ///     "num_queries": 0,
-  ///     "user": "",
-  ///     "delegated_user": "",
-  ///     "session_id": "6242f69b02e4d609:ac84df1fbb0e16a3",
-  ///     "network_address": "127.0.0.1:46484",
-  ///     "default_database": "default",
-  ///     "start_time": "2014-08-07 22:50:49",
-  ///     "last_accessed": "2014-08-07 22:50:49",
-  ///     "expired": false,
-  ///     "closed": false,
-  ///     "ref_count": 0
-  ///     }
-  /// ],
-  /// "num_sessions": 1
-  void SessionsUrlCallback(const Webserver::ArgumentMap& args,
-      rapidjson::Document* document);
-
-  /// Webserver callback that prints a list of all known databases and tables
-  void CatalogUrlCallback(const Webserver::ArgumentMap& args, rapidjson::Document* output);
-
-  /// Webserver callback that allows for dumping information on objects in the catalog.
-  void CatalogObjectsUrlCallback(const Webserver::ArgumentMap& args,
-      rapidjson::Document* output);
-
   /// Initialize "default_configs_" to show the default values for ImpalaQueryOptions and
   /// "support_start_over/false" to indicate that Impala does not support start over
   /// in the fetch call.
   void InitializeConfigVariables();
-
-  /// Registers all the per-Impalad webserver callbacks
-  void RegisterWebserverCallbacks(Webserver* webserver);
 
   /// Checks settings for profile logging, including whether the output
   /// directory exists and is writeable, and initialises the first log file.
@@ -530,13 +417,13 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   void LogQueryEvents(const QueryExecState& exec_state);
 
   /// Runs once every 5s to flush the profile log file to disk.
-  void LogFileFlushThread();
+  [[noreturn]] void LogFileFlushThread();
 
   /// Runs once every 5s to flush the audit log file to disk.
-  void AuditEventLoggerFlushThread();
+  [[noreturn]] void AuditEventLoggerFlushThread();
 
   /// Runs once every 5s to flush the lineage log file to disk.
-  void LineageLoggerFlushThread();
+  [[noreturn]] void LineageLoggerFlushThread();
 
   /// Copies a query's state into the query log. Called immediately prior to a
   /// QueryExecState's deletion. Also writes the query profile to the profile log on disk.
@@ -547,6 +434,10 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   /// Returns OK if the authorization suceeds, otherwise returns an status with details
   /// on why the failure occurred.
   Status AuthorizeProxyUser(const std::string& user, const std::string& do_as_user);
+
+  // Check if the local backend descriptor is in the list of known backends. If not, add
+  // it to the list of known backends and add it to the 'topic_updates'.
+  void AddLocalBackendToStatestore(std::vector<TTopicDelta>* topic_updates);
 
   /// Snapshot of a query's state, archived in the query log.
   struct QueryStateRecord {
@@ -606,6 +497,16 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
     /// webpages.
     vector<TPlanFragment> fragments;
 
+    // If true, this query has no more rows to return
+    bool all_rows_returned;
+
+    // The most recent time this query was actively being processed, in Unix milliseconds.
+    int64_t last_active_time_ms;
+
+    /// Request pool to which the request was submitted for admission, or an empty string
+    /// if this request doesn't have a pool.
+    std::string request_pool;
+
     /// Initialise from an exec_state. If copy_profile is true, print the query
     /// profile to a string and copy that into this.profile (which is expensive),
     /// otherwise leave this.profile empty.
@@ -616,15 +517,12 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
 
     /// Default constructor used only when participating in collections
     QueryStateRecord() { }
+  };
 
+  struct QueryStateRecordLessThan {
     /// Comparator that sorts by start time.
     bool operator() (const QueryStateRecord& lhs, const QueryStateRecord& rhs) const;
   };
-
-  /// Helper method to render a single QueryStateRecord as a Json object
-  /// Used by QueryStateUrlCallback().
-  void QueryStateToJson(const ImpalaServer::QueryStateRecord& record,
-      rapidjson::Value* value, rapidjson::Document* document);
 
   /// Beeswax private methods
 
@@ -634,7 +532,7 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   void QueryHandleToTUniqueId(const beeswax::QueryHandle& handle, TUniqueId* query_id);
 
   /// Helper function to raise BeeswaxException
-  void RaiseBeeswaxException(const std::string& msg, const char* sql_state);
+  [[noreturn]] void RaiseBeeswaxException(const std::string& msg, const char* sql_state);
 
   /// Executes the fetch logic. Doesn't clean up the exec state if an error occurs.
   Status FetchInternal(const TUniqueId& query_id, bool start_over,
@@ -716,21 +614,12 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   /// sessions for their last-idle times. Those that have been idle for longer than
   /// their configured timeout values are 'expired': they will no longer accept queries
   /// and any running queries associated with those sessions are unregistered.
-  void ExpireSessions();
+  [[noreturn]] void ExpireSessions();
 
   /// Runs forever, walking queries_by_timestamp_ and expiring any queries that have been
   /// idle (i.e. no client input and no time spent processing locally) for
   /// FLAGS_idle_query_timeout seconds.
-  void ExpireQueries();
-
-  /// Periodically opens a socket to FLAGS_local_nodemanager_url to check if the Yarn Node
-  /// Manager is running. If not, this method calls SetOffline(true), and when the NM
-  /// recovers, calls SetOffline(false). Only called (in nm_failure_detection_thread_) if
-  /// FLAGS_enable_rm is true.
-  void DetectNmFailures();
-
-  /// Set is_offline_ to the argument's value.
-  void SetOffline(bool offline);
+  [[noreturn]] void ExpireQueries();
 
   /// Guards query_log_ and query_log_index_
   boost::mutex query_log_lock_;
@@ -769,7 +658,7 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
 
   /// Thread pool to process cancellation requests that come from failed Impala demons to
   /// avoid blocking the statestore callback.
-  boost::scoped_ptr<ThreadPool<CancellationWork> > cancellation_thread_pool_;
+  boost::scoped_ptr<ThreadPool<CancellationWork>> cancellation_thread_pool_;
 
   /// Thread that runs ExpireSessions. It will wake up periodically to check for sessions
   /// which are idle for more their timeout values.
@@ -787,10 +676,13 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
 
   /// map from query id to exec state; QueryExecState is owned by us and referenced
   /// as a shared_ptr to allow asynchronous deletion
-  typedef boost::unordered_map<TUniqueId, boost::shared_ptr<QueryExecState> >
+  typedef boost::unordered_map<TUniqueId, std::shared_ptr<QueryExecState>>
       QueryExecStateMap;
   QueryExecStateMap query_exec_state_map_;
-  boost::mutex query_exec_state_map_lock_;  // protects query_exec_state_map_
+
+  /// Protects query_exec_state_map_. See "Locking" in the class comment for lock
+  /// acquisition order.
+  boost::mutex query_exec_state_map_lock_;
 
   /// Default query options in the form of TQueryOptions and beeswax::ConfigVariable
   TQueryOptions default_query_options_;
@@ -811,8 +703,8 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
 
     TSessionType::type session_type;
 
-    /// Time the session was created.
-    TimestampValue start_time;
+    /// Time the session was created, in ms since epoch (UTC).
+    int64_t start_time_ms;
 
     /// Connected user for this session, i.e. the user which originated this session.
     std::string connected_user;
@@ -823,8 +715,8 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
     /// Client network address.
     TNetworkAddress network_address;
 
-    /// Protects all fields below.
-    /// If this lock has to be taken with query_exec_state_map_lock, take this lock first.
+    /// Protects all fields below. See "Locking" in the class comment for lock
+    /// acquisition order.
     boost::mutex lock;
 
     /// If true, the session has been closed.
@@ -857,8 +749,12 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
     /// Total number of queries run as part of this session.
     int64_t total_queries;
 
-    /// Time the session was last accessed.
+    /// Time the session was last accessed, in ms since epoch (UTC).
     int64_t last_accessed_ms;
+
+    /// The latest Kudu timestamp observed after DML operations executed within this
+    /// session.
+    uint64_t kudu_latest_observed_ts;
 
     /// Number of RPCs concurrently accessing this session state. Used to detect when a
     /// session may be correctly expired after a timeout (when ref_count == 0). Typically
@@ -884,11 +780,11 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
    public:
     ScopedSessionState(ImpalaServer* impala) : impala_(impala) { }
 
-    /// Marks a session as in-use, and saves it so that it can be unmarked when this object
-    /// goes out of scope. Returns OK unless there is an error in GetSessionState.
+    /// Marks a session as in-use, and saves it so that it can be unmarked when this
+    /// object goes out of scope. Returns OK unless there is an error in GetSessionState.
     /// Must only be called once per ScopedSessionState.
     Status WithSession(const TUniqueId& session_id,
-        boost::shared_ptr<SessionState>* session = NULL) {
+        std::shared_ptr<SessionState>* session = NULL) {
       DCHECK(session_.get() == NULL);
       RETURN_IF_ERROR(impala_->GetSessionState(session_id, &session_, true));
       if (session != NULL) (*session) = session_;
@@ -904,7 +800,7 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
 
    private:
     /// Reference-counted pointer to the session state object.
-    boost::shared_ptr<SessionState> session_;
+    std::shared_ptr<SessionState> session_;
 
     /// Saved so that we can access ImpalaServer methods to get / return session state.
     ImpalaServer* impala_;
@@ -913,24 +809,23 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   /// For access to GetSessionState() / MarkSessionInactive()
   friend class ScopedSessionState;
 
-  /// Protects session_state_map_. Should be taken before any query exec-state locks,
-  /// including query_exec_state_map_lock_. Should be taken before individual session-state
-  /// locks.
+  /// Protects session_state_map_. See "Locking" in the class comment for lock
+  /// acquisition order.
   boost::mutex session_state_map_lock_;
 
   /// A map from session identifier to a structure containing per-session information
-  typedef boost::unordered_map<TUniqueId, boost::shared_ptr<SessionState> >
-    SessionStateMap;
+  typedef boost::unordered_map<TUniqueId, std::shared_ptr<SessionState>> SessionStateMap;
   SessionStateMap session_state_map_;
 
-  /// Protects connection_to_sessions_map_. May be taken before session_state_map_lock_.
+  /// Protects connection_to_sessions_map_. See "Locking" in the class comment for lock
+  /// acquisition order.
   boost::mutex connection_to_sessions_map_lock_;
 
-  /// Map from a connection ID to the associated list of sessions so that all can be closed
-  /// when the connection ends. HS2 allows for multiplexing several sessions across a
-  /// single connection. If a session has already been closed (only possible via HS2) it is
-  /// not removed from this map to avoid the cost of looking it up.
-  typedef boost::unordered_map<TUniqueId, std::vector<TUniqueId> >
+  /// Map from a connection ID to the associated list of sessions so that all can be
+  /// closed when the connection ends. HS2 allows for multiplexing several sessions across
+  /// a single connection. If a session has already been closed (only possible via HS2) it
+  /// is not removed from this map to avoid the cost of looking it up.
+  typedef boost::unordered_map<TUniqueId, std::vector<TUniqueId>>
     ConnectionToSessionMap;
   ConnectionToSessionMap connection_to_sessions_map_;
 
@@ -939,23 +834,22 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   /// If mark_active is true, also checks if the session is expired or closed and
   /// increments the session's reference counter if it is still alive.
   Status GetSessionState(const TUniqueId& session_id,
-      boost::shared_ptr<SessionState>* session_state, bool mark_active = false);
+      std::shared_ptr<SessionState>* session_state, bool mark_active = false);
 
   /// Decrement the session's reference counter and mark last_accessed_ms so that state
   /// expiration can proceed.
-  inline void MarkSessionInactive(boost::shared_ptr<SessionState> session) {
+  inline void MarkSessionInactive(std::shared_ptr<SessionState> session) {
     boost::lock_guard<boost::mutex> l(session->lock);
     DCHECK_GT(session->ref_count, 0);
     --session->ref_count;
     session->last_accessed_ms = UnixMillis();
   }
 
-  /// protects query_locations_. Must always be taken after
-  /// query_exec_state_map_lock_ if both are required.
+  /// Protects query_locations_. Not held in conjunction with other locks.
   boost::mutex query_locations_lock_;
 
   /// A map from backend to the list of queries currently running there.
-  typedef boost::unordered_map<TNetworkAddress, boost::unordered_set<TUniqueId> >
+  typedef boost::unordered_map<TNetworkAddress, boost::unordered_set<TUniqueId>>
       QueryLocations;
   QueryLocations query_locations_;
 
@@ -1010,11 +904,12 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   /// Map of short usernames of authorized proxy users to the set of user(s) they are
   /// allowed to delegate to. Populated by parsing the --authorized_proxy_users_config
   /// flag.
-  typedef boost::unordered_map<std::string, boost::unordered_set<std::string> >
+  typedef boost::unordered_map<std::string, boost::unordered_set<std::string>>
       ProxyUserMap;
   ProxyUserMap authorized_proxy_user_config_;
 
-  /// Guards queries_by_timestamp_.  Must not be acquired before a session state lock.
+  /// Guards queries_by_timestamp_. See "Locking" in the class comment for lock
+  /// acquisition order.
   boost::mutex query_expiration_lock_;
 
   /// Describes a query expiration event (t, q) where t is the expiration deadline in
@@ -1055,14 +950,12 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
   /// Container for a thread that runs ExpireQueries() if FLAGS_idle_query_timeout is set.
   boost::scoped_ptr<Thread> query_expiration_thread_;
 
-  /// Container thread for DetectNmFailures().
-  boost::scoped_ptr<Thread> nm_failure_detection_thread_;
+  /// Serializes TBackendDescriptors when creating topic updates
+  ThriftSerializer thrift_serializer_;
 
-  /// Protects is_offline_
-  boost::mutex is_offline_lock_;
-
-  /// True if Impala server is offline, false otherwise.
-  bool is_offline_;
+  /// True if this ImpalaServer can accept client connections and coordinate
+  /// queries.
+  bool is_coordinator_;
 };
 
 /// Create an ImpalaServer and Thrift servers.
@@ -1070,6 +963,8 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
 /// ImpalaService (Beeswax) on beeswax_port (returned via beeswax_server).
 /// If hs2_port != 0 (and hs2_server != NULL), creates a ThriftServer exporting
 /// ImpalaHiveServer2Service on hs2_port (returned via hs2_server).
+/// ImpalaService and ImpalaHiveServer2Service are initialized only if this
+/// Impala server is a coordinator (indicated by the is_coordinator flag).
 /// If be_port != 0 (and be_server != NULL), create a ThriftServer exporting
 /// ImpalaInternalService on be_port (returned via be_server).
 /// Returns created ImpalaServer. The caller owns fe_server and be_server.
@@ -1079,7 +974,7 @@ class ImpalaServer : public ImpalaServiceIf, public ImpalaHiveServer2ServiceIf,
 /// which case none of the output parameters can be assumed to be valid.
 Status CreateImpalaServer(ExecEnv* exec_env, int beeswax_port, int hs2_port,
     int be_port, ThriftServer** beeswax_server, ThriftServer** hs2_server,
-    ThriftServer** be_server, ImpalaServer** impala_server);
+    ThriftServer** be_server, boost::shared_ptr<ImpalaServer>* impala_server);
 
 }
 

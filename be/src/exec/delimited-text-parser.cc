@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/delimited-text-parser.inline.h"
 
@@ -24,7 +27,13 @@ using namespace impala;
 DelimitedTextParser::DelimitedTextParser(
     int num_cols, int num_partition_keys, const bool* is_materialized_col,
     char tuple_delim, char field_delim, char collection_item_delim, char escape_char)
-    : num_delims_(0),
+    : is_materialized_col_(is_materialized_col),
+      num_tuple_delims_(0),
+      num_delims_(0),
+      num_cols_(num_cols),
+      num_partition_keys_(num_partition_keys),
+      column_idx_(0),
+      last_row_delim_offset_(-1),
       field_delim_(field_delim),
       process_escapes_(escape_char != '\0'),
       escape_char_(escape_char),
@@ -32,11 +41,6 @@ DelimitedTextParser::DelimitedTextParser(
       tuple_delim_(tuple_delim),
       current_column_has_escape_(false),
       last_char_is_escape_(false),
-      last_row_delim_offset_(-1),
-      num_cols_(num_cols),
-      num_partition_keys_(num_partition_keys),
-      is_materialized_col_(is_materialized_col),
-      column_idx_(0),
       unfinished_tuple_(false){
   // Escape character should not be the same as tuple or col delim unless it is the
   // empty delimiter.
@@ -70,9 +74,13 @@ DelimitedTextParser::DelimitedTextParser(
 
   if (tuple_delim != '\0') {
     search_chars[num_delims_++] = tuple_delim_;
+    ++num_tuple_delims_;
     // Hive will treats \r (^M) as an alternate tuple delimiter, but \r\n is a
     // single tuple delimiter.
-    if (tuple_delim_ == '\n') search_chars[num_delims_++] = '\r';
+    if (tuple_delim_ == '\n') {
+      search_chars[num_delims_++] = '\r';
+      ++num_tuple_delims_;
+    }
     xmm_tuple_search_ = _mm_loadu_si128(reinterpret_cast<__m128i*>(search_chars));
   }
 
@@ -111,11 +119,11 @@ Status DelimitedTextParser::ParseFieldLocations(int max_tuples, int64_t remainin
 
   if (CpuInfo::IsSupported(CpuInfo::SSE4_2)) {
     if (process_escapes_) {
-      ParseSse<true>(max_tuples, &remaining_len, byte_buffer_ptr, row_end_locations,
-          field_locations, num_tuples, num_fields, next_column_start);
+      RETURN_IF_ERROR(ParseSse<true>(max_tuples, &remaining_len, byte_buffer_ptr,
+          row_end_locations, field_locations, num_tuples, num_fields, next_column_start));
     } else {
-      ParseSse<false>(max_tuples, &remaining_len, byte_buffer_ptr, row_end_locations,
-          field_locations, num_tuples, num_fields, next_column_start);
+      RETURN_IF_ERROR(ParseSse<false>(max_tuples, &remaining_len, byte_buffer_ptr,
+          row_end_locations, field_locations, num_tuples, num_fields, next_column_start));
     }
   }
 
@@ -150,9 +158,10 @@ Status DelimitedTextParser::ParseFieldLocations(int max_tuples, int64_t remainin
         // If the row ended in \r\n then move to the \n
         ++*next_column_start;
       } else {
-        AddColumn<true>(*byte_buffer_ptr - *next_column_start,
-            next_column_start, num_fields, field_locations);
-        FillColumns<false>(0, NULL, num_fields, field_locations);
+        RETURN_IF_ERROR(AddColumn<true>(*byte_buffer_ptr - *next_column_start,
+            next_column_start, num_fields, field_locations));
+        Status status = FillColumns<false>(0, NULL, num_fields, field_locations);
+        DCHECK(status.ok());
         column_idx_ = num_partition_keys_;
         row_end_locations[*num_tuples] = *byte_buffer_ptr;
         ++(*num_tuples);
@@ -166,8 +175,8 @@ Status DelimitedTextParser::ParseFieldLocations(int max_tuples, int64_t remainin
         return Status::OK();
       }
     } else if (new_col) {
-      AddColumn<true>(*byte_buffer_ptr - *next_column_start,
-          next_column_start, num_fields, field_locations);
+      RETURN_IF_ERROR(AddColumn<true>(*byte_buffer_ptr - *next_column_start,
+          next_column_start, num_fields, field_locations));
     }
 
     --remaining_len;
@@ -178,9 +187,10 @@ Status DelimitedTextParser::ParseFieldLocations(int max_tuples, int64_t remainin
   // e.g. Sequence files.
   if (tuple_delim_ == '\0') {
     DCHECK_EQ(remaining_len, 0);
-    AddColumn<true>(*byte_buffer_ptr - *next_column_start,
-        next_column_start, num_fields, field_locations);
-    FillColumns<false>(0, NULL, num_fields, field_locations);
+    RETURN_IF_ERROR(AddColumn<true>(*byte_buffer_ptr - *next_column_start,
+        next_column_start, num_fields, field_locations));
+    Status status = FillColumns<false>(0, NULL, num_fields, field_locations);
+    DCHECK(status.ok());
     column_idx_ = num_partition_keys_;
     ++(*num_tuples);
     unfinished_tuple_ = false;
@@ -188,11 +198,10 @@ Status DelimitedTextParser::ParseFieldLocations(int max_tuples, int64_t remainin
   return Status::OK();
 }
 
-// Find the first instance of the tuple delimiter.  This will
-// find the start of the first full tuple in buffer by looking for the end of
-// the previous tuple.
-int DelimitedTextParser::FindFirstInstance(const char* buffer, int len) {
-  int tuple_start = 0;
+// Find the first instance of the tuple delimiter. This will find the start of the first
+// full tuple in buffer by looking for the end of the previous tuple.
+int64_t DelimitedTextParser::FindFirstInstance(const char* buffer, int64_t len) {
+  int64_t tuple_start = 0;
   const char* buffer_start = buffer;
   bool found = false;
 
@@ -212,8 +221,8 @@ restart:
       // Load the next 16 bytes into the xmm register and do strchr for the
       // tuple delimiter.
       xmm_buffer = _mm_loadu_si128(reinterpret_cast<const __m128i*>(buffer));
-      xmm_tuple_mask = SSE4_cmpestrm<SSEUtil::STRCHR_MODE>(xmm_tuple_search_, 1,
-          xmm_buffer, SSEUtil::CHARS_PER_128_BIT_REGISTER);
+      xmm_tuple_mask = SSE4_cmpestrm<SSEUtil::STRCHR_MODE>(xmm_tuple_search_,
+          num_tuple_delims_, xmm_buffer, SSEUtil::CHARS_PER_128_BIT_REGISTER);
       int tuple_mask = _mm_extract_epi16(xmm_tuple_mask, 0);
       if (tuple_mask != 0) {
         found = true;
@@ -251,7 +260,7 @@ restart:
     // tuple break that are all escape characters, but that is
     // unlikely.
     int num_escape_chars = 0;
-    int before_tuple_end = tuple_start - 2;
+    int64_t before_tuple_end = tuple_start - 2;
     // TODO: If scan range is split between escape character and tuple delimiter,
     // before_tuple_end will be -1. Need to scan previous range for escape characters
     // in this case.
@@ -279,11 +288,6 @@ restart:
     if (num_escape_chars % 2 != 0) goto restart;
   }
 
-  if (tuple_start == len - 1 && buffer_start[tuple_start] == '\r') {
-    // If \r is the last char we need to wait to see if the next one is \n or not.
-    last_row_delim_offset_ = 0;
-    return -1;
-  }
   if (tuple_start < len && buffer_start[tuple_start] == '\n' &&
       buffer_start[tuple_start - 1] == '\r') {
     // We have \r\n, move to the next character.

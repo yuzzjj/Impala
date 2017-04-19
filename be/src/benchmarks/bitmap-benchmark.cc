@@ -1,16 +1,19 @@
-// Copyright 2016 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <math.h>
 #include <stdlib.h>
@@ -107,7 +110,7 @@ struct TestData {
 void Benchmark(int batch_size, void* data) {
   TestData* d = reinterpret_cast<TestData*>(data);
   for (int i = 0; i < batch_size; ++i) {
-    d->bm.Set<true>(d->data[i & (d->data.size() - 1)], true);
+    d->bm.Set(d->data[i & (d->data.size() - 1)] % d->bm.num_bits(), true);
   }
 }
 
@@ -119,7 +122,7 @@ struct TestData {
   TestData(int64_t size)
     : bm(size), data (1ull << 20) {
     for (size_t i = 0; i < size/2; ++i) {
-      bm.Set<true>(MakeNonNegativeRand(), true);
+      bm.Set(MakeNonNegativeRand() % size, true);
     }
     for (size_t i = 0; i < data.size(); ++i) {
       data[i] = MakeNonNegativeRand();
@@ -135,7 +138,7 @@ struct TestData {
 void Benchmark(int batch_size, void* data) {
   TestData* d = reinterpret_cast<TestData*>(data);
   for (int i = 0; i < batch_size; ++i) {
-    d->result += d->bm.Get<true>(d->data[i & (d->data.size() - 1)]);
+    d->result += d->bm.Get(d->data[i & (d->data.size() - 1)] % d->bm.num_bits());
   }
 }
 

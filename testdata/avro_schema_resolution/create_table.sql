@@ -1,3 +1,23 @@
+-- Licensed to the Apache Software Foundation (ASF) under one
+-- or more contributor license agreements.  See the NOTICE file
+-- distributed with this work for additional information
+-- regarding copyright ownership.  The ASF licenses this file
+-- to you under the Apache License, Version 2.0 (the
+-- "License"); you may not use this file except in compliance
+-- with the License.  You may obtain a copy of the License at
+--
+--   http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- NOTE: Queries in this file have to be executed against Hive and some won't work with
+-- Impala due to different type compatibility rules.
+
 USE functional_avro_snap;
 
 DROP TABLE IF EXISTS schema_resolution_test;
@@ -43,7 +63,7 @@ STORED AS
 INPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
 OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
 LOCATION '/test-warehouse/alltypes_avro_snap'
-TBLPROPERTIES ('avro.schema.url'='hdfs://${hiveconf:hive.metastore.warehouse.dir}/avro_schemas/functional/alltypes.json');
+TBLPROPERTIES ('avro.schema.url'='${env:DEFAULT_FS}/${hiveconf:hive.metastore.warehouse.dir}/avro_schemas/functional/alltypes.json');
 
 -- Column definition list has one more column than the Avro schema.
 DROP TABLE IF EXISTS alltypes_extra_coldef;
@@ -65,7 +85,7 @@ STORED AS
 INPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
 OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
 LOCATION '/test-warehouse/alltypes_avro_snap'
-TBLPROPERTIES ('avro.schema.url'='hdfs://${hiveconf:hive.metastore.warehouse.dir}/avro_schemas/functional/alltypes.json');
+TBLPROPERTIES ('avro.schema.url'='${env:DEFAULT_FS}/${hiveconf:hive.metastore.warehouse.dir}/avro_schemas/functional/alltypes.json');
 
 -- Column definition list is missing 'tinyint_col' and 'timestamp_col' from the Avro schema.
 DROP TABLE IF EXISTS alltypes_missing_coldef;
@@ -84,7 +104,7 @@ STORED AS
 INPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
 OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
 LOCATION '/test-warehouse/alltypes_avro_snap'
-TBLPROPERTIES ('avro.schema.url'='hdfs://${hiveconf:hive.metastore.warehouse.dir}/avro_schemas/functional/alltypes.json');
+TBLPROPERTIES ('avro.schema.url'='${env:DEFAULT_FS}/${hiveconf:hive.metastore.warehouse.dir}/avro_schemas/functional/alltypes.json');
 
 -- Matching number of columns and column names, but mismatched type (bigint_col is a string).
 DROP TABLE IF EXISTS alltypes_type_mismatch;
@@ -105,7 +125,7 @@ STORED AS
 INPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
 OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
 LOCATION '/test-warehouse/alltypes_avro_snap'
-TBLPROPERTIES ('avro.schema.url'='hdfs://${hiveconf:hive.metastore.warehouse.dir}/avro_schemas/functional/alltypes.json');
+TBLPROPERTIES ('avro.schema.url'='${env:DEFAULT_FS}/${hiveconf:hive.metastore.warehouse.dir}/avro_schemas/functional/alltypes.json');
 
 -- IMPALA-2798, create two avro tables with same underlying data location, one table
 -- has an extra column at the end. Validate Impala doesn't use codegen decoding function
@@ -140,6 +160,10 @@ TBLPROPERTIES ('avro.schema.literal'='{
   {"name":"string_col",  "type": "string"},
   {"name":"timestamp_col",  "type": "long"}
 ]}');
+
+-- Reload existing partitions from HDFS. Without this, the overwrite will fail to remove
+-- any preexisting data files, which in turn will fail the query.
+MSCK REPAIR TABLE avro_coldef;
 
 INSERT OVERWRITE TABLE avro_coldef PARTITION(year=2014, month=1)
 SELECT bool_col, tinyint_col, smallint_col, int_col, bigint_col,
@@ -179,11 +203,16 @@ TBLPROPERTIES ('avro.schema.literal'='{
   {"name":"extra_col",  "type": "string", "default": "null"}
 ]}');
 
+-- Reload existing partitions from HDFS. Without this, the overwrite will fail to remove
+-- any preexisting data files, which in turn will fail the query.
+MSCK REPAIR TABLE avro_extra_coldef;
+
 INSERT OVERWRITE TABLE avro_extra_coldef PARTITION(year=2014, month=2)
 SELECT bool_col, tinyint_col, smallint_col, int_col, bigint_col,
 float_col, double_col, date_string_col, string_col,
 timestamp_col, "avro" AS extra_col FROM
 (select * from functional.alltypes order by id limit 5) a;
 
+-- Reload the partitions for the first table once again. This will make sure that the new
+-- partition from the second insert shows up in the first table, too.
 MSCK REPAIR TABLE avro_coldef;
-MSCK REPAIR TABLE avro_extra_coldef;

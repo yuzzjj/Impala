@@ -1,27 +1,31 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_EXPRS_ANYVAL_UTIL_H
 #define IMPALA_EXPRS_ANYVAL_UTIL_H
 
+#include <algorithm>
+
 #include "runtime/runtime-state.h"
+#include "runtime/string-value.inline.h"
 #include "runtime/timestamp-value.h"
 #include "udf/udf-internal.h"
+#include "util/decimal-util.h"
 #include "util/hash-util.h"
-
-#include "common/names.h"
 
 using namespace impala_udf;
 
@@ -129,12 +133,19 @@ class AnyValUtil {
     return HashUtil::MurmurHash2_64(&tv, 12, seed);
   }
 
-  static uint64_t Hash64(const DecimalVal& v, const FunctionContext::TypeDesc& t,
-      int64_t seed) {
-    switch (ColumnType::GetDecimalByteSize(t.precision)) {
-      case 4: return HashUtil::MurmurHash2_64(&v.val4, 4, seed);
-      case 8: return HashUtil::MurmurHash2_64(&v.val8, 8, seed);
-      case 16: return HashUtil::MurmurHash2_64(&v.val16, 16, seed);
+  static uint64_t Hash64(
+      const DecimalVal& v, const FunctionContext::TypeDesc& t, int64_t seed) {
+    return HashDecimal64(v, ColumnType::GetDecimalByteSize(t.precision), seed);
+  }
+
+  static uint64_t HashDecimal64(const DecimalVal& v, int byte_size, int64_t seed) {
+    switch (byte_size) {
+      case 4:
+        return HashUtil::MurmurHash2_64(&v.val4, 4, seed);
+      case 8:
+        return HashUtil::MurmurHash2_64(&v.val8, 8, seed);
+      case 16:
+        return HashUtil::MurmurHash2_64(&v.val16, 16, seed);
       default:
         DCHECK(false);
         return 0;
@@ -175,6 +186,28 @@ class AnyValUtil {
     }
   }
 
+  /// Returns the byte alignment of *Val for type t.
+  static int AnyValAlignment(const ColumnType& t) {
+    switch (t.type) {
+      case TYPE_BOOLEAN: return alignof(BooleanVal);
+      case TYPE_TINYINT: return alignof(TinyIntVal);
+      case TYPE_SMALLINT: return alignof(SmallIntVal);
+      case TYPE_INT: return alignof(IntVal);
+      case TYPE_BIGINT: return alignof(BigIntVal);
+      case TYPE_FLOAT: return alignof(FloatVal);
+      case TYPE_DOUBLE: return alignof(DoubleVal);
+      case TYPE_STRING:
+      case TYPE_VARCHAR:
+      case TYPE_CHAR:
+        return alignof(StringVal);
+      case TYPE_TIMESTAMP: return alignof(TimestampVal);
+      case TYPE_DECIMAL: return alignof(DecimalVal);
+      default:
+        DCHECK(false) << t;
+        return 0;
+    }
+  }
+
   static std::string ToString(const StringVal& v) {
     return std::string(reinterpret_cast<char*>(v.ptr), v.len);
   }
@@ -187,7 +220,7 @@ class AnyValUtil {
   static void TruncateIfNecessary(const FunctionContext::TypeDesc& type, StringVal *val) {
     if (type.type == FunctionContext::TYPE_VARCHAR) {
       DCHECK(type.len >= 0);
-      val->len = min(val->len, type.len);
+      val->len = std::min(val->len, type.len);
     }
   }
 
@@ -196,6 +229,8 @@ class AnyValUtil {
   }
 
   static FunctionContext::TypeDesc ColumnTypeToTypeDesc(const ColumnType& type);
+  static std::vector<FunctionContext::TypeDesc> ColumnTypesToTypeDescs(
+      const std::vector<ColumnType>& types);
   // Note: constructing a ColumnType is expensive and should be avoided in query execution
   // paths (i.e. non-setup paths).
   static ColumnType TypeDescToColumnType(const FunctionContext::TypeDesc& type);
@@ -266,7 +301,7 @@ class AnyValUtil {
             return;
 #if __BYTE_ORDER == __LITTLE_ENDIAN
           case 16:
-            memcpy(&reinterpret_cast<DecimalVal*>(dst)->val4, slot, type.GetByteSize());
+            memcpy(&reinterpret_cast<DecimalVal*>(dst)->val16, slot, 16);
 #else
             DCHECK(false) << "Not implemented.";
 #endif
@@ -281,19 +316,20 @@ class AnyValUtil {
 
  private:
   /// Implementations of Equals().
-  template<typename T>
+  template <typename T>
   static inline bool EqualsInternal(const T& x, const T& y);
-  static inline bool DecimalEquals(int precision, const DecimalVal& x,
-      const DecimalVal& y);
+  static inline bool DecimalEquals(
+      int precision, const DecimalVal& x, const DecimalVal& y);
 };
 
-/// Creates the corresponding AnyVal subclass for type. The object is added to the pool.
-impala_udf::AnyVal* CreateAnyVal(ObjectPool* pool, const ColumnType& type);
+/// Allocates an AnyVal subclass of 'type' from 'pool'. The AnyVal's memory is
+/// initialized to all 0's. Returns a MemLimitExceeded() error with message
+/// 'mem_limit_exceeded_msg' if the allocation cannot be made because of a memory
+/// limit.
+Status AllocateAnyVal(RuntimeState* state, MemPool* pool, const ColumnType& type,
+    const std::string& mem_limit_exceeded_msg, AnyVal** result);
 
-/// Creates the corresponding AnyVal subclass for type. The object is owned by the caller.
-impala_udf::AnyVal* CreateAnyVal(const ColumnType& type);
-
-template<typename T>
+template <typename T>
 inline bool AnyValUtil::EqualsInternal(const T& x, const T& y) {
   DCHECK(!x.is_null);
   DCHECK(!y.is_null);

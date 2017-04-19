@@ -38,11 +38,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "dynamic_annotations.h"
+#include "gutil/dynamic_annotations.h"
 
 #ifdef __GNUC__
 /* valgrind.h uses gcc extensions so it won't build with other compilers */
-#include "supersonic/utils/valgrind.h"
+#include "gutil/valgrind.h"
 #endif
 
 /* Compiler-based ThreadSanitizer defines

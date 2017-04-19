@@ -1,27 +1,40 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # Impala tests for queries that query metadata and set session settings
-import logging
-import os
+
 import pytest
-from subprocess import call
+import re
+
 from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
-from tests.common.impala_test_suite import *
+from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.skip import SkipIfIsilon, SkipIfS3, SkipIfLocal
-from tests.common.test_vector import *
+from tests.common.test_dimensions import ALL_NODES_ONLY
+from tests.common.test_dimensions import create_exec_option_dimension
+from tests.common.test_dimensions import create_uncompressed_text_dimension
 from tests.util.filesystem_utils import get_fs_path
 
 # TODO: For these tests to pass, all table metadata must be created exhaustively.
 # the tests should be modified to remove that requirement.
-
-# Execute all tests serially to avoid the following concurrency conflicts:
-# 1. In setup/teardown when dropping/creating databases and tables (IMPALA-2537)
-# 2. Avoid running "invalidate metadata" concurrently with other pytests (IMPALA-2687)
-@pytest.mark.execute_serially
 class TestMetadataQueryStatements(ImpalaTestSuite):
 
   CREATE_DATA_SRC_STMT = ("CREATE DATA SOURCE %s LOCATION '" +
       get_fs_path("/test-warehouse/data-sources/test-data-source.jar") +
-      "' CLASS 'com.cloudera.impala.extdatasource.AllTypesDataSource' API_VERSION 'V1'")
+      "' CLASS 'org.apache.impala.extdatasource.AllTypesDataSource' API_VERSION 'V1'")
   DROP_DATA_SRC_STMT = "DROP DATA SOURCE IF EXISTS %s"
   TEST_DATA_SRC_NAMES = ["show_test_ds1", "show_test_ds2"]
   AVRO_SCHEMA_LOC = get_fs_path("/test-warehouse/avro_schemas/functional/alltypes.json")
@@ -35,15 +48,95 @@ class TestMetadataQueryStatements(ImpalaTestSuite):
     super(TestMetadataQueryStatements, cls).add_test_dimensions()
     sync_ddl_opts = [0, 1]
     if cls.exploration_strategy() != 'exhaustive':
-      # Cut down on test runtime by only running with SYNC_DDL=1
+      # Cut down on test runtime by only running with SYNC_DDL=0
       sync_ddl_opts = [0]
 
-    cls.TestMatrix.add_dimension(create_exec_option_dimension(
+    cls.ImpalaTestMatrix.add_dimension(create_exec_option_dimension(
         cluster_sizes=ALL_NODES_ONLY,
         disable_codegen_options=[False],
         batch_sizes=[0],
         sync_ddl=sync_ddl_opts))
-    cls.TestMatrix.add_dimension(create_uncompressed_text_dimension(cls.get_workload()))
+    cls.ImpalaTestMatrix.add_dimension(
+        create_uncompressed_text_dimension(cls.get_workload()))
+
+  def test_use(self, vector):
+    self.run_test_case('QueryTest/use', vector)
+
+  def test_show(self, vector):
+    self.run_test_case('QueryTest/show', vector)
+
+  def test_show_stats(self, vector):
+    self.run_test_case('QueryTest/show-stats', vector, "functional")
+
+  def test_describe_path(self, vector, unique_database):
+    self.run_test_case('QueryTest/describe-path', vector, unique_database)
+
+  # Missing Coverage: Describe formatted compatibility between Impala and Hive when the
+  # data doesn't reside in hdfs.
+  @SkipIfIsilon.hive
+  @SkipIfS3.hive
+  @SkipIfLocal.hive
+  def test_describe_formatted(self, vector, unique_database):
+    # For describe formmated, we try to match Hive's output as closely as possible.
+    # However, we're inconsistent with our handling of NULLs vs theirs - Impala sometimes
+    # specifies 'NULL' where Hive uses an empty string, and Hive somtimes specifies 'null'
+    # with padding where Impala uses a sequence of blank spaces - and for now
+    # we want to leave it that way to not affect users who rely on this output.
+    def compare_describe_formatted(impala_results, hive_results):
+      for impala, hive in zip(re.split(',|\n', impala_results),
+          re.split(',|\n', hive_results)):
+
+        if impala != hive:
+          # If they don't match, check if it's because of the inconsistent null handling.
+          impala = impala.replace(' ', '').lower()
+          hive = hive.replace(' ', '').lower()
+          if not ((impala == "'null'" and hive ==  "''") or
+              (impala == "''" and hive == "'null'")):
+            return False
+      return True
+
+    # Describe a partitioned table.
+    self.exec_and_compare_hive_and_impala_hs2("describe formatted functional.alltypes",
+        compare=compare_describe_formatted)
+    self.exec_and_compare_hive_and_impala_hs2(
+        "describe formatted functional_text_lzo.alltypes",
+        compare=compare_describe_formatted)
+
+    # Describe an unpartitioned table.
+    self.exec_and_compare_hive_and_impala_hs2("describe formatted tpch.lineitem",
+        compare=compare_describe_formatted)
+    self.exec_and_compare_hive_and_impala_hs2("describe formatted functional.jointbl",
+        compare=compare_describe_formatted)
+
+    # Create and describe an unpartitioned and partitioned Avro table created
+    # by Impala without any column definitions.
+    # TODO: Instead of creating new tables here, change one of the existing
+    # Avro tables to be created without any column definitions.
+    self.client.execute("create database if not exists %s" % unique_database)
+    self.client.execute((
+        "create table %s.%s with serdeproperties ('avro.schema.url'='%s') stored as avro"
+        % (unique_database, "avro_alltypes_nopart", self.AVRO_SCHEMA_LOC)))
+    self.exec_and_compare_hive_and_impala_hs2("describe formatted avro_alltypes_nopart",
+        compare=compare_describe_formatted)
+
+    self.client.execute((
+        "create table %s.%s partitioned by (year int, month int) "
+        "with serdeproperties ('avro.schema.url'='%s') stored as avro"
+        % (unique_database, "avro_alltypes_part", self.AVRO_SCHEMA_LOC)))
+    self.exec_and_compare_hive_and_impala_hs2("describe formatted avro_alltypes_part",
+        compare=compare_describe_formatted)
+
+    self.exec_and_compare_hive_and_impala_hs2(\
+        "describe formatted functional.alltypes_view_sub",
+        compare=compare_describe_formatted)
+
+  @pytest.mark.execute_serially # due to data src setup/teardown
+  def test_show_data_sources(self, vector):
+    try:
+      self.__create_data_sources()
+      self.run_test_case('QueryTest/show-data-sources', vector)
+    finally:
+      self.__drop_data_sources()
 
   def __drop_data_sources(self):
     for name in self.TEST_DATA_SRC_NAMES:
@@ -54,231 +147,31 @@ class TestMetadataQueryStatements(ImpalaTestSuite):
     for name in self.TEST_DATA_SRC_NAMES:
       self.client.execute(self.CREATE_DATA_SRC_STMT % (name,))
 
-  def setup_method(self, method):
-    self.cleanup_db('impala_test_desc_db1')
-    self.cleanup_db('impala_test_desc_db2')
-    self.cleanup_db('impala_test_desc_db3')
-    self.cleanup_db('impala_test_desc_db4')
-    self.cleanup_db('hive_test_desc_db')
-    self.cleanup_db('hive_test_db')
-
-    self.client.execute("create database if not exists impala_test_desc_db1")
-    self.client.execute(
-        "create database if not exists impala_test_desc_db2 "
-        "comment \"test comment\"")
-    self.client.execute(
-        "create database if not exists impala_test_desc_db3 "
-        "location \"" + get_fs_path("/testdb") + "\"")
-    self.client.execute(
-        "create database if not exists impala_test_desc_db4 "
-        "comment \"test comment\" location \"" + get_fs_path("/test2.db") + "\"")
-
-    self.client.execute(
-        "create table if not exists impala_test_desc_db1.complex_types_tbl ("
-        "map_array_struct_col map<string, array<struct<f1:int, f2:string>>>, "
-        "struct_array_struct_col "
-        "struct<f1:int, f2:array<struct<f11:bigint, f12:string>>>, "
-        "map_array_map_struct_col "
-        "map<string, array<map<string, struct<f1:string, f2:int>>>>)")
-
-  def teardown_method(self, method):
-    self.cleanup_db('impala_test_desc_db1')
-    self.cleanup_db('impala_test_desc_db2')
-    self.cleanup_db('impala_test_desc_db3')
-    self.cleanup_db('impala_test_desc_db4')
-    self.cleanup_db('hive_test_desc_db')
-    self.cleanup_db('hive_test_db')
-
-  def test_show(self, vector):
-    self.run_test_case('QueryTest/show', vector)
-
   @SkipIfS3.hive
   @SkipIfIsilon.hive
   @SkipIfLocal.hive
+  @pytest.mark.execute_serially # because of invalidate metadata
   def test_describe_db(self, vector):
-    call([
-        "hive", "-e", "create database hive_test_desc_db comment 'test comment' "
-        "with dbproperties('pi' = '3.14', 'e' = '2.82')"])
-    call(["hive", "-e", "alter database hive_test_desc_db set owner user test"])
-    self.client.execute("invalidate metadata")
-    self.run_test_case('QueryTest/describedb', vector)
-
-  def test_show_data_sources(self, vector):
+    self.__test_describe_db_cleanup()
     try:
-      self.__create_data_sources()
-      self.run_test_case('QueryTest/show-data-sources', vector)
+      self.client.execute("create database impala_test_desc_db1")
+      self.client.execute("create database impala_test_desc_db2 "
+                          "comment 'test comment'")
+      self.client.execute("create database impala_test_desc_db3 "
+                          "location '" + get_fs_path("/testdb") + "'")
+      self.client.execute("create database impala_test_desc_db4 comment 'test comment' "
+                          "location \"" + get_fs_path("/test2.db") + "\"")
+      self.run_stmt_in_hive("create database hive_test_desc_db comment 'test comment' "
+                           "with dbproperties('pi' = '3.14', 'e' = '2.82')")
+      self.run_stmt_in_hive("alter database hive_test_desc_db set owner user test")
+      self.client.execute("invalidate metadata")
+      self.run_test_case('QueryTest/describe-db', vector)
     finally:
-      self.__drop_data_sources()
+      self.__test_describe_db_cleanup()
 
-  def test_show_stats(self, vector):
-    self.run_test_case('QueryTest/show-stats', vector)
-
-  def test_describe_table(self, vector):
-    self.run_test_case('QueryTest/describe', vector)
-
-  # Missing Coverage: Describe formatted compatibility between Impala and Hive when the
-  # data doesn't reside in hdfs.
-  @SkipIfIsilon.hive
-  @SkipIfS3.hive
-  @SkipIfLocal.hive
-  def test_describe_formatted(self, vector):
-    # Describe a partitioned table.
-    self.exec_and_compare_hive_and_impala_hs2("describe formatted functional.alltypes")
-    self.exec_and_compare_hive_and_impala_hs2(
-        "describe formatted functional_text_lzo.alltypes")
-    # Describe an unpartitioned table.
-    self.exec_and_compare_hive_and_impala_hs2("describe formatted tpch.lineitem")
-    self.exec_and_compare_hive_and_impala_hs2("describe formatted functional.jointbl")
-
-    # Create and describe an unpartitioned and partitioned Avro table created
-    # by Impala without any column definitions.
-    # TODO: Instead of creating new tables here, change one of the existing
-    # Avro tables to be created without any column definitions.
-    db_name = "hive_test_db"
-    self.client.execute("create database if not exists %s" % db_name)
-    self.client.execute((
-        "create table %s.%s with serdeproperties ('avro.schema.url'='%s') stored as avro"
-        % (db_name, "avro_alltypes_nopart", self.AVRO_SCHEMA_LOC)))
-    self.exec_and_compare_hive_and_impala_hs2("describe formatted avro_alltypes_nopart")
-
-    self.client.execute((
-        "create table %s.%s partitioned by (year int, month int) "
-        "with serdeproperties ('avro.schema.url'='%s') stored as avro"
-        % (db_name, "avro_alltypes_part", self.AVRO_SCHEMA_LOC)))
-    self.exec_and_compare_hive_and_impala_hs2("describe formatted avro_alltypes_part")
-
-    try:
-      # Describe a view
-      self.exec_and_compare_hive_and_impala_hs2(\
-          "describe formatted functional.alltypes_view_sub")
-    except AssertionError:
-      pytest.xfail("Investigate minor difference in displaying null vs empty values")
-
-  def test_use_table(self, vector):
-    self.run_test_case('QueryTest/use', vector)
-
-  # Missing Coverage: ddl by hive being visible to Impala for data not residing in hdfs.
-  @SkipIfIsilon.hive
-  @SkipIfS3.hive
-  @SkipIfLocal.hive
-  def test_impala_sees_hive_created_tables_and_databases(self, vector):
-    self.client.set_configuration(vector.get_value('exec_option'))
-    db_name = 'hive_test_db'
-    tbl_name = 'testtbl'
-    call(["hive", "-e", "DROP DATABASE IF EXISTS %s CASCADE" % db_name])
-    self.client.execute("invalidate metadata")
-
-    assert db_name not in self.all_db_names()
-
-    call(["hive", "-e", "CREATE DATABASE %s" % db_name])
-
-    # Run 'invalidate metadata <table name>' when the parent database does not exist.
-    try:
-      self.client.execute("invalidate metadata %s.%s"  % (db_name, tbl_name))
-      assert 0, 'Expected to fail'
-    except ImpalaBeeswaxException as e:
-      assert "TableNotFoundException: Table not found: %s.%s"\
-          % (db_name, tbl_name) in str(e)
-
-    assert db_name not in self.all_db_names()
-
-    # Create a table external to Impala.
-    call(["hive", "-e", "CREATE TABLE %s.%s (i int)" % (db_name, tbl_name)])
-
-    # Impala does not know about this database or table.
-    assert db_name not in self.all_db_names()
-
-    # Run 'invalidate metadata <table name>'. It should add the database and table
-    # in to Impala's catalog.
-    self.client.execute("invalidate metadata %s.%s"  % (db_name, tbl_name))
-    assert db_name in self.all_db_names()
-
-    result = self.client.execute("show tables in %s" % db_name)
-    assert tbl_name in result.data
-    assert len(result.data) == 1
-
-    self.client.execute("create table %s.%s (j int)" % (db_name, tbl_name + "_test"))
-    call(["hive", "-e", "drop table %s.%s" % (db_name, tbl_name + "_test")])
-
-    # Re-create the table in Hive. Use the same name, but different casing.
-    call(["hive", "-e", "CREATE TABLE %s.%s (i bigint)" % (db_name, tbl_name + "_TEST")])
-    self.client.execute("invalidate metadata %s.%s"  % (db_name, tbl_name + "_Test"))
-    result = self.client.execute("show tables in %s" % db_name)
-    assert tbl_name + "_test" in result.data
-    assert tbl_name + "_Test" not in result.data
-    assert tbl_name + "_TEST" not in result.data
-
-    # Verify this table is the version created in Hive (the column should be BIGINT)
-    result = self.client.execute("describe %s.%s" % (db_name, tbl_name + '_test'))
-    assert 'bigint' in result.data[0]
-
-    self.client.execute("drop table %s.%s" % (db_name, tbl_name + "_TEST"))
-
-    # Make sure we can actually use the table
-    self.client.execute(("insert overwrite table %s.%s "
-                        "select 1 from functional.alltypes limit 5"
-                         % (db_name, tbl_name)))
-    result = self.execute_scalar("select count(*) from %s.%s" % (db_name, tbl_name))
-    assert int(result) == 5
-
-    # Should be able to call invalidate metadata multiple times on the same table.
-    self.client.execute("invalidate metadata %s.%s"  % (db_name, tbl_name))
-    self.client.execute("refresh %s.%s"  % (db_name, tbl_name))
-    result = self.client.execute("show tables in %s" % db_name)
-    assert tbl_name in result.data
-
-    # Can still use the table.
-    result = self.execute_scalar("select count(*) from %s.%s" % (db_name, tbl_name))
-    assert int(result) == 5
-
-    # Run 'invalidate metadata <table name>' when no table exists with that name.
-    try:
-      self.client.execute("invalidate metadata %s.%s"  % (db_name, tbl_name + '2'))
-      assert 0, 'Expected to fail'
-    except ImpalaBeeswaxException as e:
-      assert "TableNotFoundException: Table not found: %s.%s"\
-          % (db_name, tbl_name + '2') in str(e)
-
-    result = self.client.execute("show tables in %s" % db_name);
-    assert len(result.data) == 1
-    assert tbl_name in result.data
-
-    # Create another table
-    call(["hive", "-e", "CREATE TABLE %s.%s (i int)" % (db_name, tbl_name + '2')])
-    self.client.execute("invalidate metadata %s.%s"  % (db_name, tbl_name + '2'))
-    result = self.client.execute("show tables in %s" % db_name)
-    assert tbl_name + '2' in result.data
-    assert tbl_name in result.data
-
-    # Drop the table, and then verify invalidate metadata <table name> removes the
-    # table from the catalog.
-    call(["hive", "-e", "DROP TABLE %s.%s " % (db_name, tbl_name)])
-    self.client.execute("invalidate metadata %s.%s"  % (db_name, tbl_name))
-    result = self.client.execute("show tables in %s" % db_name)
-    assert tbl_name + '2' in result.data
-    assert tbl_name not in result.data
-
-    # Should be able to call invalidate multiple times on the same table when the table
-    # does not exist.
-    try:
-      self.client.execute("invalidate metadata %s.%s"  % (db_name, tbl_name))
-      assert 0, 'Expected to fail'
-    except ImpalaBeeswaxException as e:
-      assert "TableNotFoundException: Table not found: %s.%s"\
-          % (db_name, tbl_name) in str(e)
-
-    result = self.client.execute("show tables in %s" % db_name)
-    assert tbl_name + '2' in result.data
-    assert tbl_name not in result.data
-
-    # Drop the parent database (this will drop all tables). Then invalidate the table
-    call(["hive", "-e", "DROP DATABASE %s CASCADE" % db_name])
-    self.client.execute("invalidate metadata %s.%s"  % (db_name, tbl_name + '2'))
-    result = self.client.execute("show tables in %s" % db_name);
-    assert len(result.data) == 0
-
-    # Requires a refresh to see the dropped database
-    assert db_name in self.all_db_names()
-
-    self.client.execute("invalidate metadata")
-    assert db_name not in self.all_db_names()
+  def __test_describe_db_cleanup(self):
+    self.cleanup_db('hive_test_desc_db')
+    self.cleanup_db('impala_test_desc_db1')
+    self.cleanup_db('impala_test_desc_db2')
+    self.cleanup_db('impala_test_desc_db3')
+    self.cleanup_db('impala_test_desc_db4')

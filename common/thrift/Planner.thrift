@@ -1,22 +1,25 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 //
 // This file contains structures produced by the planner.
 
 namespace cpp impala
-namespace java com.cloudera.impala.thrift
+namespace java org.apache.impala.thrift
 
 include "Types.thrift"
 include "Exprs.thrift"
@@ -28,11 +31,14 @@ include "Partitions.thrift"
 // plan fragment, including how to produce and how to partition its output.
 // It leaves out node-specific parameters needed for the actual execution.
 struct TPlanFragment {
+  // Ordinal number of fragment within a query; range: 0..<total # fragments>
+  1: required Types.TFragmentIdx idx
+
   // display name to be shown in the runtime profile; unique within a query
-  1: required string display_name
+  2: required string display_name
 
   // no plan or descriptor table: query without From clause
-  2: optional PlanNodes.TPlan plan
+  3: optional PlanNodes.TPlan plan
 
   // exprs that produce values for slots of output tuple (one expr per slot);
   // if not set, plan fragment materializes full rows of plan_tree
@@ -71,8 +77,18 @@ struct TScanRangeLocation {
 }
 
 // A single scan range plus the hosts that serve it
-struct TScanRangeLocations {
+struct TScanRangeLocationList {
   1: required PlanNodes.TScanRange scan_range
   // non-empty list
   2: list<TScanRangeLocation> locations
+}
+
+// A plan: tree of plan fragments that materializes either a query result or the build
+// side of a join used by another plan; it consists of a sequence of plan fragments.
+// TODO: rename both this and PlanNodes.TPlan (TPlan should be something like TExecPlan
+// or TExecTree)
+struct TPlanFragmentTree {
+  1: required i32 cohort_id
+
+  2: required list<TPlanFragment> fragments
 }

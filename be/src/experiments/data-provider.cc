@@ -1,9 +1,28 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 #include "experiments/data-provider.h"
 
 #include <algorithm>
 #include <stdlib.h>
 #include <math.h>
 #include <iostream>
+
+#include "util/runtime-profile-counters.h"
 
 #include "common/names.h"
 
@@ -45,7 +64,7 @@ void DataProvider::SetSeed(int seed) {
 
 void RandString(MemPool* pool, StringValue* result,
     const StringValue& min, const StringValue& max, double r,
-    variate_generator<minstd_rand&, uniform_real<> >& rand) {
+    variate_generator<minstd_rand&, uniform_real<>>& rand) {
   int min_len = min.len;
   int max_len = max.len;
   int len = r * (max_len - min_len) + min_len;
@@ -67,7 +86,7 @@ void* DataProvider::NextBatch(int* rows_returned) {
   COUNTER_ADD(bytes_generated_, num_rows * row_size_);
 
   uniform_real<> dist(0,1);
-  variate_generator<minstd_rand&, uniform_real<> > rand_double(rand_generator_, dist);
+  variate_generator<minstd_rand&, uniform_real<>> rand_double(rand_generator_, dist);
 
   char* data = data_.get();
   for (int i = 0, row_idx = rows_returned_; i < num_rows; ++i, ++row_idx) {

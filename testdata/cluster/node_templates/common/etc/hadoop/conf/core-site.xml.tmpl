@@ -35,6 +35,16 @@
   </property>
 
   <property>
+  <!-- AuthorizationTest depends on auth_to_local configs. These tests are run
+       irrespective of whether kerberos is enabled. -->
+    <name>hadoop.security.auth_to_local</name>
+    <value>RULE:[2:$1@$0](authtest@REALM.COM)s/(.*)@REALM.COM/auth_to_local_user/
+RULE:[1:$1]
+RULE:[2:$1]
+DEFAULT</value>
+  </property>
+
+  <property>
     <name>hadoop.proxyuser.${USER}.groups</name>
     <value>*</value>
   </property>
@@ -68,10 +78,15 @@
     <value>${AWS_SECRET_ACCESS_KEY}</value>
   </property>
 
+  <property>
+    <name>fs.s3a.connection.maximum</name>
+    <value>1500</value>
+  </property>
+
   <!-- Location of the KMS key provider -->
   <property>
     <name>hadoop.security.key.provider.path</name>
-    <value>kms://http@127.0.0.1:16000/kms</value>
+    <value>kms://http@127.0.0.1:9600/kms</value>
   </property>
 
   <!-- BEGIN Kerberos settings -->
@@ -95,15 +110,6 @@
     <value>*</value>
   </property>
 
-  <property>
-    <name>hadoop.proxyuser.llama.hosts</name>
-    <value>*</value>
-  </property>
-
-  <property>
-    <name>hadoop.proxyuser.llama.groups</name>
-    <value>*</value>
-  </property>
   <!-- END Kerberos settings -->
 
 </configuration>

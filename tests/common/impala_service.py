@@ -1,32 +1,35 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # Basic object model of a Impala Services (impalad + statestored). Provides a way to
 # programatically interact with the services and perform operations such as querying
 # the debug webpage, getting metric values, or creating client connections.
+
 import json
 import logging
-import os
 import re
-import sys
 import urllib
-
-from collections import defaultdict
-from HTMLParser import HTMLParser
-from tests.common.impala_connection import ImpalaConnection, create_connection
-from tests.common.impala_connection import create_ldap_connection
 from time import sleep, time
+
+from tests.common.impala_connection import create_connection, create_ldap_connection
+from TCLIService import TCLIService
+from thrift.transport.TSocket import TSocket
+from thrift.transport.TTransport import TBufferedTransport
+from thrift.protocol import TBinaryProtocol
 
 logging.basicConfig(level=logging.ERROR, format='%(threadName)s: %(message)s')
 LOG = logging.getLogger('impala_service')
@@ -53,6 +56,10 @@ class BaseImpalaService(object):
 
   def read_debug_webpage(self, page_name, timeout=10, interval=1):
     return self.open_debug_webpage(page_name, timeout=timeout, interval=interval).read()
+
+  def get_debug_webpage_json(self, page_name):
+    """Returns the json for the given Impala debug webpage, eg. '/queries'"""
+    return json.loads(self.read_debug_webpage(page_name + "?json"))
 
   def get_metric_value(self, metric_name, default_value=None):
     """Returns the value of the the given metric name from the Impala debug webpage"""
@@ -97,6 +104,10 @@ class ImpaladService(BaseImpalaService):
     result = json.loads(self.read_debug_webpage('backends?json', timeout, interval))
     num = len(result['backends'])
     return None if num is None else int(num)
+
+  def get_in_flight_queries(self, timeout=30, interval=1):
+    result = json.loads(self.read_debug_webpage('queries?json', timeout, interval))
+    return result['in_flight_queries']
 
   def get_num_in_flight_queries(self, timeout=30, interval=1):
     LOG.info("Getting num_in_flight_queries from %s:%s" %
@@ -193,6 +204,16 @@ class ImpaladService(BaseImpalaService):
                                     user=user, password=password, use_ssl=use_ssl)
     client.connect()
     return client
+
+  def create_hs2_client(self):
+    """Creates a new HS2 client connection to the impalad"""
+    host, port = (self.hostname, self.hs2_port)
+    socket = TSocket(host, port)
+    transport = TBufferedTransport(socket)
+    transport.open()
+    protocol = TBinaryProtocol.TBinaryProtocol(transport)
+    hs2_client = TCLIService.Client(protocol)
+    return hs2_client
 
   def get_catalog_object_dump(self, object_type, object_name):
     return self.read_debug_webpage('catalog_objects?object_type=%s&object_name=%s' %\

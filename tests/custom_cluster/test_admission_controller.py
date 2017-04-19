@@ -1,24 +1,42 @@
-# Copyright (c) 2014 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # Tests admission control
 
+import itertools
+import logging
+import os
 import pytest
-import threading
 import re
-
+import sys
+import threading
 from time import sleep, time
+
 from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
-from tests.common.impala_cluster import ImpalaCluster
+from tests.common.environ import specific_build_type_timeout, IMPALAD_BUILD
 from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.common.test_dimensions import create_single_exec_option_dimension
-from tests.common.test_dimensions import create_uncompressed_text_dimension
-from tests.common.test_vector import TestDimension
+from tests.common.test_dimensions import (
+    create_single_exec_option_dimension,
+    create_uncompressed_text_dimension)
+from tests.common.test_vector import ImpalaTestDimension
 from tests.hs2.hs2_test_suite import HS2TestSuite, needs_session
 from ImpalaService import ImpalaHiveServer2Service
 from TCLIService import TCLIService
-
-import logging
-import os
 
 LOG = logging.getLogger('admission_test')
 
@@ -45,8 +63,12 @@ ROUND_ROBIN_SUBMISSION = [True, False]
 # pool with the parameters below.
 POOL_NAME = "default-pool"
 
-# The statestore heartbeat of the impala cluster the test is executing against
-STATESTORE_HEARTBEAT_MS = 500
+# The statestore heartbeat and topic update frequency (ms). Set low for testing.
+STATESTORE_RPC_FREQUENCY_MS = 500
+
+# Stress test timeout (seconds). The timeout needs to be significantly higher in code
+# coverage builds (IMPALA-3790).
+STRESS_TIMEOUT = specific_build_type_timeout(30, code_coverage_build_timeout=600)
 
 # The number of queries that can execute concurrently in the pool POOL_NAME.
 MAX_NUM_CONCURRENT_QUERIES = 5
@@ -57,17 +79,23 @@ MAX_NUM_QUEUED_QUERIES = 10
 # Mem limit (bytes) used in the mem limit test
 MEM_TEST_LIMIT = 12 * 1024 * 1024 * 1024
 
-_STATESTORED_ARGS = "-statestore_heartbeat_frequency_ms=%s" % (STATESTORE_HEARTBEAT_MS)
+_STATESTORED_ARGS = "-statestore_heartbeat_frequency_ms=%s "\
+                    "-statestore_update_frequency_ms=%s" %\
+                    (STATESTORE_RPC_FREQUENCY_MS, STATESTORE_RPC_FREQUENCY_MS)
 
 # Key in the query profile for the query options.
 PROFILE_QUERY_OPTIONS_KEY = "Query Options (non default): "
 
-def impalad_admission_ctrl_flags(max_requests, max_queued, mem_limit):
-  proc_limit_flag = ("-mem_limit=%s" % (mem_limit)) if mem_limit > 0 else ""
+def impalad_admission_ctrl_flags(max_requests, max_queued, pool_max_mem,
+    proc_mem_limit = None):
+  if proc_mem_limit is not None:
+    proc_limit_flag = "-mem_limit=%s" % (proc_mem_limit)
+  else:
+    proc_limit_flag = ""
   return ("-vmodule admission-controller=3 -default_pool_max_requests %s "
       "-default_pool_max_queued %s -default_pool_mem_limit %s "
       "-disable_admission_control=false %s" %\
-      (max_requests, max_queued, mem_limit, proc_limit_flag))
+      (max_requests, max_queued, pool_max_mem, proc_limit_flag))
 
 
 def impalad_admission_ctrl_config_args(additional_args=""):
@@ -101,9 +129,10 @@ class TestAdmissionControllerBase(CustomClusterTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestAdmissionControllerBase, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(create_single_exec_option_dimension())
+    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
     # There's no reason to test this on other file formats/compression codecs right now
-    cls.TestMatrix.add_dimension(create_uncompressed_text_dimension(cls.get_workload()))
+    cls.ImpalaTestMatrix.add_dimension(
+      create_uncompressed_text_dimension(cls.get_workload()))
 
 class TestAdmissionController(TestAdmissionControllerBase, HS2TestSuite):
   def __check_pool_rejected(self, client, pool, expected_error_re):
@@ -242,6 +271,50 @@ class TestAdmissionController(TestAdmissionControllerBase, HS2TestSuite):
     self.__check_hs2_query_opts("root.queueB", None,\
         ['MEM_LIMIT=200000000', 'REQUEST_POOL=root.queueB', batch_size])
 
+  @pytest.mark.execute_serially
+  @CustomClusterTestSuite.with_args(
+      impalad_args=impalad_admission_ctrl_config_args("-require_username"),
+      statestored_args=_STATESTORED_ARGS)
+  def test_require_user(self):
+    open_session_req = TCLIService.TOpenSessionReq()
+    open_session_req.username = ""
+    open_session_resp = self.hs2_client.OpenSession(open_session_req)
+    TestAdmissionController.check_response(open_session_resp)
+
+    try:
+      execute_statement_req = TCLIService.TExecuteStatementReq()
+      execute_statement_req.sessionHandle = open_session_resp.sessionHandle
+      execute_statement_req.statement = "select count(1) from functional.alltypes"
+      execute_statement_resp = self.hs2_client.ExecuteStatement(execute_statement_req)
+      TestAdmissionController.check_response(execute_statement_resp,
+          TCLIService.TStatusCode.ERROR_STATUS, "User must be specified")
+    finally:
+      close_req = TCLIService.TCloseSessionReq()
+      close_req.sessionHandle = open_session_resp.sessionHandle
+      TestAdmissionController.check_response(self.hs2_client.CloseSession(close_req))
+
+
+  @pytest.mark.execute_serially
+  @CustomClusterTestSuite.with_args(
+      impalad_args=impalad_admission_ctrl_flags(1, 1, 10 * 1024 * 1024,
+          1024 * 1024 * 1024),
+      statestored_args=_STATESTORED_ARGS)
+  def test_trivial_coord_query_limits(self):
+    """Tests that trivial coordinator only queries have negligible resource requirements.
+    """
+    # Queries with only constant exprs or limit 0 should be admitted.
+    self.execute_query_expect_success(self.client, "select 1")
+    self.execute_query_expect_success(self.client,
+        "select * from functional.alltypes limit 0")
+
+    non_trivial_queries = [
+        "select * from functional.alltypesagg limit 1",
+        "select * from functional.alltypestiny"]
+    for query in non_trivial_queries:
+      ex = self.execute_query_expect_failure(self.client, query)
+      assert re.search("Rejected query from pool default-pool : request memory needed "
+          ".* is greater than pool max mem resources 10.00 MB", str(ex))
+
 class TestAdmissionControllerStress(TestAdmissionControllerBase):
   """Submits a number of queries (parameterized) with some delay between submissions
   (parameterized) and the ability to submit to one impalad or many in a round-robin
@@ -273,17 +346,28 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
   @classmethod
   def add_test_dimensions(cls):
     super(TestAdmissionControllerStress, cls).add_test_dimensions()
-    cls.TestMatrix.add_dimension(TestDimension('num_queries', *NUM_QUERIES))
-    cls.TestMatrix.add_dimension(
-        TestDimension('round_robin_submission', *ROUND_ROBIN_SUBMISSION))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('num_queries', *NUM_QUERIES))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('round_robin_submission', *ROUND_ROBIN_SUBMISSION))
+    cls.ImpalaTestMatrix.add_dimension(
+        ImpalaTestDimension('submission_delay_ms', *SUBMISSION_DELAY_MS))
 
-    cls.TestMatrix.add_dimension(
-        TestDimension('submission_delay_ms', *SUBMISSION_DELAY_MS))
-    if cls.exploration_strategy() == 'core':
-      cls.TestMatrix.add_constraint(lambda v: v.get_value('submission_delay_ms') == 0)
-      cls.TestMatrix.add_constraint(lambda v: v.get_value('num_queries') == 30)
-      cls.TestMatrix.add_constraint(\
+    # Additional constraints for code coverage jobs and core.
+    num_queries = None
+    if IMPALAD_BUILD.has_code_coverage():
+      # Code coverage builds can't handle the increased concurrency.
+      num_queries = 15
+    elif cls.exploration_strategy() == 'core':
+      num_queries = 30
+      cls.ImpalaTestMatrix.add_constraint(
+          lambda v: v.get_value('submission_delay_ms') == 0)
+      cls.ImpalaTestMatrix.add_constraint(\
           lambda v: v.get_value('round_robin_submission') == True)
+
+    if num_queries is not None:
+      cls.ImpalaTestMatrix.add_constraint(
+          lambda v: v.get_value('num_queries') == num_queries)
 
   def setup(self):
     # All threads are stored in this list and it's used just to make sure we clean up
@@ -330,7 +414,7 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
             metric_key(self.pool_name, 'total-%s' % short_name), 0)
     return metrics
 
-  def wait_for_metric_changes(self, metric_names, initial, expected_delta, timeout=30):
+  def wait_for_metric_changes(self, metric_names, initial, expected_delta):
     """
     Waits for the sum of metrics in metric_names to change by at least expected_delta.
 
@@ -359,11 +443,11 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
         LOG.debug("Found all %s metrics after %s seconds", delta_sum,
             round(time() - start_time, 1))
         return (deltas, current)
-      assert (time() - start_time < timeout),\
-          "Timed out waiting %s seconds for metrics" % (timeout,)
+      assert (time() - start_time < STRESS_TIMEOUT),\
+          "Timed out waiting %s seconds for metrics" % (STRESS_TIMEOUT,)
       sleep(1)
 
-  def wait_for_heartbeats(self, heartbeats, timeout=30):
+  def wait_for_statestore_updates(self, heartbeats):
     """Waits for a number of statestore heartbeats from all impalads."""
     start_time = time()
     num_impalads = len(self.impalads)
@@ -375,18 +459,18 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
       curr[impalad] = init[impalad]
 
     while True:
-      LOG.debug("wait_for_heartbeats: curr=%s, init=%s, d=%s", curr.values(),
+      LOG.debug("wait_for_statestore_updates: curr=%s, init=%s, d=%s", curr.values(),
           init.values(), [curr[i] - init[i] for i in self.impalads])
       if all([curr[i] - init[i] >= heartbeats for i in self.impalads]): break
       for impalad in self.impalads:
         curr[impalad] = impalad.service.get_metric_value(\
             'statestore-subscriber.topic-update-interval-time')['count']
-      assert (time() - start_time < timeout),\
-          "Timed out waiting %s seconds for heartbeats" % (timeout,)
-      sleep(0.5)
+      assert (time() - start_time < STRESS_TIMEOUT),\
+          "Timed out waiting %s seconds for heartbeats" % (STRESS_TIMEOUT,)
+      sleep(STATESTORE_RPC_FREQUENCY_MS / float(1000))
     LOG.debug("Waited %s for %s heartbeats", round(time() - start_time, 1), heartbeats)
 
-  def wait_for_admitted_threads(self, num_threads, timeout=30):
+  def wait_for_admitted_threads(self, num_threads):
     """
     Wait for query submission threads to update after being admitted, as determined
     by observing metric changes. This is necessary because the metrics may change
@@ -399,9 +483,9 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
     # lock to synchronize before checking the list length (on which another thread
     # may call append() concurrently).
     while len(self.executing_threads) < num_threads:
-      assert (time() - start_time < timeout),\
+      assert (time() - start_time < STRESS_TIMEOUT),\
           "Timed out waiting %s seconds for %s admitted client rpcs to return" %\
-              (timeout, num_threads)
+              (STRESS_TIMEOUT, num_threads)
       sleep(0.1)
     LOG.debug("Found all %s admitted threads after %s seconds", num_threads,
         round(time() - start_time, 1))
@@ -479,7 +563,7 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
           LOG.debug("Submitting query %s", self.query_num)
           self.query_handle = client.execute_async(query)
         except ImpalaBeeswaxException as e:
-          if "Rejected" in str(e):
+          if re.search("Rejected.*queue full", str(e)):
             LOG.debug("Rejected query %s", self.query_num)
             self.query_state = 'REJECTED'
             return
@@ -521,6 +605,33 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
         LOG.debug("Thread terminating in state=%s", self.query_state)
         if client is not None:
           client.close()
+
+  def _check_queries_page_resource_pools(self):
+    """Checks that all queries in the '/queries' webpage json have the correct resource
+    pool (this is called after all queries have been admitted, queued, or rejected, so
+    they should already have the pool set), or no pool for queries that don't go through
+    admission control."""
+    for impalad in self.impalads:
+      queries_json = impalad.service.get_debug_webpage_json('/queries')
+      for query in itertools.chain(queries_json['in_flight_queries'], \
+          queries_json['completed_queries']):
+        if query['stmt_type'] == 'QUERY' or query['stmt_type'] == 'DML':
+          assert query['last_event'] != 'Registered' and \
+              query['last_event'] != 'Planning finished'
+          assert query['resource_pool'] == self.pool_name
+        else:
+          assert query['resource_pool'] == ''
+
+  def _get_queries_page_num_queued(self):
+    """Returns the number of queries currently in the 'queued' state from the '/queries'
+    webpage json"""
+    num_queued = 0
+    for impalad in self.impalads:
+      queries_json = impalad.service.get_debug_webpage_json('/queries')
+      for query in queries_json['in_flight_queries']:
+        if query['last_event'] == 'Queued':
+          num_queued += 1
+    return num_queued
 
   def run_admission_test(self, vector, additional_query_options):
     LOG.debug("Starting test case with parameters: %s", vector)
@@ -567,6 +678,13 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
         num_queries - metric_deltas['admitted'] - metric_deltas['queued']
     initial_metric_deltas = metric_deltas
 
+    # Like above, check that the count from the queries webpage json is reasonable.
+    queries_page_num_queued = self._get_queries_page_num_queued()
+    assert queries_page_num_queued >=\
+        min(num_queries - metric_deltas['admitted'], MAX_NUM_QUEUED_QUERIES)
+    assert queries_page_num_queued <= MAX_NUM_QUEUED_QUERIES * len(self.impalads)
+    self._check_queries_page_resource_pools()
+
     while len(self.executing_threads) > 0:
       curr_metrics = self.get_admission_metrics();
       log_metrics("Main loop, curr_metrics: ", curr_metrics);
@@ -581,9 +699,9 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
       (metric_deltas, _) = self.wait_for_metric_changes(['admitted'], curr_metrics,
           expected_admitted)
       self.wait_for_admitted_threads(metric_deltas['admitted'])
-      # Wait a few heartbeats to ensure the admission controllers have reached a steady
+      # Wait a few topic updates to ensure the admission controllers have reached a steady
       # state or we may find an impalad dequeue more requests after we capture metrics.
-      self.wait_for_heartbeats(4)
+      self.wait_for_statestore_updates(10)
 
     final_metrics = self.get_admission_metrics();
     log_metrics("Final metrics: ", final_metrics, logging.INFO);
@@ -608,6 +726,11 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
       assert metric_deltas['queued'] == MAX_NUM_QUEUED_QUERIES
       assert metric_deltas['rejected'] == num_queries - expected_admitted
 
+    # All queries should be completed by now.
+    queries_page_num_queued = self._get_queries_page_num_queued()
+    assert queries_page_num_queued == 0
+    self._check_queries_page_resource_pools()
+
     for thread in self.all_threads:
       if thread.error is not None:
         raise thread.error
@@ -619,7 +742,11 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
       statestored_args=_STATESTORED_ARGS)
   def test_admission_controller_with_flags(self, vector):
     self.pool_name = 'default-pool'
-    self.run_admission_test(vector, {'request_pool': self.pool_name})
+    # The pool has no mem resources set, so submitting queries with huge mem_limits
+    # should be fine. This exercises the code that does the per-pool memory
+    # accounting (see MemTracker::GetPoolMemReserved()) without actually being throttled.
+    self.run_admission_test(vector, {'request_pool': self.pool_name,
+      'mem_limit': sys.maxint})
 
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args(
@@ -643,7 +770,7 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args(
       impalad_args=impalad_admission_ctrl_flags(MAX_NUM_CONCURRENT_QUERIES * 30,
-        MAX_NUM_QUEUED_QUERIES, MEM_TEST_LIMIT),
+        MAX_NUM_QUEUED_QUERIES, MEM_TEST_LIMIT, MEM_TEST_LIMIT),
       statestored_args=_STATESTORED_ARGS)
   def test_mem_limit(self, vector):
     # Impala may set the proc mem limit lower than we think depending on the overcommit

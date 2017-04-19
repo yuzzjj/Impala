@@ -1,13 +1,28 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # This module is used for common utilities related to parsing test files
-import collections
+
 import codecs
+import collections
 import logging
 import re
 from collections import defaultdict
-from os.path import isfile, isdir
-from tests.common.test_dimensions import TableFormatInfo
+from os.path import isfile
 from textwrap import dedent
 
 LOG = logging.getLogger('impala_test_suite')
@@ -21,9 +36,9 @@ SUBSECTION_DELIMITER = "----"
 class QueryTestSectionReader(object):
   @staticmethod
   def build_query(query_section_text):
-    """Build a query by stripping comments and trailing semi-colons."""
+    """Build a query by stripping comments and trailing newlines and semi-colons."""
     query_section_text = remove_comments(query_section_text)
-    return query_section_text.rstrip(';')
+    return query_section_text.rstrip("\n;")
 
   @staticmethod
   def get_table_name_components(table_format, table_name, scale_factor=''):
@@ -78,7 +93,7 @@ def parse_query_test_file(file_name, valid_section_names=None, encoding=None):
   section_names = valid_section_names
   if section_names is None:
     section_names = ['QUERY', 'RESULTS', 'TYPES', 'LABELS', 'SETUP', 'CATCH', 'ERRORS',
-        'USER', 'RUNTIME_PROFILE']
+        'USER', 'RUNTIME_PROFILE', 'SHELL', 'DML_RESULTS']
   return parse_test_file(file_name, section_names, encoding=encoding,
       skip_unknown_sections=False)
 
@@ -86,6 +101,7 @@ def parse_table_constraints(constraints_file):
   """Reads a table contraints file, if one exists"""
   schema_include = defaultdict(list)
   schema_exclude = defaultdict(list)
+  schema_only = defaultdict(list)
   if not isfile(constraints_file):
     LOG.info('No schema constraints file file found')
   else:
@@ -97,7 +113,13 @@ def parse_table_constraints(constraints_file):
         # Format: table_name:<name>, constraint_type:<type>, table_format:<t1>,<t2>,...
         table_name, constraint_type, table_formats =\
             [value.split(':')[1].strip() for value in line.split(',', 2)]
-        if constraint_type == 'restrict_to':
+
+        # 'only' constraint -- If a format defines an only constraint, only those tables
+        # collected for the same table_format will be created.
+        if constraint_type == 'only':
+          for f in map(parse_table_format_constraint, table_formats.split(',')):
+            schema_only[f].append(table_name.lower())
+        elif constraint_type == 'restrict_to':
           schema_include[table_name.lower()] +=\
               map(parse_table_format_constraint, table_formats.split(','))
         elif constraint_type == 'exclude':
@@ -105,7 +127,7 @@ def parse_table_constraints(constraints_file):
               map(parse_table_format_constraint, table_formats.split(','))
         else:
           raise ValueError, 'Unknown constraint type: %s' % constraint_type
-  return schema_include, schema_exclude
+  return schema_include, schema_exclude, schema_only
 
 def parse_table_format_constraint(table_format_constraint):
   # TODO: Expand how we parse table format constraints to support syntax such as
@@ -156,7 +178,7 @@ def parse_test_file_text(text, valid_section_names, skip_unknown_sections=True):
     parsed_sections = collections.defaultdict(str)
     for sub_section in re.split(r'(?m)^%s' % SUBSECTION_DELIMITER, section[1:]):
       # Skip empty subsections
-      if not sub_section:
+      if not sub_section.strip():
         continue
 
       lines = sub_section.split('\n')
@@ -167,10 +189,18 @@ def parse_test_file_text(text, valid_section_names, skip_unknown_sections=True):
       if(len(subsection_info) == 2):
         subsection_name, subsection_comment = subsection_info
 
+      lines_content = lines[1:-1]
+
+      subsection_str = '\n'.join([line for line in lines_content])
+      if len(lines_content) != 0:
+        # Add trailing newline to last line if present. This disambiguates between the
+        # case of no lines versus a single line with no text.
+        subsection_str += "\n"
+
       if subsection_name not in valid_section_names:
         if skip_unknown_sections or not subsection_name:
           print sub_section
-          print 'Unknown section %s' % subsection_name
+          print 'Unknown section \'%s\'' % subsection_name
           continue
         else:
           raise RuntimeError, 'Unknown subsection: %s' % subsection_name
@@ -187,12 +217,53 @@ def parse_test_file_text(text, valid_section_names, skip_unknown_sections=True):
           else:
             raise RuntimeError, 'Unknown subsection comment: %s' % comment
 
-      parsed_sections[subsection_name] = '\n'.join([line for line in lines[1:-1]])
+      if subsection_name == 'CATCH':
+        parsed_sections['CATCH'] = list()
+        if subsection_comment == None:
+          parsed_sections['CATCH'].append(subsection_str)
+        elif subsection_comment == 'ANY_OF':
+          parsed_sections['CATCH'].extend(lines_content)
+        else:
+          raise RuntimeError, 'Unknown subsection comment: %s' % subsection_comment
+        for exception_str in parsed_sections['CATCH']:
+          assert exception_str.strip(), "Empty exception string."
+        continue
+
+      # The DML_RESULTS section is used to specify what the state of the table should be
+      # after executing a DML query (in the QUERY section). The target table name must
+      # be specified in a table comment, and then the expected rows in the table are the
+      # contents of the section. If the TYPES and LABELS sections are provided, they
+      # will be verified against the DML_RESULTS. Using both DML_RESULTS and RESULTS is
+      # not supported.
+      if subsection_name == 'DML_RESULTS':
+        if subsection_comment is None or subsection_comment == '':
+          raise RuntimeError, 'DML_RESULTS requires that the table is specified ' \
+              'in the comment.'
+        parsed_sections['DML_RESULTS_TABLE'] = subsection_comment
+        parsed_sections['VERIFIER'] = 'VERIFY_IS_EQUAL_SORTED'
+
+      parsed_sections[subsection_name] = subsection_str
 
     if parsed_sections:
       sections.append(parsed_sections)
   return sections
 
+def split_section_lines(section_str):
+  """
+  Given a section string as produced by parse_test_file_text(), split it into separate
+  lines. The section string must have a trailing newline.
+  """
+  if section_str == '':
+    return []
+  assert section_str[-1] == '\n'
+  # Trim off the trailing newline and split into lines.
+  return section_str[:-1].split('\n')
+
+def join_section_lines(lines):
+  """
+  The inverse of split_section_lines().
+  """
+  return '\n'.join(lines) + '\n'
 
 def write_test_file(test_file_name, test_file_sections, encoding=None):
   """

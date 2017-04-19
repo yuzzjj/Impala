@@ -1,21 +1,25 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXPRS_HIVE_UDF_CALL_H
 #define IMPALA_EXPRS_HIVE_UDF_CALL_H
 
+#include <jni.h>
 #include <string>
 #include <boost/scoped_ptr.hpp>
 
@@ -56,6 +60,10 @@ class RuntimeState;
 /// If the UDF ran into an error, the FE throws an exception.
 class HiveUdfCall : public Expr {
  public:
+  /// Must be called before creating any HiveUdfCall instances. This is called at impalad
+  /// startup time.
+  static Status Init();
+
   virtual Status Prepare(RuntimeState* state, const RowDescriptor& row_desc,
                          ExprContext* ctx);
   virtual Status Open(RuntimeState* state, ExprContext* context,
@@ -63,18 +71,18 @@ class HiveUdfCall : public Expr {
   virtual void Close(RuntimeState* state, ExprContext* context,
       FunctionContext::FunctionStateScope scope = FunctionContext::FRAGMENT_LOCAL);
 
-  virtual BooleanVal GetBooleanVal(ExprContext* ctx, TupleRow*);
-  virtual TinyIntVal GetTinyIntVal(ExprContext* ctx, TupleRow*);
-  virtual SmallIntVal GetSmallIntVal(ExprContext* ctx, TupleRow*);
-  virtual IntVal GetIntVal(ExprContext* ctx, TupleRow*);
-  virtual BigIntVal GetBigIntVal(ExprContext* ctx, TupleRow*);
-  virtual FloatVal GetFloatVal(ExprContext* ctx, TupleRow*);
-  virtual DoubleVal GetDoubleVal(ExprContext* ctx, TupleRow*);
-  virtual StringVal GetStringVal(ExprContext* ctx, TupleRow*);
-  virtual TimestampVal GetTimestampVal(ExprContext* ctx, TupleRow*);
-  virtual DecimalVal GetDecimalVal(ExprContext* ctx, TupleRow*);
+  virtual BooleanVal GetBooleanVal(ExprContext* ctx, const TupleRow*);
+  virtual TinyIntVal GetTinyIntVal(ExprContext* ctx, const TupleRow*);
+  virtual SmallIntVal GetSmallIntVal(ExprContext* ctx, const TupleRow*);
+  virtual IntVal GetIntVal(ExprContext* ctx, const TupleRow*);
+  virtual BigIntVal GetBigIntVal(ExprContext* ctx, const TupleRow*);
+  virtual FloatVal GetFloatVal(ExprContext* ctx, const TupleRow*);
+  virtual DoubleVal GetDoubleVal(ExprContext* ctx, const TupleRow*);
+  virtual StringVal GetStringVal(ExprContext* ctx, const TupleRow*);
+  virtual TimestampVal GetTimestampVal(ExprContext* ctx, const TupleRow*);
+  virtual DecimalVal GetDecimalVal(ExprContext* ctx, const TupleRow*);
 
-  virtual Status GetCodegendComputeFn(RuntimeState* state, llvm::Function** fn);
+  virtual Status GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn);
 
  protected:
   friend class Expr;
@@ -87,7 +95,7 @@ class HiveUdfCall : public Expr {
   /// Evalutes the UDF over row. Returns the result as an AnyVal. This function
   /// never returns NULL but rather an AnyVal object with is_null set to true on
   /// error.
-  AnyVal* Evaluate(ExprContext* ctx, TupleRow* row);
+  AnyVal* Evaluate(ExprContext* ctx, const TupleRow* row);
 
   /// The path on the local FS to the UDF's jar
   std::string local_location_;
@@ -98,6 +106,13 @@ class HiveUdfCall : public Expr {
 
   /// The size of the buffer for passing in input arguments.
   int input_buffer_size_;
+
+  /// Global class reference to the UdfExecutor Java class and related method IDs. Set in
+  /// Init(). These have the lifetime of the process (i.e. 'executor_cl_' is never freed).
+  static jclass executor_cl_;
+  static jmethodID executor_ctor_id_;
+  static jmethodID executor_evaluate_id_;
+  static jmethodID executor_close_id_;
 };
 
 }

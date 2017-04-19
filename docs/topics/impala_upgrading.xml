@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+-->
+<!DOCTYPE concept PUBLIC "-//OASIS//DTD DITA Concept//EN" "concept.dtd">
+<concept id="upgrading">
+
+  <title>Upgrading Impala</title>
+  <prolog>
+    <metadata>
+      <data name="Category" value="Impala"/>
+      <data name="Category" value="Upgrading"/>
+      <data name="Category" value="Administrators"/>
+    </metadata>
+  </prolog>
+
+  <conbody>
+
+    <p>
+      Upgrading Impala involves building or acquiring new Impala-related binaries,
+      and then restarting Impala services.
+    </p>
+
+    </conbody>
+
+  <concept id="upgrade_manual">
+
+    <title>Upgrading Impala</title>
+
+    <conbody>
+
+      <ul>
+        <li>
+          <p>
+            Shut down all Impala-related daemons on
+            all relevant hosts in the cluster:
+          </p>
+          <ol>
+            <li>
+              Stop <codeph>impalad</codeph> on each Impala node in your cluster:
+<codeblock>$ sudo service impala-server stop</codeblock>
+            </li>
+
+            <li>
+              Stop any instances of the state store in your cluster:
+<codeblock>$ sudo service impala-state-store stop</codeblock>
+            </li>
+
+            <li rev="1.2">
+              Stop any instances of the catalog service in your cluster:
+<codeblock>$ sudo service impala-catalog stop</codeblock>
+            </li>
+          </ol>
+        </li>
+        <li>
+          <p>
+            Follow the build procedure in the
+            <filepath>README.md</filepath> file
+            to produce new Impala binaries.
+          </p>
+        </li>
+        <li>
+          <p>
+            Replace the binaries for all Impala-related
+            daemons on all relevant hosts in the cluster.
+          </p>
+        </li>
+        <li>
+          Check if there are new recommended or required configuration settings to put into place in the
+          configuration files, typically under <filepath>/etc/impala/conf</filepath>. See
+          <xref href="impala_config_performance.xml#config_performance"/> for settings related to performance and
+          scalability.
+        </li>
+        <li>
+          <p>
+            Restart all Impala-related daemons on
+            all relevant hosts in the cluster:
+          </p>
+          <ol>
+            <li>
+              Restart the Impala state store service on the desired nodes in your cluster. Expect to see a process
+              named <codeph>statestored</codeph> if the service started successfully.
+<codeblock>$ sudo service impala-state-store start
+$ ps ax | grep [s]tatestored
+ 6819 ?        Sl     0:07 /usr/lib/impala/sbin/statestored -log_dir=/var/log/impala -state_store_port=24000
+</codeblock>
+              <p>
+                Restart the state store service <i>before</i> the Impala server service to avoid <q>Not
+                connected</q> errors when you run <codeph>impala-shell</codeph>.
+              </p>
+            </li>
+
+            <li rev="1.2">
+              Restart the Impala catalog service on whichever host it runs on in your cluster. Expect to see a
+              process named <codeph>catalogd</codeph> if the service started successfully.
+<codeblock>$ sudo service impala-catalog restart
+$ ps ax | grep [c]atalogd
+ 6068 ?        Sl     4:06 /usr/lib/impala/sbin/catalogd
+</codeblock>
+            </li>
+
+            <li>
+              Restart the Impala daemon service on each node in your cluster. Expect to see a process named
+              <codeph>impalad</codeph> if the service started successfully.
+<codeblock>$ sudo service impala-server start
+$ ps ax | grep [i]mpalad
+ 7936 ?        Sl     0:12 /usr/lib/impala/sbin/impalad -log_dir=/var/log/impala -state_store_port=24000 -use_statestore
+-state_store_host=127.0.0.1 -be_port=22000
+</codeblock>
+            </li>
+          </ol>
+        </li>
+      </ul>
+
+      <note>
+        <p>
+          If the services did not start successfully (even though the <codeph>sudo service</codeph> command might
+          display <codeph>[OK]</codeph>), check for errors in the Impala log file, typically in
+          <filepath>/var/log/impala</filepath>.
+        </p>
+      </note>
+    </conbody>
+  </concept>
+</concept>

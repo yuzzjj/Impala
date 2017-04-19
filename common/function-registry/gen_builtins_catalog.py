@@ -1,17 +1,21 @@
 #!/usr/bin/env python
-# Copyright 2012 Cloudera Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 # This script generates the FE calls to populate the builtins.
 # To add a builtin, add an entry to impala_functions.py.
@@ -22,7 +26,6 @@ from string import Template
 import impala_functions
 
 java_registry_preamble = '\
-//  Copyright 2012 Cloudera Inc.\n\
 // \n\
 //  Licensed under the Apache License, Version 2.0 (the "License");\n\
 //  you may not use this file except in compliance with the License.\n\
@@ -41,10 +44,10 @@ java_registry_preamble = '\
 // common/function-registry/gen_builtins_catalog.py or the function list at\n\
 // common/function-registry/impala_functions.py.\n\
 \n\
-package com.cloudera.impala.builtins;\n\
+package org.apache.impala.builtins;\n\
 \n\
-import com.cloudera.impala.catalog.Type;\n\
-import com.cloudera.impala.catalog.Db;\n\
+import org.apache.impala.catalog.Type;\n\
+import org.apache.impala.catalog.Db;\n\
 \n\
 public class ScalarBuiltins { \n\
   public static void initBuiltins(Db db) { \
@@ -55,7 +58,7 @@ java_registry_epilogue = '\
 }\n'
 
 FE_PATH = os.path.expandvars(
-  "$IMPALA_HOME/fe/generated-sources/gen-java/com/cloudera/impala/builtins/")
+  "$IMPALA_HOME/fe/generated-sources/gen-java/org/apache/impala/builtins/")
 
 # This contains all the metadata to describe all the builtins.
 # Each meta data entry is itself a map to store all the meta data

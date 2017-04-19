@@ -1,29 +1,32 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <iostream>
-#include <gtest/gtest.h>
 #include <boost/bind.hpp>
-#include <boost/foreach.hpp>
+
 #include "common/object-pool.h"
-#include "util/cpu-info.h"
+#include "testutil/gtest-util.h"
 #include "util/periodic-counter-updater.h"
-#include "util/runtime-profile.h"
+#include "util/runtime-profile-counters.h"
 #include "util/streaming-sampler.h"
 #include "util/thread.h"
+#include "util/time.h"
 
 #include "common/names.h"
 
@@ -220,6 +223,98 @@ TEST(CountersTest, MergeAndUpdate) {
 
   // make sure we can print
   profile2.PrettyPrint(&dummy);
+}
+
+TEST(CountersTest, HighWaterMarkCounters) {
+  ObjectPool pool;
+  RuntimeProfile profile(&pool, "Profile");
+  RuntimeProfile::HighWaterMarkCounter* bytes_counter =
+      profile.AddHighWaterMarkCounter("bytes", TUnit::BYTES);
+
+  bytes_counter->Set(10);
+  EXPECT_EQ(bytes_counter->current_value(), 10);
+  EXPECT_EQ(bytes_counter->value(), 10);
+
+  bytes_counter->Add(5);
+  EXPECT_EQ(bytes_counter->current_value(), 15);
+  EXPECT_EQ(bytes_counter->value(), 15);
+
+  bytes_counter->Set(5);
+  EXPECT_EQ(bytes_counter->current_value(), 5);
+  EXPECT_EQ(bytes_counter->value(), 15);
+
+  bytes_counter->Add(3);
+  EXPECT_EQ(bytes_counter->current_value(), 8);
+  EXPECT_EQ(bytes_counter->value(), 15);
+
+  bool success = bytes_counter->TryAdd(20, 30);
+  EXPECT_TRUE(success);
+  EXPECT_EQ(bytes_counter->current_value(), 28);
+  EXPECT_EQ(bytes_counter->value(), 28);
+
+  success = bytes_counter->TryAdd(5, 30);
+  EXPECT_FALSE(success);
+  EXPECT_EQ(bytes_counter->current_value(), 28);
+  EXPECT_EQ(bytes_counter->value(), 28);
+}
+
+TEST(CountersTest, SummaryStatsCounters) {
+  ObjectPool pool;
+  RuntimeProfile profile1(&pool, "Profile 1");
+  RuntimeProfile::SummaryStatsCounter* summary_stats_counter_1 =
+    profile1.AddSummaryStatsCounter("summary_stats", TUnit::UNIT);
+
+  EXPECT_EQ(summary_stats_counter_1->value(), 0);
+  EXPECT_EQ(summary_stats_counter_1->MinValue(), numeric_limits<int64_t>::max());
+  EXPECT_EQ(summary_stats_counter_1->MaxValue(), numeric_limits<int64_t>::min());
+
+  summary_stats_counter_1->UpdateCounter(10);
+  EXPECT_EQ(summary_stats_counter_1->value(), 10);
+  EXPECT_EQ(summary_stats_counter_1->MinValue(), 10);
+  EXPECT_EQ(summary_stats_counter_1->MaxValue(), 10);
+
+  // Check that the average stays the same when updating with the same number.
+  summary_stats_counter_1->UpdateCounter(10);
+  EXPECT_EQ(summary_stats_counter_1->value(), 10);
+  EXPECT_EQ(summary_stats_counter_1->MinValue(), 10);
+  EXPECT_EQ(summary_stats_counter_1->MaxValue(), 10);
+
+  summary_stats_counter_1->UpdateCounter(40);
+  EXPECT_EQ(summary_stats_counter_1->value(), 20);
+  EXPECT_EQ(summary_stats_counter_1->MinValue(), 10);
+  EXPECT_EQ(summary_stats_counter_1->MaxValue(), 40);
+
+  // Verify an update with 0. This should still change the average as the number of
+  // samples increase
+  summary_stats_counter_1->UpdateCounter(0);
+  EXPECT_EQ(summary_stats_counter_1->value(), 15);
+  EXPECT_EQ(summary_stats_counter_1->MinValue(), 0);
+  EXPECT_EQ(summary_stats_counter_1->MaxValue(), 40);
+
+  // Verify a negative update..
+  summary_stats_counter_1->UpdateCounter(-40);
+  EXPECT_EQ(summary_stats_counter_1->value(), 4);
+  EXPECT_EQ(summary_stats_counter_1->MinValue(), -40);
+  EXPECT_EQ(summary_stats_counter_1->MaxValue(), 40);
+
+  RuntimeProfile profile2(&pool, "Profile 2");
+  RuntimeProfile::SummaryStatsCounter* summary_stats_counter_2 =
+    profile2.AddSummaryStatsCounter("summary_stats", TUnit::UNIT);
+
+  summary_stats_counter_2->UpdateCounter(100);
+  EXPECT_EQ(summary_stats_counter_2->value(), 100);
+  EXPECT_EQ(summary_stats_counter_2->MinValue(), 100);
+  EXPECT_EQ(summary_stats_counter_2->MaxValue(), 100);
+
+  TRuntimeProfileTree tprofile1;
+  profile1.ToThrift(&tprofile1);
+
+  // Merge profile1 and profile2 and check that profile2 is overwritten.
+  profile2.Update(tprofile1);
+  EXPECT_EQ(summary_stats_counter_2->value(), 4);
+  EXPECT_EQ(summary_stats_counter_2->MinValue(), -40);
+  EXPECT_EQ(summary_stats_counter_2->MaxValue(), 40);
+
 }
 
 TEST(CountersTest, DerivedCounters) {
@@ -421,7 +516,7 @@ TEST(CountersTest, EventSequences) {
 
   uint64_t last_timestamp = 0;
   string last_string = "";
-  BOOST_FOREACH(const RuntimeProfile::EventSequence::Event& ev, events) {
+  for (const RuntimeProfile::EventSequence::Event& ev: events) {
     EXPECT_TRUE(ev.second >= last_timestamp);
     last_timestamp = ev.second;
     EXPECT_TRUE(ev.first > last_string);
@@ -443,7 +538,7 @@ TEST(CountersTest, EventSequences) {
   EXPECT_TRUE(seq != NULL);
   seq->GetEvents(&events);
   EXPECT_EQ(3, events.size());
-  BOOST_FOREACH(const RuntimeProfile::EventSequence::Event& ev, events) {
+  for (const RuntimeProfile::EventSequence::Event& ev: events) {
     EXPECT_TRUE(ev.second >= last_timestamp);
     last_timestamp = ev.second;
     EXPECT_TRUE(ev.first > last_string);
@@ -499,11 +594,159 @@ TEST(CountersTest, StreamingSampler) {
   ValidateSampler(sampler, 7, 1000, 2);
 }
 
+// Test class to test ConcurrentStopWatch and RuntimeProfile::ConcurrentTimerCounter
+// don't double count in multithread environment.
+class TimerCounterTest {
+ public:
+  TimerCounterTest()
+    : timercounter_(TUnit::TIME_NS) {}
+
+  struct DummyWorker {
+    thread* thread_handle;
+    bool done;
+
+    DummyWorker()
+      : thread_handle(NULL), done(false) {}
+
+    ~DummyWorker() {
+      Stop();
+    }
+
+    void Stop() {
+      if (!done && thread_handle != NULL) {
+        done = true;
+        thread_handle->join();
+        delete thread_handle;
+        thread_handle = NULL;
+      }
+    }
+  };
+
+  void Run(DummyWorker* worker) {
+    SCOPED_CONCURRENT_STOP_WATCH(&csw_);
+    SCOPED_CONCURRENT_COUNTER(&timercounter_);
+    while (!worker->done) {
+      SleepForMs(10);
+      // Each test case should be no more than one second.
+      // Consider test failed if timer is more than 3 seconds.
+      if (csw_.TotalRunningTime() > 3000000000) {
+        EXPECT_FALSE(false);
+      }
+    }
+  }
+
+  // Start certain number of worker threads. If interval is set, it will add some delay
+  // between creating worker thread.
+  void StartWorkers(int num, int interval) {
+    workers_.reserve(num);
+    for (int i = 0; i < num; ++i) {
+      workers_.push_back(DummyWorker());
+      DummyWorker& worker = workers_.back();
+      worker.thread_handle = new thread(&TimerCounterTest::Run, this, &worker);
+      SleepForMs(interval);
+    }
+  }
+
+  // Stop specified thread by index. if index is -1, stop all threads
+  void StopWorkers(int thread_index = -1) {
+    if (thread_index >= 0) {
+      workers_[thread_index].Stop();
+    } else {
+      for (int i = 0; i < workers_.size(); ++i) {
+        workers_[i].Stop();
+      }
+    }
+  }
+
+  void Reset() {
+    workers_.clear();
+  }
+
+  // Allow some timer inaccuracy (15ms) since thread join could take some time.
+  static const int MAX_TIMER_ERROR_NS = 15000000;
+  vector<DummyWorker> workers_;
+  ConcurrentStopWatch csw_;
+  RuntimeProfile::ConcurrentTimerCounter timercounter_;
+};
+
+void ValidateTimerValue(const TimerCounterTest& timer, int64_t start) {
+  int64_t expected_value = MonotonicNanos() - start;
+  int64_t stopwatch_value = timer.csw_.TotalRunningTime();
+  EXPECT_GE(stopwatch_value, expected_value - TimerCounterTest::MAX_TIMER_ERROR_NS);
+  EXPECT_LE(stopwatch_value, expected_value + TimerCounterTest::MAX_TIMER_ERROR_NS);
+
+  int64_t timer_value = timer.timercounter_.value();
+  EXPECT_GE(timer_value, expected_value - TimerCounterTest::MAX_TIMER_ERROR_NS);
+  EXPECT_LE(timer_value, expected_value + TimerCounterTest::MAX_TIMER_ERROR_NS);
 }
 
-int main(int argc, char **argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  impala::InitThreading();
-  impala::CpuInfo::Init();
-  return RUN_ALL_TESTS();
+void ValidateLapTime(TimerCounterTest* timer, int64_t expected_value) {
+  int64_t stopwatch_value = timer->csw_.LapTime();
+  EXPECT_GE(stopwatch_value, expected_value - TimerCounterTest::MAX_TIMER_ERROR_NS);
+  EXPECT_LE(stopwatch_value, expected_value + TimerCounterTest::MAX_TIMER_ERROR_NS);
+
+  int64_t timer_value = timer->timercounter_.LapTime();
+  EXPECT_GE(timer_value, expected_value - TimerCounterTest::MAX_TIMER_ERROR_NS);
+  EXPECT_LE(timer_value, expected_value + TimerCounterTest::MAX_TIMER_ERROR_NS);
 }
+
+TEST(TimerCounterTest, CountersTestOneThread) {
+  TimerCounterTest tester;
+  uint64_t start = MonotonicNanos();
+  tester.StartWorkers(1, 0);
+  SleepForMs(250);
+  ValidateTimerValue(tester, start);
+  tester.StopWorkers(-1);
+  ValidateTimerValue(tester, start);
+}
+
+TEST(TimerCounterTest, CountersTestTwoThreads) {
+  TimerCounterTest tester;
+  uint64_t start = MonotonicNanos();
+  tester.StartWorkers(2, 5);
+  SleepForMs(250);
+  ValidateTimerValue(tester, start);
+  tester.StopWorkers(-1);
+  ValidateTimerValue(tester, start);
+}
+
+TEST(TimerCounterTest, CountersTestRandom) {
+  TimerCounterTest tester;
+  uint64_t start = MonotonicNanos();
+  ValidateTimerValue(tester, start);
+  // First working period
+  tester.StartWorkers(5, 5);
+  ValidateTimerValue(tester, start);
+  SleepForMs(200);
+  tester.StopWorkers(2);
+  ValidateTimerValue(tester, start);
+  SleepForMs(50);
+  tester.StopWorkers(4);
+  ValidateTimerValue(tester, start);
+  SleepForMs(300);
+  tester.StopWorkers(-1);
+  ValidateTimerValue(tester, start);
+  tester.Reset();
+
+  ValidateLapTime(&tester, MonotonicNanos() - start);
+  uint64_t first_run_end = MonotonicNanos();
+  // Adding some idle time. concurrent stopwatch and timer should not count the idle time.
+  SleepForMs(100);
+  start += MonotonicNanos() - first_run_end;
+
+  // Second working period
+  tester.StartWorkers(2, 0);
+  // We just get lap time after first run finish. so at start of second run, expect lap time == 0
+  ValidateLapTime(&tester, 0);
+  uint64_t lap_time_start = MonotonicNanos();
+  SleepForMs(100);
+  ValidateTimerValue(tester, start);
+  SleepForMs(100);
+  tester.StopWorkers(-1);
+  ValidateTimerValue(tester, start);
+  ValidateLapTime(&tester, MonotonicNanos() - lap_time_start);
+}
+
+}
+
+IMPALA_TEST_MAIN();

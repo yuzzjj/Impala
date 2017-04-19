@@ -1,6 +1,22 @@
 #!/usr/bin/env impala-python
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
 #
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 # This script is used to generate test "vectors" based on a dimension input file.
 # A vector in this context is simply a permutation of the values in the the
 # dimension input file.  For example, in this case the script is generating test vectors
@@ -82,6 +98,7 @@ def is_valid_combination(vector):
         (vector[FILE_FORMAT_IDX] != 'seq' and vector[COMPRESSION_TYPE_IDX] == 'record') or
         (vector[FILE_FORMAT_IDX] == 'parquet' and vector[COMPRESSION_IDX] != 'none') or
         (vector[FILE_FORMAT_IDX] == 'hbase' and vector[COMPRESSION_IDX] != 'none') or
+        (vector[FILE_FORMAT_IDX] == 'kudu' and vector[COMPRESSION_IDX] != 'none') or
         (vector[FILE_FORMAT_IDX] == 'avro' and
          vector[COMPRESSION_IDX] not in ['none', 'snap', 'def']))
 

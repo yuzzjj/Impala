@@ -1,73 +1,95 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
+#include <memory>
 #include <string>
 #include <boost/thread/thread.hpp>
 
 #include "testutil/gtest-util.h"
 #include "codegen/llvm-codegen.h"
 #include "common/init.h"
-#include "runtime/raw-value.h"
+#include "common/object-pool.h"
+#include "runtime/string-value.h"
+#include "runtime/test-env.h"
+#include "service/fe-support.h"
 #include "util/cpu-info.h"
 #include "util/hash-util.h"
 #include "util/path-builder.h"
+#include "util/test-info.h"
 
 #include "common/names.h"
 
 using namespace llvm;
+using std::unique_ptr;
 
 namespace impala {
 
 class LlvmCodeGenTest : public testing:: Test {
  protected:
+  scoped_ptr<TestEnv> test_env_;
+  RuntimeState* runtime_state_;
+
+  virtual void SetUp() {
+    test_env_.reset(new TestEnv());
+    ASSERT_OK(test_env_->Init());
+    ASSERT_OK(test_env_->CreateQueryState(0, nullptr, &runtime_state_));
+  }
+
+  virtual void TearDown() {
+    runtime_state_ = NULL;
+    test_env_.reset();
+  }
+
   static void LifetimeTest() {
     ObjectPool pool;
     Status status;
     for (int i = 0; i < 10; ++i) {
-      LlvmCodeGen object1(&pool, "Test");
-      LlvmCodeGen object2(&pool, "Test");
-      LlvmCodeGen object3(&pool, "Test");
+      LlvmCodeGen object1(NULL, &pool, NULL, "Test");
+      LlvmCodeGen object2(NULL, &pool, NULL, "Test");
+      LlvmCodeGen object3(NULL, &pool, NULL, "Test");
 
-      ASSERT_OK(object1.Init());
-      ASSERT_OK(object2.Init());
-      ASSERT_OK(object3.Init());
+      ASSERT_OK(object1.Init(unique_ptr<Module>(new Module("Test", object1.context()))));
+      ASSERT_OK(object2.Init(unique_ptr<Module>(new Module("Test", object2.context()))));
+      ASSERT_OK(object3.Init(unique_ptr<Module>(new Module("Test", object3.context()))));
     }
   }
 
   // Wrapper to call private test-only methods on LlvmCodeGen object
-  static Status LoadFromFile(ObjectPool* pool, const string& filename,
-      scoped_ptr<LlvmCodeGen>* codegen) {
-    return LlvmCodeGen::LoadFromFile(pool, filename, "test", codegen);
-  }
-
-  static LlvmCodeGen* CreateCodegen(ObjectPool* pool) {
-    LlvmCodeGen* codegen = pool->Add(new LlvmCodeGen(pool, "Test"));
-    if (codegen != NULL) {
-      Status status = codegen->Init();
-      if (!status.ok()) return NULL;
-    }
-    return codegen;
+  Status CreateFromFile(const string& filename, scoped_ptr<LlvmCodeGen>* codegen) {
+    RETURN_IF_ERROR(LlvmCodeGen::CreateFromFile(runtime_state_,
+        runtime_state_->obj_pool(), NULL, filename, "test", codegen));
+    return (*codegen)->MaterializeModule();
   }
 
   static void ClearHashFns(LlvmCodeGen* codegen) {
     codegen->ClearHashFns();
   }
 
-  static void* JitFunction(
-      LlvmCodeGen* codegen, Function* function) {
-    return codegen->JitFunction(function);
+  static void AddFunctionToJit(LlvmCodeGen* codegen, llvm::Function* fn, void** fn_ptr) {
+    // Bypass Impala-specific logic in AddFunctionToJit() that assumes Impala's struct
+    // types are available in the module.
+    return codegen->AddFunctionToJitInternal(fn, fn_ptr);
   }
+
+  static bool VerifyFunction(LlvmCodeGen* codegen, llvm::Function* fn) {
+    return codegen->VerifyFunction(fn);
+  }
+
+  static Status FinalizeModule(LlvmCodeGen* codegen) { return codegen->FinalizeModule(); }
 };
 
 // Simple test to just make and destroy llvmcodegen objects.  LLVM
@@ -88,10 +110,9 @@ TEST_F(LlvmCodeGenTest, MultithreadedLifetime) {
 
 // Test loading a non-existent file
 TEST_F(LlvmCodeGenTest, BadIRFile) {
-  ObjectPool pool;
   string module_file = "NonExistentFile.ir";
   scoped_ptr<LlvmCodeGen> codegen;
-  EXPECT_FALSE(LlvmCodeGenTest::LoadFromFile(&pool, module_file.c_str(), &codegen).ok());
+  EXPECT_FALSE(CreateFromFile(module_file.c_str(), &codegen).ok());
 }
 
 // IR for the generated linner loop
@@ -106,7 +127,7 @@ TEST_F(LlvmCodeGenTest, BadIRFile) {
 // The random int in there is the address of jitted_counter
 Function* CodegenInnerLoop(LlvmCodeGen* codegen, int64_t* jitted_counter, int delta) {
   LLVMContext& context = codegen->context();
-  LlvmCodeGen::LlvmBuilder builder(context);
+  LlvmBuilder builder(context);
 
   LlvmCodeGen::FnPrototype fn_prototype(codegen, "JittedInnerLoop", codegen->void_type());
   Function* jitted_loop_call = fn_prototype.GeneratePrototype();
@@ -133,15 +154,17 @@ Function* CodegenInnerLoop(LlvmCodeGen* codegen, int64_t* jitted_counter, int de
 //   1. create a LlvmCodegen object from the precompiled file
 //   2. add another function to the module with the same signature as the inner
 //      loop function.
-//   3. Replace the call instruction in the outer loop to a call to the new inner loop
-//      function.
+//   3. Replace the call instruction in a clone of the outer loop to a call to the new
+//      inner loop function.
+//   4. Update the original loop with another jitted inner loop function
+//   5. Run both loops and make sure the correct inner loop is called
+
 //   4. Run the loop and make sure the inner loop is called.
 //   5. Updated the jitted loop in place with another jitted inner loop function
 //   6. Run the loop and make sure the updated is called.
 TEST_F(LlvmCodeGenTest, ReplaceFnCall) {
-  ObjectPool pool;
-  const char* loop_call_name = "DefaultImplementation";
-  const char* loop_name = "TestLoop";
+  const string loop_call_name("_Z21DefaultImplementationv");
+  const string loop_name("_Z8TestLoopi");
   typedef void (*TestLoopFn)(int);
 
   string module_file;
@@ -149,26 +172,15 @@ TEST_F(LlvmCodeGenTest, ReplaceFnCall) {
 
   // Part 1: Load the module and make sure everything is loaded correctly.
   scoped_ptr<LlvmCodeGen> codegen;
-  ASSERT_OK(LlvmCodeGenTest::LoadFromFile(&pool, module_file.c_str(), &codegen));
+  ASSERT_OK(CreateFromFile(module_file.c_str(), &codegen));
   EXPECT_TRUE(codegen.get() != NULL);
 
-  vector<Function*> functions;
-  codegen->GetFunctions(&functions);
-  EXPECT_EQ(functions.size(), 3);
-
-  Function* loop_call = functions[0];
-  Function* loop = functions[1];
-
-  EXPECT_TRUE(loop_call->getName().find(loop_call_name) != string::npos);
+  Function* loop_call = codegen->GetFunction(loop_call_name, false);
+  EXPECT_TRUE(loop_call != NULL);
   EXPECT_TRUE(loop_call->arg_empty());
-  EXPECT_TRUE(loop->getName().find(loop_name) != string::npos);
+  Function* loop = codegen->GetFunction(loop_name, false);
+  EXPECT_TRUE(loop != NULL);
   EXPECT_EQ(loop->arg_size(), 1);
-
-  void* original_loop = LlvmCodeGenTest::JitFunction(codegen.get(), loop);
-  EXPECT_TRUE(original_loop != NULL);
-
-  TestLoopFn original_loop_fn = reinterpret_cast<TestLoopFn>(original_loop);
-  original_loop_fn(5);
 
   // Part 2: Generate a new inner loop function.
   //
@@ -182,40 +194,48 @@ TEST_F(LlvmCodeGenTest, ReplaceFnCall) {
   int64_t jitted_counter = 0;
   Function* jitted_loop_call = CodegenInnerLoop(codegen.get(), &jitted_counter, 1);
 
-  // Part 3: Replace the call instruction to the normal function with a call to the
-  // jitted one
-  int num_replaced;
-  Function* jitted_loop = codegen->ReplaceCallSites(
-      loop, false, jitted_loop_call, loop_call_name, &num_replaced);
-  EXPECT_EQ(num_replaced, 1);
-  EXPECT_TRUE(codegen->VerifyFunction(jitted_loop));
+  // Part 3: Clone 'loop' and replace the call instruction to the normal function with a
+  // call to the jitted one
+  Function* jitted_loop = codegen->CloneFunction(loop);
+  int num_replaced =
+      codegen->ReplaceCallSites(jitted_loop, jitted_loop_call, loop_call_name);
+  EXPECT_EQ(1, num_replaced);
+  EXPECT_TRUE(VerifyFunction(codegen.get(), jitted_loop));
 
-  // Part4: Call the new loop and verify results
-  void* new_loop = LlvmCodeGenTest::JitFunction(codegen.get(), jitted_loop);
-  EXPECT_TRUE(new_loop != NULL);
+  // Part 4: Generate a new inner loop function and a new loop function
+  Function* jitted_loop_call2 = CodegenInnerLoop(codegen.get(), &jitted_counter, -2);
+  Function* jitted_loop2 = codegen->CloneFunction(loop);
+  num_replaced = codegen->ReplaceCallSites(jitted_loop2, jitted_loop_call2, loop_call_name);
+  EXPECT_EQ(1, num_replaced);
+  EXPECT_TRUE(VerifyFunction(codegen.get(), jitted_loop2));
+
+  void* original_loop = NULL;
+  AddFunctionToJit(codegen.get(), loop, &original_loop);
+  void* new_loop = NULL;
+  AddFunctionToJit(codegen.get(), jitted_loop, &new_loop);
+  void* new_loop2 = NULL;
+  AddFunctionToJit(codegen.get(), jitted_loop2, &new_loop2);
+
+  // Part 5: compile all the functions (we can't add more functions after jitting with
+  // MCJIT) then run them.
+  ASSERT_OK(LlvmCodeGenTest::FinalizeModule(codegen.get()));
+  ASSERT_TRUE(original_loop != NULL);
+  ASSERT_TRUE(new_loop != NULL);
+  ASSERT_TRUE(new_loop2 != NULL);
+
+  TestLoopFn original_loop_fn = reinterpret_cast<TestLoopFn>(original_loop);
+  original_loop_fn(5);
+  EXPECT_EQ(0, jitted_counter);
 
   TestLoopFn new_loop_fn = reinterpret_cast<TestLoopFn>(new_loop);
-  EXPECT_EQ(jitted_counter, 0);
   new_loop_fn(5);
-  EXPECT_EQ(jitted_counter, 5);
+  EXPECT_EQ(5, jitted_counter);
   new_loop_fn(5);
-  EXPECT_EQ(jitted_counter, 10);
-
-  // Part5: Generate a new inner loop function and a new loop function in place
-  Function* jitted_loop_call2 = CodegenInnerLoop(codegen.get(), &jitted_counter, -2);
-  Function* jitted_loop2 = codegen->ReplaceCallSites(loop, true, jitted_loop_call2,
-      loop_call_name, &num_replaced);
-  EXPECT_EQ(num_replaced, 1);
-  EXPECT_TRUE(codegen->VerifyFunction(jitted_loop2));
-
-  // Part6: Call new loop
-  void* new_loop2 =
-      LlvmCodeGenTest::JitFunction(codegen.get(), jitted_loop2);
-  EXPECT_TRUE(new_loop2 != NULL);
+  EXPECT_EQ(10, jitted_counter);
 
   TestLoopFn new_loop_fn2 = reinterpret_cast<TestLoopFn>(new_loop2);
   new_loop_fn2(5);
-  EXPECT_EQ(jitted_counter, 0);
+  EXPECT_EQ(0, jitted_counter);
 }
 
 // Test function for c++/ir interop for strings.  Function will do:
@@ -243,20 +263,20 @@ Function* CodegenStringTest(LlvmCodeGen* codegen) {
 
   LlvmCodeGen::FnPrototype prototype(codegen, "StringTest", codegen->GetType(TYPE_INT));
   prototype.AddArgument(LlvmCodeGen::NamedVariable("str", string_val_ptr_type));
-  LlvmCodeGen::LlvmBuilder builder(codegen->context());
+  LlvmBuilder builder(codegen->context());
 
   Value* str;
   Function* interop_fn = prototype.GeneratePrototype(&builder, &str);
 
   // strval->ptr[0] = 'A'
-  Value* str_ptr = builder.CreateStructGEP(str, 0, "str_ptr");
+  Value* str_ptr = builder.CreateStructGEP(NULL, str, 0, "str_ptr");
   Value* ptr = builder.CreateLoad(str_ptr, "ptr");
   Value* first_char_offset[] = { codegen->GetIntConstant(TYPE_INT, 0) };
   Value* first_char_ptr = builder.CreateGEP(ptr, first_char_offset, "first_char_ptr");
   builder.CreateStore(codegen->GetIntConstant(TYPE_TINYINT, 'A'), first_char_ptr);
 
   // Update and return old len
-  Value* len_ptr = builder.CreateStructGEP(str, 1, "len_ptr");
+  Value* len_ptr = builder.CreateStructGEP(NULL, str, 1, "len_ptr");
   Value* len = builder.CreateLoad(len_ptr, "len");
   builder.CreateStore(codegen->GetIntConstant(TYPE_INT, 1), len_ptr);
   builder.CreateRet(len);
@@ -268,10 +288,8 @@ Function* CodegenStringTest(LlvmCodeGen* codegen) {
 // struct.  Just create a simple StringValue struct and make sure the IR can read it
 // and modify it.
 TEST_F(LlvmCodeGenTest, StringValue) {
-  ObjectPool pool;
-
   scoped_ptr<LlvmCodeGen> codegen;
-  ASSERT_OK(LlvmCodeGen::LoadImpalaIR(&pool, "test", &codegen));
+  ASSERT_OK(LlvmCodeGen::CreateImpalaCodegen(runtime_state_, NULL, "test", &codegen));
   EXPECT_TRUE(codegen.get() != NULL);
 
   string str("Test");
@@ -284,11 +302,13 @@ TEST_F(LlvmCodeGenTest, StringValue) {
 
   Function* string_test_fn = CodegenStringTest(codegen.get());
   EXPECT_TRUE(string_test_fn != NULL);
-  EXPECT_TRUE(codegen->VerifyFunction(string_test_fn));
+  EXPECT_TRUE(VerifyFunction(codegen.get(), string_test_fn));
 
   // Jit compile function
-  void* jitted_fn = LlvmCodeGenTest::JitFunction(codegen.get(), string_test_fn);
-  EXPECT_TRUE(jitted_fn != NULL);
+  void* jitted_fn = NULL;
+  AddFunctionToJit(codegen.get(), string_test_fn, &jitted_fn);
+  ASSERT_OK(LlvmCodeGenTest::FinalizeModule(codegen.get()));
+  ASSERT_TRUE(jitted_fn != NULL);
 
   // Call IR function
   typedef int (*TestStringInteropFn)(StringValue*);
@@ -309,10 +329,8 @@ TEST_F(LlvmCodeGenTest, StringValue) {
 
 // Test calling memcpy intrinsic
 TEST_F(LlvmCodeGenTest, MemcpyTest) {
-  ObjectPool pool;
-
   scoped_ptr<LlvmCodeGen> codegen;
-  ASSERT_OK(LlvmCodeGen::LoadImpalaIR(&pool, "test", &codegen));
+  ASSERT_OK(LlvmCodeGen::CreateImpalaCodegen(runtime_state_, NULL, "test", &codegen));
   ASSERT_TRUE(codegen.get() != NULL);
 
   LlvmCodeGen::FnPrototype prototype(codegen.get(), "MemcpyTest", codegen->void_type());
@@ -320,7 +338,7 @@ TEST_F(LlvmCodeGenTest, MemcpyTest) {
   prototype.AddArgument(LlvmCodeGen::NamedVariable("src", codegen->ptr_type()));
   prototype.AddArgument(LlvmCodeGen::NamedVariable("n", codegen->GetType(TYPE_INT)));
 
-  LlvmCodeGen::LlvmBuilder builder(codegen->context());
+  LlvmBuilder builder(codegen->context());
 
   char src[] = "abcd";
   char dst[] = "aaaa";
@@ -333,7 +351,9 @@ TEST_F(LlvmCodeGenTest, MemcpyTest) {
   fn = codegen->FinalizeFunction(fn);
   ASSERT_TRUE(fn != NULL);
 
-  void* jitted_fn = LlvmCodeGenTest::JitFunction(codegen.get(), fn);
+  void* jitted_fn = NULL;
+  LlvmCodeGenTest::AddFunctionToJit(codegen.get(), fn, &jitted_fn);
+  ASSERT_OK(LlvmCodeGenTest::FinalizeModule(codegen.get()));
   ASSERT_TRUE(jitted_fn != NULL);
 
   typedef void (*TestMemcpyFn)(char*, char*, int64_t);
@@ -346,27 +366,25 @@ TEST_F(LlvmCodeGenTest, MemcpyTest) {
 
 // Test codegen for hash
 TEST_F(LlvmCodeGenTest, HashTest) {
-  ObjectPool pool;
-
   // Values to compute hash on
   const char* data1 = "test string";
   const char* data2 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-  scoped_ptr<LlvmCodeGen> codegen;
-  ASSERT_OK(LlvmCodeGen::LoadImpalaIR(&pool, "test", &codegen));
-  ASSERT_TRUE(codegen.get() != NULL);
-
   bool restore_sse_support = false;
-
-  Value* llvm_data1 = codegen->CastPtrToLlvmPtr(codegen->ptr_type(),
-      const_cast<char*>(data1));
-  Value* llvm_data2 = codegen->CastPtrToLlvmPtr(codegen->ptr_type(),
-      const_cast<char*>(data2));
-  Value* llvm_len1 = codegen->GetIntConstant(TYPE_INT, strlen(data1));
-  Value* llvm_len2 = codegen->GetIntConstant(TYPE_INT, strlen(data2));
 
   // Loop to test both the sse4 on/off paths
   for (int i = 0; i < 2; ++i) {
+    scoped_ptr<LlvmCodeGen> codegen;
+    ASSERT_OK(LlvmCodeGen::CreateImpalaCodegen(runtime_state_, NULL, "test", &codegen));
+    ASSERT_TRUE(codegen.get() != NULL);
+
+    Value* llvm_data1 =
+        codegen->CastPtrToLlvmPtr(codegen->ptr_type(), const_cast<char*>(data1));
+    Value* llvm_data2 =
+        codegen->CastPtrToLlvmPtr(codegen->ptr_type(), const_cast<char*>(data2));
+    Value* llvm_len1 = codegen->GetIntConstant(TYPE_INT, strlen(data1));
+    Value* llvm_len2 = codegen->GetIntConstant(TYPE_INT, strlen(data2));
+
     uint32_t expected_hash = 0;
     expected_hash = HashUtil::Hash(data1, strlen(data1), expected_hash);
     expected_hash = HashUtil::Hash(data2, strlen(data2), expected_hash);
@@ -374,9 +392,9 @@ TEST_F(LlvmCodeGenTest, HashTest) {
 
     // Create a codegen'd function that hashes all the types and returns the results.
     // The tuple/values to hash are baked into the codegen for simplicity.
-    LlvmCodeGen::FnPrototype prototype(codegen.get(), "HashTest",
-        codegen->GetType(TYPE_INT));
-    LlvmCodeGen::LlvmBuilder builder(codegen->context());
+    LlvmCodeGen::FnPrototype prototype(
+        codegen.get(), "HashTest", codegen->GetType(TYPE_INT));
+    LlvmBuilder builder(codegen->context());
 
     // Test both byte-size specific hash functions and the generic loop hash function
     Function* fn_fixed = prototype.GeneratePrototype(&builder, NULL);
@@ -389,15 +407,20 @@ TEST_F(LlvmCodeGenTest, HashTest) {
     ASSERT_TRUE(generic_hash_fn != NULL);
 
     Value* seed = codegen->GetIntConstant(TYPE_INT, 0);
-    seed = builder.CreateCall3(data1_hash_fn, llvm_data1, llvm_len1, seed);
-    seed = builder.CreateCall3(data2_hash_fn, llvm_data2, llvm_len2, seed);
-    seed = builder.CreateCall3(generic_hash_fn, llvm_data1, llvm_len1, seed);
+    seed = builder.CreateCall(data1_hash_fn,
+        ArrayRef<Value*>({llvm_data1, llvm_len1, seed}));
+    seed = builder.CreateCall(data2_hash_fn,
+        ArrayRef<Value*>({llvm_data2, llvm_len2, seed}));
+    seed = builder.CreateCall(generic_hash_fn,
+        ArrayRef<Value*>({llvm_data1, llvm_len1, seed}));
     builder.CreateRet(seed);
 
     fn_fixed = codegen->FinalizeFunction(fn_fixed);
     ASSERT_TRUE(fn_fixed != NULL);
 
-    void* jitted_fn = LlvmCodeGenTest::JitFunction(codegen.get(), fn_fixed);
+    void* jitted_fn = NULL;
+    LlvmCodeGenTest::AddFunctionToJit(codegen.get(), fn_fixed, &jitted_fn);
+    ASSERT_OK(LlvmCodeGenTest::FinalizeModule(codegen.get()));
     ASSERT_TRUE(jitted_fn != NULL);
 
     typedef uint32_t (*TestHashFn)();
@@ -425,8 +448,9 @@ TEST_F(LlvmCodeGenTest, HashTest) {
 }
 
 int main(int argc, char **argv) {
-  impala::InitCommonRuntime(argc, argv, false);
   ::testing::InitGoogleTest(&argc, argv);
+  impala::InitCommonRuntime(argc, argv, true, impala::TestInfo::BE_TEST);
+  impala::InitFeSupport(false);
   impala::LlvmCodeGen::InitializeLlvm();
   return RUN_ALL_TESTS();
 }

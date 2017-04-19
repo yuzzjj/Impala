@@ -1,27 +1,30 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
-#include "util/metrics.h"
-#include "util/collection-metrics.h"
-#include "util/memory-metrics.h"
-
-#include <gtest/gtest.h>
+#include <cmath>
 #include <boost/scoped_ptr.hpp>
 #include <limits>
 #include <map>
 
-#include "util/jni-util.h"
+#include "testutil/gtest-util.h"
+#include "util/collection-metrics.h"
+#include "util/memory-metrics.h"
+#include "util/metrics.h"
+#include "util/histogram-metric.h"
 #include "util/thread.h"
 
 #include "common/names.h"
@@ -103,6 +106,27 @@ TEST_F(MetricsTest, GaugeMetrics) {
   AssertValue(int_gauge_with_units, 10, "10s000ms");
 }
 
+TEST_F(MetricsTest, SumGauge) {
+  MetricGroup metrics("SumGauge");
+  AddMetricDef("gauge1", TMetricKind::GAUGE, TUnit::NONE);
+  AddMetricDef("gauge2", TMetricKind::GAUGE, TUnit::NONE);
+  AddMetricDef("sum", TMetricKind::GAUGE, TUnit::NONE);
+  IntGauge* gauge1 = metrics.AddGauge<int64_t>("gauge1", 0);
+  IntGauge* gauge2 = metrics.AddGauge<int64_t>("gauge2", 0);
+
+  vector<IntGauge*> gauges({gauge1, gauge2});
+  IntGauge* sum_gauge =
+      metrics.RegisterMetric(new SumGauge<int64_t>(MetricDefs::Get("sum"), gauges));
+
+  AssertValue(sum_gauge, 0, "0");
+  gauge1->Increment(1);
+  AssertValue(sum_gauge, 1, "1");
+  gauge2->Increment(-1);
+  AssertValue(sum_gauge, 0, "0");
+  gauge2->Increment(100);
+  AssertValue(sum_gauge, 100, "100");
+}
+
 TEST_F(MetricsTest, PropertyMetrics) {
   MetricGroup metrics("PropertyMetrics");
   AddMetricDef("bool_property", TMetricKind::PROPERTY, TUnit::NONE);
@@ -127,7 +151,7 @@ TEST_F(MetricsTest, NonFiniteValues) {
   AssertValue(gauge, inf, "inf");
   double nan = numeric_limits<double>::quiet_NaN();
   gauge->set_value(nan);
-  EXPECT_TRUE(isnan(gauge->value()));
+  EXPECT_TRUE(std::isnan(gauge->value()));
   EXPECT_TRUE(gauge->ToHumanReadable() == "nan");
 }
 
@@ -193,7 +217,7 @@ TEST_F(MetricsTest, StatsMetricsSingle) {
 TEST_F(MetricsTest, MemMetric) {
 #ifndef ADDRESS_SANITIZER
   MetricGroup metrics("MemMetrics");
-  RegisterMemoryMetrics(&metrics, false);
+  RegisterMemoryMetrics(&metrics, false, nullptr, nullptr);
   // Smoke test to confirm that tcmalloc metrics are returning reasonable values.
   UIntGauge* bytes_in_use =
       metrics.FindMetricForTesting<UIntGauge>("tcmalloc.bytes-in-use");
@@ -205,7 +229,7 @@ TEST_F(MetricsTest, MemMetric) {
   // Allocate 100MB to increase the number of bytes used. TCMalloc may also give up some
   // bytes during this allocation, so this allocation is deliberately large to ensure that
   // the bytes used metric goes up net.
-  scoped_ptr<vector<uint64_t> > chunk(new vector<uint64_t>(100 * 1024 * 1024));
+  scoped_ptr<vector<uint64_t>> chunk(new vector<uint64_t>(100 * 1024 * 1024));
   EXPECT_GT(bytes_in_use->value(), cur_in_use);
 
   UIntGauge* total_bytes_reserved =
@@ -225,14 +249,14 @@ TEST_F(MetricsTest, MemMetric) {
 
 TEST_F(MetricsTest, JvmMetrics) {
   MetricGroup metrics("JvmMetrics");
-  RegisterMemoryMetrics(&metrics, true);
+  RegisterMemoryMetrics(&metrics, true, nullptr, nullptr);
   UIntGauge* jvm_total_used =
-      metrics.GetChildGroup("jvm")->FindMetricForTesting<UIntGauge>(
+      metrics.GetOrCreateChildGroup("jvm")->FindMetricForTesting<UIntGauge>(
           "jvm.total.current-usage-bytes");
   ASSERT_TRUE(jvm_total_used != NULL);
   EXPECT_GT(jvm_total_used->value(), 0);
   UIntGauge* jvm_peak_total_used =
-      metrics.GetChildGroup("jvm")->FindMetricForTesting<UIntGauge>(
+      metrics.GetOrCreateChildGroup("jvm")->FindMetricForTesting<UIntGauge>(
           "jvm.total.peak-current-usage-bytes");
   ASSERT_TRUE(jvm_peak_total_used != NULL);
   EXPECT_GT(jvm_peak_total_used->value(), 0);
@@ -324,6 +348,37 @@ TEST_F(MetricsTest, StatsMetricsJson) {
   EXPECT_EQ(stats_val["stddev"].GetDouble(), 5.0);
 }
 
+TEST_F(MetricsTest, HistogramMetrics) {
+  MetricGroup metrics("HistoMetrics");
+  TMetricDef metric_def =
+      MakeTMetricDef("histogram-metric", TMetricKind::HISTOGRAM, TUnit::TIME_MS);
+  constexpr int MAX_VALUE = 10000;
+  HistogramMetric* metric = metrics.RegisterMetric(new HistogramMetric(
+          metric_def, MAX_VALUE, 3));
+
+  // Add value beyond limit to make sure it's recorded accurately.
+  for (int i = 0; i <= MAX_VALUE + 1; ++i) metric->Update(i);
+
+  Document document;
+  Value val;
+  metrics.ToJson(true, &document, &val);
+  const Value& histo_val = val["metrics"][0u];
+  EXPECT_EQ(histo_val["min"].GetInt(), 0);
+  EXPECT_EQ(histo_val["max"].GetInt(), MAX_VALUE + 1);
+  EXPECT_EQ(histo_val["25th %-ile"].GetInt(), 2500);
+  EXPECT_EQ(histo_val["50th %-ile"].GetInt(), 5000);
+  EXPECT_EQ(histo_val["75th %-ile"].GetInt(), 7500);
+  EXPECT_EQ(histo_val["90th %-ile"].GetInt(), 9000);
+  EXPECT_EQ(histo_val["95th %-ile"].GetInt(), 9496);
+  EXPECT_EQ(histo_val["99.9th %-ile"].GetInt(), 9984);
+  EXPECT_EQ(histo_val["min"].GetInt(), 0);
+  EXPECT_EQ(histo_val["max"].GetInt(), MAX_VALUE + 1);
+
+  EXPECT_EQ(metric->ToHumanReadable(), "Count: 10002, min / max: 0 / 10s001ms, "
+      "25th %-ile: 2s500ms, 50th %-ile: 5s000ms, 75th %-ile: 7s500ms, "
+      "90th %-ile: 9s000ms, 95th %-ile: 9s496ms, 99.9th %-ile: 9s984ms");
+}
+
 TEST_F(MetricsTest, UnitsAndDescriptionJson) {
   MetricGroup metrics("Units");
   AddMetricDef("counter", TMetricKind::COUNTER, TUnit::BYTES, "description");
@@ -343,9 +398,12 @@ TEST_F(MetricsTest, MetricGroupJson) {
   metrics.AddCounter("counter1", 2048);
   metrics.AddCounter("counter2", 2048);
 
-  metrics.GetChildGroup("child1");
+  MetricGroup* find_result = metrics.FindChildGroup("child1");
+  EXPECT_EQ(find_result, reinterpret_cast<MetricGroup*>(NULL));
+
+  metrics.GetOrCreateChildGroup("child1");
   AddMetricDef("child_counter", TMetricKind::COUNTER, TUnit::BYTES, "description");
-  metrics.GetChildGroup("child2")->AddCounter("child_counter", 0);
+  metrics.GetOrCreateChildGroup("child2")->AddCounter("child_counter", 0);
 
   IntCounter* counter = metrics.FindMetricForTesting<IntCounter>(string("child_counter"));
   ASSERT_NE(counter, reinterpret_cast<IntCounter*>(NULL));
@@ -361,15 +419,20 @@ TEST_F(MetricsTest, MetricGroupJson) {
   EXPECT_EQ(val["child_groups"][0u]["metrics"].Size(), 0);
   EXPECT_EQ(val["child_groups"][1]["name"].GetString(), string("child2"));
   EXPECT_EQ(val["child_groups"][1]["metrics"].Size(), 1);
+
+  find_result = metrics.FindChildGroup("child1");
+  ASSERT_NE(find_result, reinterpret_cast<MetricGroup*>(NULL));
+  Value val2;
+  find_result->ToJson(true, &document, &val2);
+
+  EXPECT_EQ(val2["metrics"].Size(), 0);
+  EXPECT_EQ(val2["name"].GetString(), string("child1"));
 }
 
 }
 
-int main(int argc, char **argv) {
-  google::InitGoogleLogging(argv[0]);
+int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
-  impala::InitThreading();
-  impala::JniUtil::Init();
-
+  impala::InitCommonRuntime(argc, argv, true, impala::TestInfo::BE_TEST);
   return RUN_ALL_TESTS();
 }

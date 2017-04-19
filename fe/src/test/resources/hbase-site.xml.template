@@ -2,8 +2,6 @@
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <!--
 /**
- * Copyright 2010 The Apache Software Foundation
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -53,7 +51,32 @@
 
   <property>
     <name>hbase.zookeeper.property.dataDir</name>
-    <value>${IMPALA_TEST_CLUSTER_LOG_DIR}/zoo</value>
+    <value>${IMPALA_CLUSTER_LOGS_DIR}/zoo</value>
+  </property>
+
+  <property>
+    <name>hbase.master.port</name>
+    <value>16000</value>
+  </property>
+
+  <property>
+    <name>hbase.master.info.port</name>
+    <value>16010</value>
+  </property>
+
+  <property>
+    <name>hbase.regionserver.port</name>
+    <value>16020</value>
+  </property>
+
+  <property>
+    <name>hbase.regionserver.info.port</name>
+    <value>16030</value>
+  </property>
+
+  <property>
+    <name>hbase.status.multicast.port</name>
+    <value>16100</value>
   </property>
 
   <!-- BEGIN Kerberos settings -->

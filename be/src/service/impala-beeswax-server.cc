@@ -1,68 +1,37 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "service/impala-server.h"
 
-#include <algorithm>
 #include <boost/algorithm/string/join.hpp>
-#include <boost/date_time/posix_time/posix_time_types.hpp>
-#include <boost/unordered_set.hpp>
-#include <jni.h>
-#include <thrift/protocol/TDebugProtocol.h>
-#include <gtest/gtest.h>
-#include <boost/foreach.hpp>
-#include <boost/bind.hpp>
-#include <boost/algorithm/string.hpp>
-#include <google/heap-profiler.h>
-#include <google/malloc_extension.h>
 
-#include "codegen/llvm-codegen.h"
 #include "common/logging.h"
-#include "common/version.h"
-#include "exec/exec-node.h"
-#include "exec/hdfs-table-sink.h"
-#include "exec/scan-node.h"
-#include "exprs/expr.h"
-#include "runtime/data-stream-mgr.h"
-#include "runtime/client-cache.h"
-#include "runtime/descriptors.h"
-#include "runtime/data-stream-sender.h"
-#include "runtime/row-batch.h"
-#include "runtime/plan-fragment-executor.h"
-#include "runtime/hdfs-fs-cache.h"
+#include "gen-cpp/Frontend_types.h"
+#include "rpc/thrift-util.h"
 #include "runtime/exec-env.h"
-#include "runtime/raw-value.h"
+#include "runtime/raw-value.inline.h"
 #include "runtime/timestamp-value.h"
-#include "scheduling/simple-scheduler.h"
 #include "service/query-exec-state.h"
 #include "service/query-options.h"
-#include "util/container-util.h"
-#include "util/debug-util.h"
+#include "service/query-result-set.h"
 #include "util/impalad-metrics.h"
-#include "util/string-parser.h"
-#include "rpc/thrift-util.h"
-#include "rpc/thrift-server.h"
-#include "util/jni-util.h"
 #include "util/webserver.h"
-#include "gen-cpp/Types_types.h"
-#include "gen-cpp/ImpalaService.h"
-#include "gen-cpp/DataSinks_types.h"
-#include "gen-cpp/Types_types.h"
-#include "gen-cpp/ImpalaService.h"
-#include "gen-cpp/ImpalaService_types.h"
-#include "gen-cpp/ImpalaInternalService.h"
-#include "gen-cpp/Frontend_types.h"
+#include "util/runtime-profile.h"
+#include "util/runtime-profile-counters.h"
 
 #include "common/names.h"
 
@@ -82,92 +51,6 @@ using namespace beeswax;
 
 namespace impala {
 
-// Ascii result set for Beeswax.
-// Beeswax returns rows in ascii, using "\t" as column delimiter.
-class ImpalaServer::AsciiQueryResultSet : public ImpalaServer::QueryResultSet {
- public:
-  // Rows are added into rowset.
-  AsciiQueryResultSet(const TResultSetMetadata& metadata, vector<string>* rowset)
-    : metadata_(metadata), result_set_(rowset), owned_result_set_(NULL) {
-  }
-
-  // Rows are added into a new rowset that is owned by this result set.
-  AsciiQueryResultSet(const TResultSetMetadata& metadata)
-    : metadata_(metadata), result_set_(new vector<string>()),
-      owned_result_set_(result_set_) {
-  }
-
-  virtual ~AsciiQueryResultSet() { }
-
-  // Convert expr values (col_values) to ASCII using "\t" as column delimiter and store
-  // it in this result set.
-  // TODO: Handle complex types.
-  virtual Status AddOneRow(const vector<void*>& col_values, const vector<int>& scales) {
-    int num_col = col_values.size();
-    DCHECK_EQ(num_col, metadata_.columns.size());
-    stringstream out_stream;
-    out_stream.precision(ASCII_PRECISION);
-    for (int i = 0; i < num_col; ++i) {
-      // ODBC-187 - ODBC can only take "\t" as the delimiter
-      out_stream << (i > 0 ? "\t" : "");
-      DCHECK_EQ(1, metadata_.columns[i].columnType.types.size());
-      RawValue::PrintValue(col_values[i],
-          ColumnType::FromThrift(metadata_.columns[i].columnType),
-          scales[i], &out_stream);
-    }
-    result_set_->push_back(out_stream.str());
-    return Status::OK();
-  }
-
-  // Convert TResultRow to ASCII using "\t" as column delimiter and store it in this
-  // result set.
-  virtual Status AddOneRow(const TResultRow& row) {
-    int num_col = row.colVals.size();
-    DCHECK_EQ(num_col, metadata_.columns.size());
-    stringstream out_stream;
-    out_stream.precision(ASCII_PRECISION);
-    for (int i = 0; i < num_col; ++i) {
-      // ODBC-187 - ODBC can only take "\t" as the delimiter
-      out_stream << (i > 0 ? "\t" : "");
-      out_stream << row.colVals[i];
-    }
-    result_set_->push_back(out_stream.str());
-    return Status::OK();
-  }
-
-  virtual int AddRows(const QueryResultSet* other, int start_idx, int num_rows) {
-    const AsciiQueryResultSet* o = static_cast<const AsciiQueryResultSet*>(other);
-    if (start_idx >= o->result_set_->size()) return 0;
-    const int rows_added =
-        min(static_cast<size_t>(num_rows), o->result_set_->size() - start_idx);
-    result_set_->insert(result_set_->end(), o->result_set_->begin() + start_idx,
-        o->result_set_->begin() + start_idx + rows_added);
-    return rows_added;
-  }
-
-  virtual int64_t ByteSize(int start_idx, int num_rows) {
-    int64_t bytes = 0;
-    const int end = min(static_cast<size_t>(num_rows), result_set_->size() - start_idx);
-    for (int i = start_idx; i < start_idx + end; ++i) {
-      bytes += sizeof(result_set_[i]) + result_set_[i].capacity();
-    }
-    return bytes;
-  }
-
-  virtual size_t size() { return result_set_->size(); }
-
- private:
-  // Metadata of the result set
-  const TResultSetMetadata& metadata_;
-
-  // Points to the result set to be filled. The result set this points to may be owned by
-  // this object, in which case owned_result_set_ is set.
-  vector<string>* result_set_;
-
-  // Set to result_set_ if result_set_ is owned.
-  scoped_ptr<vector<string> > owned_result_set_;
-};
-
 void ImpalaServer::query(QueryHandle& query_handle, const Query& query) {
   VLOG_QUERY << "query(): query=" << query.query;
   ScopedSessionState session_handle(this);
@@ -185,7 +68,7 @@ void ImpalaServer::query(QueryHandle& query_handle, const Query& query) {
   RAISE_IF_ERROR(Execute(&query_ctx, session, &exec_state),
       SQLSTATE_SYNTAX_ERROR_OR_ACCESS_VIOLATION);
 
-  exec_state->UpdateQueryState(QueryState::RUNNING);
+  exec_state->UpdateNonErrorQueryState(beeswax::QueryState::RUNNING);
   // start thread to wait for results to become available, which will allow
   // us to advance query state to FINISHED or EXCEPTION
   exec_state->WaitAsync();
@@ -226,7 +109,7 @@ void ImpalaServer::executeAndWait(QueryHandle& query_handle, const Query& query,
   RAISE_IF_ERROR(Execute(&query_ctx, session, &exec_state),
       SQLSTATE_SYNTAX_ERROR_OR_ACCESS_VIOLATION);
 
-  exec_state->UpdateQueryState(QueryState::RUNNING);
+  exec_state->UpdateNonErrorQueryState(beeswax::QueryState::RUNNING);
   // Once the query is running do a final check for session closure and add it to the
   // set of in-flight queries.
   Status status = SetQueryInflight(session, exec_state);
@@ -242,7 +125,7 @@ void ImpalaServer::executeAndWait(QueryHandle& query_handle, const Query& query,
     RaiseBeeswaxException(status.GetDetail(), SQLSTATE_GENERAL_ERROR);
   }
 
-  exec_state->UpdateQueryState(QueryState::FINISHED);
+  exec_state->UpdateNonErrorQueryState(beeswax::QueryState::FINISHED);
   TUniqueIdToQueryHandle(exec_state->query_id(), &query_handle);
 
   // If the input log context id is an empty string, then create a new number and
@@ -265,7 +148,7 @@ void ImpalaServer::explain(QueryExplanation& query_explanation, const Query& que
       exec_env_->frontend()->GetExplainPlan(query_ctx, &query_explanation.textual),
       SQLSTATE_SYNTAX_ERROR_OR_ACCESS_VIOLATION);
   query_explanation.__isset.textual = true;
-  VLOG_QUERY << "explain():\nstmt=" << query_ctx.request.stmt
+  VLOG_QUERY << "explain():\nstmt=" << query_ctx.client_request.stmt
              << "\nplan: " << query_explanation.textual;
 }
 
@@ -306,8 +189,9 @@ void ImpalaServer::get_results_metadata(ResultsMetadata& results_metadata,
   QueryHandleToTUniqueId(handle, &query_id);
   VLOG_QUERY << "get_results_metadata(): query_id=" << PrintId(query_id);
   shared_ptr<QueryExecState> exec_state = GetQueryExecState(query_id, true);
-  if (exec_state.get() == NULL) {
-    RaiseBeeswaxException("Invalid query handle", SQLSTATE_GENERAL_ERROR);
+  if (UNLIKELY(exec_state.get() == nullptr)) {
+    RaiseBeeswaxException(Substitute("Invalid query handle: $0", PrintId(query_id)),
+      SQLSTATE_GENERAL_ERROR);
   }
 
   {
@@ -352,7 +236,7 @@ void ImpalaServer::close(const QueryHandle& handle) {
   RAISE_IF_ERROR(UnregisterQuery(query_id, true), SQLSTATE_GENERAL_ERROR);
 }
 
-QueryState::type ImpalaServer::get_state(const QueryHandle& handle) {
+beeswax::QueryState::type ImpalaServer::get_state(const QueryHandle& handle) {
   ScopedSessionState session_handle(this);
   RAISE_IF_ERROR(session_handle.WithSession(ThriftServer::GetThreadConnectionId()),
       SQLSTATE_GENERAL_ERROR);
@@ -366,10 +250,11 @@ QueryState::type ImpalaServer::get_state(const QueryHandle& handle) {
     return entry->second->query_state();
   } else {
     VLOG_QUERY << "ImpalaServer::get_state invalid handle";
-    RaiseBeeswaxException("Invalid query handle", SQLSTATE_GENERAL_ERROR);
+    RaiseBeeswaxException(Substitute("Invalid query handle: $0", PrintId(query_id)),
+      SQLSTATE_GENERAL_ERROR);
   }
   // dummy to keep compiler happy
-  return QueryState::FINISHED;
+  return beeswax::QueryState::FINISHED;
 }
 
 void ImpalaServer::echo(string& echo_string, const string& input_string) {
@@ -498,6 +383,7 @@ void ImpalaServer::PingImpalaService(TPingImpalaServiceResp& return_val) {
 
   VLOG_RPC << "PingImpalaService()";
   return_val.version = GetVersionString(true);
+  return_val.webserver_address = ExecEnv::GetInstance()->webserver()->Url();
   VLOG_RPC << "PingImpalaService(): return_val=" << ThriftDebugString(return_val);
 }
 
@@ -511,7 +397,7 @@ void ImpalaServer::ResetTable(impala::TStatus& status, const TResetTableReq& req
 
 Status ImpalaServer::QueryToTQueryContext(const Query& query,
     TQueryCtx* query_ctx) {
-  query_ctx->request.stmt = query.query;
+  query_ctx->client_request.stmt = query.query;
   VLOG_QUERY << "query: " << ThriftDebugString(query);
   QueryOptionsMask set_query_options_mask;
   {
@@ -525,7 +411,7 @@ Status ImpalaServer::QueryToTQueryContext(const Query& query,
       // set yet, set it now.
       lock_guard<mutex> l(session->lock);
       if (session->connected_user.empty()) session->connected_user = query.hadoop_user;
-      query_ctx->request.query_options = session->default_query_options;
+      query_ctx->client_request.query_options = session->default_query_options;
       set_query_options_mask = session->set_query_options_mask;
     }
     session->ToThrift(session_id, &query_ctx->session);
@@ -533,8 +419,8 @@ Status ImpalaServer::QueryToTQueryContext(const Query& query,
 
   // Override default query options with Query.Configuration
   if (query.__isset.configuration) {
-    BOOST_FOREACH(const string& option, query.configuration) {
-      RETURN_IF_ERROR(ParseQueryOptions(option, &query_ctx->request.query_options,
+    for (const string& option: query.configuration) {
+      RETURN_IF_ERROR(ParseQueryOptions(option, &query_ctx->client_request.query_options,
           &set_query_options_mask));
     }
   }
@@ -543,7 +429,7 @@ Status ImpalaServer::QueryToTQueryContext(const Query& query,
   // pool options.
   AddPoolQueryOptions(query_ctx, ~set_query_options_mask);
   VLOG_QUERY << "TClientRequest.queryOptions: "
-             << ThriftDebugString(query_ctx->request.query_options);
+             << ThriftDebugString(query_ctx->client_request.query_options);
   return Status::OK();
 }
 
@@ -559,7 +445,8 @@ inline void ImpalaServer::QueryHandleToTUniqueId(const QueryHandle& handle,
   ParseId(handle.id, query_id);
 }
 
-void ImpalaServer::RaiseBeeswaxException(const string& msg, const char* sql_state) {
+[[noreturn]] void ImpalaServer::RaiseBeeswaxException(
+    const string& msg, const char* sql_state) {
   BeeswaxException exc;
   exc.__set_message(msg);
   exc.__set_SQLState(sql_state);
@@ -569,7 +456,9 @@ void ImpalaServer::RaiseBeeswaxException(const string& msg, const char* sql_stat
 Status ImpalaServer::FetchInternal(const TUniqueId& query_id,
     const bool start_over, const int32_t fetch_size, beeswax::Results* query_results) {
   shared_ptr<QueryExecState> exec_state = GetQueryExecState(query_id, false);
-  if (exec_state == NULL) return Status("Invalid query handle");
+  if (UNLIKELY(exec_state == nullptr)) {
+    return Status(Substitute("Invalid query handle: $0", PrintId(query_id)));
+  }
 
   // Make sure QueryExecState::Wait() has completed before fetching rows. Wait() ensures
   // that rows are ready to be fetched (e.g., Wait() opens QueryExecState::output_exprs_,
@@ -614,9 +503,9 @@ Status ImpalaServer::FetchInternal(const TUniqueId& query_id,
   Status fetch_rows_status;
   query_results->data.clear();
   if (!exec_state->eos()) {
-    AsciiQueryResultSet result_set(*(exec_state->result_metadata()),
-        &(query_results->data));
-    fetch_rows_status = exec_state->FetchRows(fetch_size, &result_set);
+    scoped_ptr<QueryResultSet> result_set(QueryResultSet::CreateAsciiQueryResultSet(
+        *exec_state->result_metadata(), &query_results->data));
+    fetch_rows_status = exec_state->FetchRows(fetch_size, result_set.get());
   }
   query_results->__set_has_more(!exec_state->eos());
   query_results->__isset.data = true;
@@ -627,7 +516,10 @@ Status ImpalaServer::FetchInternal(const TUniqueId& query_id,
 Status ImpalaServer::CloseInsertInternal(const TUniqueId& query_id,
     TInsertResult* insert_result) {
   shared_ptr<QueryExecState> exec_state = GetQueryExecState(query_id, true);
-  if (exec_state == NULL) return Status("Invalid query handle");
+  if (UNLIKELY(exec_state == nullptr)) {
+    return Status(Substitute("Invalid query handle: $0", PrintId(query_id)));
+  }
+
   Status query_status;
   {
     lock_guard<mutex> l(*exec_state->lock(), adopt_lock_t());
@@ -637,13 +529,22 @@ Status ImpalaServer::CloseInsertInternal(const TUniqueId& query_id,
       // Note that when IMPALA-87 is fixed (INSERT without FROM clause) we might
       // need to revisit this, since that might lead us to insert a row without a
       // coordinator, depending on how we choose to drive the table sink.
+      int64_t num_row_errors = 0;
+      bool has_kudu_stats = false;
       if (exec_state->coord() != NULL) {
-        BOOST_FOREACH(const PartitionStatusMap::value_type& v,
-            exec_state->coord()->per_partition_status()) {
+        for (const PartitionStatusMap::value_type& v:
+             exec_state->coord()->per_partition_status()) {
           const pair<string, TInsertPartitionStatus> partition_status = v;
-          insert_result->rows_appended[partition_status.first] =
-              partition_status.second.num_appended_rows;
+          insert_result->rows_modified[partition_status.first] =
+              partition_status.second.num_modified_rows;
+
+          if (partition_status.second.__isset.stats &&
+              partition_status.second.stats.__isset.kudu_stats) {
+            has_kudu_stats = true;
+          }
+          num_row_errors += partition_status.second.stats.kudu_stats.num_row_errors;
         }
+        if (has_kudu_stats) insert_result->__set_num_row_errors(num_row_errors);
       }
     }
   }

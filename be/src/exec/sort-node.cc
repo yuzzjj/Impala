@@ -1,22 +1,26 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/sort-node.h"
 #include "exec/sort-exec-exprs.h"
 #include "runtime/row-batch.h"
 #include "runtime/runtime-state.h"
 #include "runtime/sorted-run-merger.h"
+#include "util/runtime-profile-counters.h"
 
 #include "common/names.h"
 
@@ -46,21 +50,22 @@ Status SortNode::Prepare(RuntimeState* state) {
   RETURN_IF_ERROR(sort_exec_exprs_.Prepare(
       state, child(0)->row_desc(), row_descriptor_, expr_mem_tracker()));
   AddExprCtxsToFree(sort_exec_exprs_);
-  TupleRowComparator less_than(sort_exec_exprs_, is_asc_order_, nulls_first_);
-
-  bool codegen_enabled = false;
-  Status codegen_status;
-  if (state->codegen_enabled()) {
-    codegen_status = less_than.Codegen(state);
-    codegen_enabled = codegen_status.ok();
-  }
-  AddCodegenExecOption(codegen_enabled, codegen_status);
-
-  sorter_.reset(new Sorter(
-      less_than, sort_exec_exprs_.sort_tuple_slot_expr_ctxs(),
-      &row_descriptor_, mem_tracker(), runtime_profile(), state));
+  less_than_.reset(new TupleRowComparator(sort_exec_exprs_, is_asc_order_, nulls_first_));
+  sorter_.reset(
+      new Sorter(*less_than_.get(), sort_exec_exprs_.sort_tuple_slot_expr_ctxs(),
+          &row_descriptor_, mem_tracker(), runtime_profile(), state));
   RETURN_IF_ERROR(sorter_->Init());
+  AddCodegenDisabledMessage(state);
   return Status::OK();
+}
+
+void SortNode::Codegen(RuntimeState* state) {
+  DCHECK(state->ShouldCodegen());
+  ExecNode::Codegen(state);
+  if (IsNodeCodegenDisabled()) return;
+
+  Status codegen_status = less_than_->Codegen(state);
+  runtime_profile()->AddCodegenMsg(codegen_status.ok(), codegen_status);
 }
 
 Status SortNode::Open(RuntimeState* state) {
@@ -130,6 +135,7 @@ Status SortNode::Reset(RuntimeState* state) {
 void SortNode::Close(RuntimeState* state) {
   if (is_closed()) return;
   sort_exec_exprs_.Close(state);
+  if (sorter_ != NULL) sorter_->Close();
   sorter_.reset();
   ExecNode::Close(state);
 }

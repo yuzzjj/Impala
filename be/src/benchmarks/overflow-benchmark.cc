@@ -1,23 +1,26 @@
-// Copyright 2015 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <vector>
 
-#include "runtime/decimal-value.h"
+#include "runtime/decimal-value.inline.h"
 #include "runtime/string-value.h"
 #include "util/benchmark.h"
 #include "util/cpu-info.h"
@@ -143,6 +146,7 @@ static bool AdjustToSameScaleLookupTbl(const Decimal16Value& x, int x_scale,
 }
 
 #if 5 <= __GNUC__ || __has_builtin(__builtin_add_overflow)
+#define HAVE_BUILTIN_ADD_OVERFLOW
 template<typename RESULT_T>
 DecimalValue<RESULT_T> BuiltinAdd(const Decimal16Value& val, int this_scale,
     const Decimal16Value& other, int other_scale, int result_precision, int result_scale,
@@ -239,13 +243,16 @@ DecimalValue<RESULT_T> Add(const Decimal16Value& val, int this_scale,
   }
 
 TEST_ADD(TestAdd, Add, true);
-#if 5 <= __GNUC__ || __has_builtin (__builtin_add_overflow)
+#ifdef HAVE_BUILTIN_ADD_OVERFLOW
 TEST_ADD(TestBuiltinAddOverflow, BuiltinAdd, false);
 #endif
 TEST_ADD(TestAddOverflowLookupTbl, AddLookupTbl, false);
 TEST_ADD(TestAddOverflow, Add, false);
 
-#if 5 <= __GNUC__ || __has_builtin(__builtin_mul_overflow)
+// Disabled __builtin_mul_overflow since Clang emits a call to __muloti4, which is
+// not implemented in the GCC runtime library.
+#if 5 <= __GNUC__
+#define HAVE_BUILTIN_MUL_OVERFLOW
 template<typename RESULT_T>
 DecimalValue<RESULT_T> BuiltinMultiply(const Decimal16Value& val, int this_scale,
     const Decimal16Value& other, int other_scale, int result_precision, int result_scale,
@@ -369,7 +376,7 @@ DecimalValue<RESULT_T> Multiply(const Decimal16Value& val, int this_scale,
   }
 
 TEST_MUL(TestMul, Multiply, true);
-#if 5 <= __GNUC__ || __has_builtin (__builtin_mul_overflow)
+#ifdef HAVE_BUILTIN_MUL_OVERFLOW
 TEST_MUL(TestBuiltinMulOverflow, BuiltinMultiply, false);
 #endif
 TEST_MUL(TestMulOverflowCheckMSB, MultiplyCheckMSB, false);
@@ -424,7 +431,6 @@ void TestClzBranchFree(int batch_size, void* d) {
 
 int main(int argc, char** argv) {
   CpuInfo::Init();
-  DecimalUtil::InitMaxUnscaledDecimal16();
   cout << Benchmark::GetMachineInfo() << endl;
 
   TestData data;
@@ -438,7 +444,7 @@ int main(int argc, char** argv) {
 
   Benchmark add_overflow_suite("Decimal16 Add Overflow");
   add_overflow_suite.AddBenchmark("without_check_overflow", TestAdd, &data);
-#if 5 <= __GNUC__ || __has_builtin (__builtin_mul_overflow)
+#ifdef HAVE_BUILTIN_ADD_OVERFLOW
   add_overflow_suite.AddBenchmark("builtin_add_overflow", TestBuiltinAddOverflow, &data);
 #endif
   add_overflow_suite.AddBenchmark("add_overflow_lookup_table",
@@ -448,7 +454,7 @@ int main(int argc, char** argv) {
 
   Benchmark mul_overflow_suite("Decimal16 Mul Overflow");
   mul_overflow_suite.AddBenchmark("without_check_overflow", TestMul, &data);
-#if 5 <= __GNUC__ || __has_builtin (__builtin_mul_overflow)
+#ifdef HAVE_BUILTIN_MUL_OVERFLOW
   mul_overflow_suite.AddBenchmark("builtin_mul_overflow", TestBuiltinMulOverflow, &data);
 #endif
   mul_overflow_suite.AddBenchmark("mul_overflow_check_msb",

@@ -1,21 +1,24 @@
-# Copyright (c) 2014 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 from logging import getLogger
-from random import choice, randint, random
+from random import choice, randint, random, shuffle
 
-from db_types import (
+from tests.comparison.db_types import (
     Boolean,
     Char,
     Decimal,
@@ -23,8 +26,39 @@ from db_types import (
     Int,
     TYPES,
     Timestamp)
-from funcs import WindowBoundary
-from random_val_generator import RandomValGenerator
+from tests.comparison.query import (
+    InsertClause,
+    InsertStatement,
+    Query,
+    StatementExecutionMode,
+    ValuesClause)
+from tests.comparison.funcs import (
+    AnalyticAvg,
+    AnalyticCount,
+    AnalyticFirstValue,
+    AnalyticLag,
+    AnalyticLastValue,
+    AnalyticLead,
+    AnalyticMax,
+    AnalyticMin,
+    AnalyticSum,
+    And,
+    Coalesce,
+    Equals,
+    GreaterThan,
+    GreaterThanOrEquals,
+    If,
+    In,
+    IsDistinctFrom,
+    IsNotDistinctFrom,
+    IsNotDistinctFromOp,
+    LessThan,
+    LessThanOrEquals,
+    NotEquals,
+    NotIn,
+    Or,
+    WindowBoundary)
+from tests.comparison.random_val_generator import RandomValGenerator
 
 UNBOUNDED_PRECEDING = WindowBoundary.UNBOUNDED_PRECEDING
 PRECEDING = WindowBoundary.PRECEDING
@@ -33,6 +67,7 @@ FOLLOWING = WindowBoundary.FOLLOWING
 UNBOUNDED_FOLLOWING = WindowBoundary.UNBOUNDED_FOLLOWING
 
 LOG = getLogger()
+
 
 class DefaultProfile(object):
 
@@ -46,7 +81,8 @@ class DefaultProfile(object):
         'WITH_TABLE_COUNT': (1, 3),
         'TABLE_COUNT': (1, 2),
         'ANALYTIC_LEAD_LAG_OFFSET': (1, 100),
-        'ANALYTIC_WINDOW_OFFSET': (1, 100)}
+        'ANALYTIC_WINDOW_OFFSET': (1, 100),
+        'INSERT_VALUES_ROWS': (1, 10)}
 
     # Below are interdependent weights used to determine probabilities. The probability
     # of any item being selected should be (item weight) / sum(weights). A weight of
@@ -63,6 +99,43 @@ class DefaultProfile(object):
             Float: 1,
             Int: 10,
             Timestamp: 1},
+        'RELATIONAL_FUNCS': {
+            # The weights below are "best effort" suggestions. Because QueryGenerator
+            # prefers to set column types first, and some functions are "supported" only
+            # by some types, it means functions can be pruned off from this dictionary,
+            # and that will shift the probabilities. A quick example if that if a Char
+            # column is chosen: LessThan may not have a pre-defined signature for Char
+            # comparison, so LessThan shouldn't be chosen with Char columns. The
+            # tendency to prune will shift as the "funcs" module is adjusted to
+            # add/remove signatures.
+            And: 2,
+            Coalesce: 2,
+            Equals: 40,
+            GreaterThan: 2,
+            GreaterThanOrEquals: 2,
+            In: 2,
+            If: 2,
+            IsDistinctFrom: 2,
+            IsNotDistinctFrom: 1,
+            IsNotDistinctFromOp: 1,
+            LessThan: 2,
+            LessThanOrEquals: 2,
+            NotEquals: 2,
+            NotIn: 2,
+            Or: 2},
+        'CONJUNCT_DISJUNCTS': {
+            # And and Or appear both under RELATIONAL_FUNCS and CONJUNCT_DISJUNCTS for the
+            # following reasons:
+            # 1. And and Or are considered "relational" by virtue of taking two arguments
+            # and returning a Boolean. The crude signature selection means they could be
+            # selected, so we describe weights there.
+            # 2. They are set here explicitly as well so that
+            # QueryGenerator._create_bool_func_tree() can create a "more realistic"
+            # expression that has a Boolean operator at the top of the tree by explicitly
+            # asking for an And or Or.
+            # IMPALA-3896 tracks a better way to do this.
+            And: 5,
+            Or: 1},
         'ANALYTIC_WINDOW': {
             ('ROWS', UNBOUNDED_PRECEDING, None): 1,
             ('ROWS', UNBOUNDED_PRECEDING, PRECEDING): 2,
@@ -125,9 +198,24 @@ class DefaultProfile(object):
             ('Scalar', 'NON_AGG', 'CORRELATED'): 0,   # Not supported
             ('Scalar', 'NON_AGG', 'UNCORRELATED'): 1},
         'QUERY_EXECUTION': {   # Used by the discrepancy searcher
-            'CREATE_TABLE_AS': 1,
-            'RAW': 10,
-            'VIEW': 1}}
+            StatementExecutionMode.CREATE_TABLE_AS: 1,
+            StatementExecutionMode.CREATE_VIEW_AS: 1,
+            StatementExecutionMode.SELECT_STATEMENT: 10},
+        'STATEMENT': {
+            # TODO: Eventually make this a mix of DML and SELECT (IMPALA-4601)
+            Query: 1},
+        'INSERT_SOURCE_CLAUSE': {
+            Query: 3,
+            ValuesClause: 1},
+        'INSERT_COLUMN_LIST': {
+            'partial': 3,
+            'none': 1},
+        'VALUES_ITEM_EXPR': {
+            'constant': 1,
+            'function': 2},
+        'INSERT_UPSERT': {
+            InsertClause.CONFLICT_ACTION_IGNORE: 1,
+            InsertClause.CONFLICT_ACTION_UPDATE: 3}}
 
     # On/off switches
     self._flags = {
@@ -161,7 +249,7 @@ class DefaultProfile(object):
             'INLINE_VIEW': 0.1,   # MAX_NESTED_QUERY_COUNT bounds take precedence
             'SELECT_DISTINCT': 0.1,
             'SCALAR_SUBQUERY': 0.1,
-            'ONLY_USE_EQUALITY_JOIN_PREDICATES': 0.95,
+            'ONLY_USE_EQUALITY_JOIN_PREDICATES': 0.8,
             'ONLY_USE_AGGREGATES_IN_HAVING_CLAUSE': 0.7,
             'UNION_ALL': 0.5}}   # Determines use of "ALL" but not "UNION"
 
@@ -197,14 +285,14 @@ class DefaultProfile(object):
       lower, upper = bounds
     return randint(lower, upper)
 
-  def _choose_from_weights(self, *weights):
+  def _choose_from_weights(self, *weight_args):
     '''Returns a value that is selected from the keys of weights with the probability
        determined by the values of weights.
     '''
-    if isinstance(weights[0], str):
-      weights = self.weights(*weights)
+    if isinstance(weight_args[0], str):
+      weights = self.weights(*weight_args)
     else:
-      weights = weights[0]
+      weights = weight_args[0]
     total_weight = sum(weights.itervalues())
     numeric_choice = randint(1, total_weight)
     for choice_, weight in weights.iteritems():
@@ -220,8 +308,8 @@ class DefaultProfile(object):
       weights = self.weights(*weights)
     else:
       weights = weights[0]
-    return self._choose_from_weights(dict(
-      (choice_, weight) for choice_, weight in weights.iteritems() if filter(choice_)))
+    return self._choose_from_weights(dict((choice_, weight) for choice_, weight
+                                     in weights.iteritems() if filter(choice_)))
 
   def _decide_from_probability(self, *keys):
     return random() < self.probability(*keys)
@@ -284,8 +372,8 @@ class DefaultProfile(object):
     return self._choose_from_filtered_weights(
         lambda join_type: join_type in join_types, 'JOIN')
 
-  def get_join_condition_count(self):
-    return self._choose_from_bounds('MAX_NESTED_EXPR_COUNT')
+  def choose_join_condition_count(self):
+    return max(1, self._choose_from_bounds('MAX_NESTED_EXPR_COUNT'))
 
   def use_where_clause(self):
     return self._decide_from_probability('OPTIONAL_QUERY_CLAUSES', 'WHERE')
@@ -303,9 +391,9 @@ class DefaultProfile(object):
       allow_correlated = False
     weights = dict(((name, use_agg, use_correlated), weight)
                    for (name, use_agg, use_correlated), weight in weights.iteritems()
-                   if name == func_name \
-                       and (allow_agg or use_agg == 'NON_AGG') \
-                       and weight)
+                   if name == func_name and
+                   (allow_agg or use_agg == 'NON_AGG') and
+                   weight)
     if weights:
       return self._choose_from_weights(weights)
 
@@ -379,60 +467,104 @@ class DefaultProfile(object):
       raise Exception('None of the requested types are enabled')
     return self._choose_from_weights(weights)
 
-  def choose_func_signature(self, signatures):
+  def choose_conjunct_disjunct_fill_ratio(self):
+    '''Return the ratio of ANDs and ORs to use in a boolean function tree. For example,
+       when creating a WHERE condition that consists of 10 nested functions, a ratio of
+       0.1 means 1 out of the 10 functions in the WHERE clause will be an AND or OR.
+    '''
+    return random() * random()
+
+  def choose_relational_func_fill_ratio(self):
+    '''Return the ratio of relational functions to use in a boolean function tree. This
+       ratio is applied after 'choose_conjunct_disjunct_fill_ratio()'.
+    '''
+    return random() * random()
+
+  def choose_conjunct_disjunct(self):
+    return self._choose_from_weights('CONJUNCT_DISJUNCTS')
+
+  def choose_relational_func_signature(self, signatures):
+    '''Return a relational signature chosen from "signatures". A signature is considered
+       to be relational if it returns a boolean and accepts more than one argument.
+    '''
+    if not signatures:
+      raise Exception('At least one signature is required')
+    filtered_signatures = filter(
+        lambda s: s.return_type == Boolean \
+            and len(s.args) > 1 \
+            and not any(a.is_subquery for a in s.args),
+        signatures)
+    if not filtered_signatures:
+      raise Exception(
+          'None of the provided signatures corresponded to a relational function')
+    func_weights = self.weights('RELATIONAL_FUNCS')
+    missing_funcs = set(s.func for s in filtered_signatures) - set(func_weights)
+    if missing_funcs:
+      raise Exception("Weights are missing for functions: {0}".format(missing_funcs))
+    return self.choose_func_signature(filtered_signatures,
+                                      self.weights('RELATIONAL_FUNCS'))
+
+  def choose_func_signature(self, signatures, _func_weights=None):
     '''Return a signature chosen from "signatures".'''
     if not signatures:
       raise Exception('At least one signature is required')
 
     type_weights = self.weights('TYPES')
-    # First a function will be chosen then a signature. This is done so that the number
-    # of signatures a function has doesn't influence its likelihood of being chosen.
-    # Functions will be weighted based on the weight of the types in their arguments.
-    # The weights will be normalized by the number of arguments in the signature. The
-    # weight of a function will be the maximum weight out of all of it's signatures.
-    # If any signature has a type with a weight of zero, the signature will not be used.
-    #
-    # Example: type_weights = {Int: 10, Float: 1},
-    #          funcs = [foo(Int), foo(Float), bar(Int, Float)]
-    #
-    #          max signature length = 2   # from bar(Int, Float)
-    #          weight of foo(Int) = (10 * 2)
-    #          weight of foo(Float) = (1 * 2)
-    #          weight of bar(Int, Float) = ((10 + 1) * 1)
-    #          func_weights = {foo: 20, bar: 11}
-    #
-    # Note that this only selects a function, the function signature will be selected
-    # later. This is done to prevent function with a greater number of signatures from
-    # being selected more frequently.
-    func_weights = dict()
-    # The length of the signature in func_weights
-    signature_length_by_func = dict()
-    for signature in signatures:
-      signature_weight = type_weights[signature.return_type]
-      signature_length = 1
-      for arg in signature.args:
-        if arg.is_subquery:
-          for subtype in arg.type:
-            signature_weight *= type_weights[subtype]
+
+    func_weights = _func_weights
+    if func_weights:
+      distinct_funcs_in_signatures = set([s.func for s in signatures])
+      pruned_func_weights = {f: func_weights[f] for f in distinct_funcs_in_signatures}
+      func_weights = pruned_func_weights
+    else:
+      # First a function will be chosen then a signature. This is done so that the number
+      # of signatures a function has doesn't influence its likelihood of being chosen.
+      # Functions will be weighted based on the weight of the types in their arguments.
+      # The weights will be normalized by the number of arguments in the signature. The
+      # weight of a function will be the maximum weight out of all of it's signatures.
+      # If any signature has a type with a weight of zero, the signature will not be used.
+      #
+      # Example: type_weights = {Int: 10, Float: 1},
+      #          funcs = [foo(Int), foo(Float), bar(Int, Float)]
+      #
+      #          max signature length = 2   # from bar(Int, Float)
+      #          weight of foo(Int) = (10 * 2)
+      #          weight of foo(Float) = (1 * 2)
+      #          weight of bar(Int, Float) = ((10 + 1) * 1)
+      #          func_weights = {foo: 20, bar: 11}
+      #
+      # Note that this only selects a function, the function signature will be selected
+      # later. This is done to prevent function with a greater number of signatures from
+      # being selected more frequently.
+      func_weights = dict()
+      # The length of the signature in func_weights
+      signature_length_by_func = dict()
+      for signature in signatures:
+        signature_weight = type_weights[signature.return_type]
+        signature_length = 1
+        for arg in signature.args:
+          if arg.is_subquery:
+            for subtype in arg.type:
+              signature_weight *= type_weights[subtype]
+              signature_length += 1
+          else:
+            signature_weight *= type_weights[arg.type]
             signature_length += 1
-        else:
-          signature_weight *= type_weights[arg.type]
-          signature_length += 1
-      if not signature_weight:
-        continue
-      if not signature.func in func_weights \
-          or signature_weight > func_weights[signature.func]:
-        func_weights[signature.func] = signature_weight
-        signature_length_by_func[signature.func] = signature_length
-    if not func_weights:
-      raise Exception('All functions disallowed based on signature types')
-    distinct_signature_lengths = set(signature_length_by_func.values())
-    for func, weight in func_weights.iteritems():
-      signature_length = signature_length_by_func[func]
-      func_weights[func] = reduce(
-          lambda x, y: x * y,
-          distinct_signature_lengths - set([signature_length]),
-          func_weights[func])
+        if not signature_weight:
+          continue
+        if (signature.func not in func_weights or
+           signature_weight > func_weights[signature.func]):
+          func_weights[signature.func] = signature_weight
+          signature_length_by_func[signature.func] = signature_length
+      if not func_weights:
+        raise Exception('All functions disallowed based on signature types')
+      distinct_signature_lengths = set(signature_length_by_func.values())
+      for func, weight in func_weights.iteritems():
+        signature_length = signature_length_by_func[func]
+        func_weights[func] = reduce(
+            lambda x, y: x * y,
+            distinct_signature_lengths - set([signature_length]),
+            func_weights[func])
     func = self._choose_from_weights(func_weights)
 
     # Same idea as above but for the signatures of the selected function.
@@ -475,6 +607,78 @@ class DefaultProfile(object):
       elif not weights[arg.type]:
         return False
     return True
+
+  def get_allowed_join_signatures(self, signatures):
+    """
+    Returns all the function signatures that are allowed inside a JOIN clause. This
+    method is mutually exclusive with only_use_equality_join_predicates. This results of
+    this method are ignored if only_use_equality_join_predicates return True.
+    """
+    return signatures
+
+  def is_non_equality_join_predicate(self, func):
+    """
+    Returns True if the given func is considered a non-equality join condition.
+    """
+    return func in (GreaterThan, GreaterThanOrEquals, In,
+                    IsNotDistinctFrom, IsNotDistinctFromOp, LessThan,
+                    LessThanOrEquals, NotEquals, NotIn)
+
+  def get_analytic_funcs_that_cannot_contain_aggs(self):
+    """
+    Returns a list of analytic functions that should not contain aggregate functions
+    """
+    return None
+
+  def choose_statement(self):
+    return self._choose_from_weights('STATEMENT')
+
+  def choose_insert_source_clause(self):
+    """
+    Returns whether we generate an INSERT/UPSERT SELECT or an INSERT/UPSERT VALUES
+    """
+    return self._choose_from_weights('INSERT_SOURCE_CLAUSE')
+
+  def choose_insert_column_list(self, table):
+    """
+    Decide whether or not an INSERT/UPSERT will be in the form of:
+    INSERT/UPSERT INTO table SELECT|VALUES ...
+    or
+    INSERT/UPSERT INTO table (col1, col2, ...) SELECT|VALUES ...
+    If the second form, the column list is shuffled. The column list will always contain
+    the primary key columns and between 0 and all additional columns.
+    """
+    if 'partial' == self._choose_from_weights('INSERT_COLUMN_LIST'):
+      columns_to_insert = list(table.primary_keys)
+      min_additional_insert_cols = 0 if columns_to_insert else 1
+      remaining_columns = [col for col in table.cols if not col.is_primary_key]
+      shuffle(remaining_columns)
+      additional_column_count = randint(min_additional_insert_cols,
+                                        len(remaining_columns))
+      columns_to_insert.extend(remaining_columns[:additional_column_count])
+      shuffle(columns_to_insert)
+      return columns_to_insert
+    else:
+      return None
+
+  def choose_insert_values_row_count(self):
+    """
+    Choose the number of rows to insert in an INSERT/UPSERT VALUES
+    """
+    return self._choose_from_bounds('INSERT_VALUES_ROWS')
+
+  def choose_values_item_expr(self):
+    """
+    For a VALUES clause, Choose whether a particular item in a particular row will be a
+    constant or a function.
+    """
+    return self._choose_from_weights('VALUES_ITEM_EXPR')
+
+  def choose_insert_vs_upsert(self):
+    """
+    Choose whether a particular insertion-type statement will be INSERT or UPSERT.
+    """
+    return self._choose_from_weights('INSERT_UPSERT')
 
 
 class ImpalaNestedTypesProfile(DefaultProfile):
@@ -519,7 +723,8 @@ class TestFunctionProfile(DefaultProfile):
 
 class HiveProfile(DefaultProfile):
   def __init__(self):
-      super(HiveProfile, self).__init__()
+    super(HiveProfile, self).__init__()
+    self._probabilities['MISC']['ONLY_USE_EQUALITY_JOIN_PREDICATES'] = 0
 
   def use_having_without_groupby(self):
     return False
@@ -544,6 +749,42 @@ class HiveProfile(DefaultProfile):
           if type != argtype:
             return False
     return DefaultProfile.allow_func_signature(self, signature)
+
+  def get_allowed_join_signatures(self, signatures):
+    """
+    Restricts the function signatures inside a JOIN clause to either be an Equals
+    operator, an And operator, or any operator that only takes in one argument. The reason
+    is that Hive only supports equi-joins, does not allow OR operators inside a JOIN, and
+    does not allow any other operator that operates over multiple columns.
+
+    The reason ONLY_USE_EQUALITY_JOIN_PREDICATES is not sufficient to guarantee this is
+    that Hive needs to restrict the functions used based on the argument size of a
+    function.
+    """
+    return [signature for signature in signatures if
+            signature.func in (Equals, And) or len(signature.args) == 1]
+
+  def get_analytic_funcs_that_cannot_contain_aggs(self):
+    """
+    Hive does not support aggregate functions inside AVG, COUNT, FIRSTVALUE, LAG,
+    LASTVALUE, LEAD, MAX, MIN, or SUM functions
+    """
+    return (AnalyticAvg, AnalyticCount, AnalyticFirstValue, AnalyticLag,
+            AnalyticLastValue, AnalyticLead, AnalyticMax, AnalyticMin, AnalyticSum)
+
+
+class DMLOnlyProfile(DefaultProfile):
+  """
+  Profile that only executes DML statements
+
+  TODO: This will be useful for testing DML; eventually this should be folded into the
+  default profile. (IMPALA-4601)
+  """
+  def __init__(self):
+    super(DMLOnlyProfile, self).__init__()
+    self._weights.update({
+        'STATEMENT': {
+            InsertStatement: 1}})
 
 
 PROFILES = [var for var in locals().values()

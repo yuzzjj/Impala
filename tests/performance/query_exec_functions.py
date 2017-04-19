@@ -1,16 +1,19 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 
 import logging
@@ -19,17 +22,10 @@ from datetime import datetime
 from impala.dbapi import connect
 from tests.beeswax.impala_beeswax import ImpalaBeeswaxClient, ImpalaBeeswaxResult
 from sys import maxint
-from tests.performance.query import Query, HiveQueryResult, ImpalaQueryResult
-from tests.performance.query_executor import (
-    QueryExecConfig,
-    ImpalaQueryExecConfig,
-    JdbcQueryExecConfig,
-    BeeswaxQueryExecConfig,
-    ImpalaHS2QueryConfig,
-    HiveHS2QueryConfig
-    )
+from tests.performance.query import HiveQueryResult, ImpalaQueryResult
 from tests.util.shell_util import exec_process
 from time import time
+import threading
 
 DEFAULT_BEESWAX_PORT = 21000
 DEFAULT_HS2_PORT = 21050
@@ -59,11 +55,15 @@ def get_hs2_hive_cursor(hiveserver, user=None, use_kerberos=False,
 def execute_using_hive_hs2(query, query_config):
   exec_result = HiveQueryResult(query, query_config=query_config)
   plugin_runner = query_config.plugin_runner
-  cursor = get_hs2_hive_cursor(query_config.hiveserver,
+  cursor = getattr(threading.current_thread(), 'cursor', None)
+  if cursor is None:
+    cursor = get_hs2_hive_cursor(query_config.hiveserver,
       user=query_config.user,
       database=query.db,
       use_kerberos=query_config.use_kerberos,
       execOptions=query_config.exec_options)
+    threading.current_thread().cursor = cursor
+
   if cursor is None: return exec_result
 
   if plugin_runner: plugin_runner.run_plugins_pre(scope="Query")
@@ -77,7 +77,6 @@ def execute_using_hive_hs2(query, query_config):
     LOG.error(str(e))
     exec_result.query_error = str(e)
   finally:
-    cursor.close()
     if plugin_runner: plugin_runner.run_plugins_post(scope="Query")
   return exec_result
 
@@ -94,7 +93,7 @@ def get_hs2_impala_cursor(impalad, use_kerberos=False, database=None):
   """
   try:
     host, port = impalad.split(":")
-  except ValueError, v:
+  except ValueError:
     host, port = impalad, DEFAULT_HS2_PORT
   cursor = None
   try:
@@ -246,7 +245,7 @@ def execute_using_jdbc(query, query_config):
   cmd = query_config.jdbc_client_cmd + " -q \"%s\"" % query_string
   return run_query_capture_results(cmd, query, exit_on_error=False)
 
-def parse_jdbc_query_results(stdout, stderr):
+def parse_jdbc_query_results(stdout, stderr, query):
   """
   Parse query execution results for the Impala JDBC client
 
@@ -261,10 +260,10 @@ def parse_jdbc_query_results(stdout, stderr):
       time_taken = float(('%s.%s') % (match.group(1), match.group(2)))
       break
   result_data = re.findall(r'\[START\]----\n(.*?)\n----\[END\]', stdout, re.DOTALL)[0]
-  return create_exec_result(time_taken, result_data)
+  return create_exec_result(time_taken, result_data, query)
 
-def create_exec_result(time_taken, result_data):
-  exec_result = HiveQueryResult()
+def create_exec_result(time_taken, result_data, query):
+  exec_result = HiveQueryResult(query)
   if result_data:
     LOG.debug('Data:\n%s\n' % result_data)
     exec_result.data = result_data
@@ -297,7 +296,7 @@ def run_query_capture_results(cmd, query, exit_on_error):
     exec_result.query_error = msg
     return exec_result
   # The command completed
-  exec_result = parse_jdbc_query_results(stdout, stderr)
+  exec_result = parse_jdbc_query_results(stdout, stderr, query)
   exec_result.query = query
   exec_result.start_time = start_time
   return exec_result

@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exec/hdfs-sequence-scanner.h"
 
@@ -24,6 +27,7 @@
 #include "runtime/tuple.h"
 #include "runtime/tuple-row.h"
 #include "util/codec.h"
+#include "util/runtime-profile-counters.h"
 
 #include "common/names.h"
 
@@ -37,7 +41,8 @@ const uint8_t HdfsSequenceScanner::SEQFILE_VERSION_HEADER[4] = {'S', 'E', 'Q', 6
 
 #define RETURN_IF_FALSE(x) if (UNLIKELY(!(x))) return parse_status_
 
-HdfsSequenceScanner::HdfsSequenceScanner(HdfsScanNode* scan_node, RuntimeState* state)
+HdfsSequenceScanner::HdfsSequenceScanner(HdfsScanNodeBase* scan_node,
+    RuntimeState* state)
     : BaseSequenceScanner(scan_node, state),
       unparsed_data_buffer_(NULL),
       num_buffered_records_in_compressed_block_(0) {
@@ -47,15 +52,20 @@ HdfsSequenceScanner::~HdfsSequenceScanner() {
 }
 
 // Codegen for materialized parsed data into tuples.
-Function* HdfsSequenceScanner::Codegen(HdfsScanNode* node,
-    const vector<ExprContext*>& conjunct_ctxs) {
-  if (!node->runtime_state()->codegen_enabled()) return NULL;
-  LlvmCodeGen* codegen;
-  if (!node->runtime_state()->GetCodegen(&codegen).ok()) return NULL;
-  Function* write_complete_tuple_fn =
-      CodegenWriteCompleteTuple(node, codegen, conjunct_ctxs);
-  if (write_complete_tuple_fn == NULL) return NULL;
-  return CodegenWriteAlignedTuples(node, codegen, write_complete_tuple_fn);
+Status HdfsSequenceScanner::Codegen(HdfsScanNodeBase* node,
+    const vector<ExprContext*>& conjunct_ctxs, Function** write_aligned_tuples_fn) {
+  *write_aligned_tuples_fn = NULL;
+  DCHECK(node->runtime_state()->ShouldCodegen());
+  LlvmCodeGen* codegen = node->runtime_state()->codegen();
+  DCHECK(codegen != NULL);
+  Function* write_complete_tuple_fn;
+  RETURN_IF_ERROR(CodegenWriteCompleteTuple(node, codegen, conjunct_ctxs,
+      &write_complete_tuple_fn));
+  DCHECK(write_complete_tuple_fn != NULL);
+  RETURN_IF_ERROR(CodegenWriteAlignedTuples(node, codegen, write_complete_tuple_fn,
+      write_aligned_tuples_fn));
+  DCHECK(*write_aligned_tuples_fn != NULL);
+  return Status::OK();
 }
 
 Status HdfsSequenceScanner::InitNewRange() {
@@ -85,8 +95,8 @@ Status HdfsSequenceScanner::InitNewRange() {
   return Status::OK();
 }
 
-Status HdfsSequenceScanner::Prepare(ScannerContext* context) {
-  RETURN_IF_ERROR(BaseSequenceScanner::Prepare(context));
+Status HdfsSequenceScanner::Open(ScannerContext* context) {
+  RETURN_IF_ERROR(BaseSequenceScanner::Open(context));
 
   // Allocate the scratch space for two pass parsing.  The most fields we can go
   // through in one parse pass is the batch size (tuples) * the number of fields per tuple
@@ -204,7 +214,7 @@ Status HdfsSequenceScanner::ProcessDecompressedBlock() {
 
   if (scan_node_->materialized_slots().empty()) {
     // Handle case where there are no slots to materialize (e.g. count(*))
-    num_to_process = WriteEmptyTuples(context_, tuple_row, num_to_process);
+    num_to_process = WriteTemplateTuples(tuple_row, num_to_process);
     COUNTER_ADD(scan_node_->rows_read_counter(), num_to_process);
     RETURN_IF_ERROR(CommitRows(num_to_process));
     return Status::OK();
@@ -228,15 +238,15 @@ Status HdfsSequenceScanner::ProcessDecompressedBlock() {
   for (int i = 0; i < num_to_process; ++i) {
     int num_fields = 0;
     if (delimited_text_parser_->escape_char() == '\0') {
-      delimited_text_parser_->ParseSingleTuple<false>(
+      RETURN_IF_ERROR(delimited_text_parser_->ParseSingleTuple<false>(
           record_locations_[i].len,
           reinterpret_cast<char*>(record_locations_[i].record),
-          &field_locations_[field_location_offset], &num_fields);
+          &field_locations_[field_location_offset], &num_fields));
     } else {
-      delimited_text_parser_->ParseSingleTuple<true>(
+      RETURN_IF_ERROR(delimited_text_parser_->ParseSingleTuple<true>(
           record_locations_[i].len,
           reinterpret_cast<char*>(record_locations_[i].record),
-          &field_locations_[field_location_offset], &num_fields);
+          &field_locations_[field_location_offset], &num_fields));
     }
     DCHECK_EQ(num_fields, scan_node_->materialized_slots().size());
     field_location_offset += num_fields;
@@ -252,6 +262,10 @@ Status HdfsSequenceScanner::ProcessDecompressedBlock() {
   // Call jitted function if possible
   int tuples_returned;
   if (write_tuples_fn_ != NULL) {
+    // HdfsScanner::InitializeWriteTuplesFn() will skip codegen if there are string slots
+    // and escape characters. TextConverter::WriteSlot() will be used instead.
+    DCHECK(scan_node_->tuple_desc()->string_slots().empty() ||
+        delimited_text_parser_->escape_char() == '\0');
     // last argument: seq always starts at record_location[0]
     tuples_returned = write_tuples_fn_(this, pool, tuple_row,
         batch_->row_byte_size(), &field_locations_[0], num_to_process,
@@ -316,11 +330,11 @@ Status HdfsSequenceScanner::ProcessRange() {
           template_tuple_, &errors[0], &error_in_row);
 
       if (UNLIKELY(error_in_row)) {
-        ReportTupleParseError(&field_locations_[0], errors, 0);
+        ReportTupleParseError(&field_locations_[0], errors);
         RETURN_IF_ERROR(parse_status_);
       }
     } else {
-      add_row = WriteEmptyTuples(context_, tuple_row_mem, 1);
+      add_row = WriteTemplateTuples(tuple_row_mem, 1);
     }
 
     COUNTER_ADD(scan_node_->rows_read_counter(), 1);
@@ -442,7 +456,7 @@ Status HdfsSequenceScanner::ReadCompressedBlock() {
   // We are reading a new compressed block.  Pass the previous buffer pool
   // bytes to the batch.  We don't need them anymore.
   if (!decompressor_->reuse_output_buffer()) {
-    AttachPool(data_buffer_pool_.get(), true);
+    RETURN_IF_ERROR(AttachPool(data_buffer_pool_.get(), true));
   }
 
   RETURN_IF_FALSE(stream_->ReadVLong(
@@ -488,10 +502,4 @@ Status HdfsSequenceScanner::ReadCompressedBlock() {
   }
 
   return Status::OK();
-}
-
-void HdfsSequenceScanner::LogRowParseError(int row_idx, stringstream* ss) {
-  DCHECK_LT(row_idx, record_locations_.size());
-  *ss << string(reinterpret_cast<const char*>(record_locations_[row_idx].record),
-                  record_locations_[row_idx].len);
 }

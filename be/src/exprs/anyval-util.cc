@@ -1,21 +1,27 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exprs/anyval-util.h"
 #include "codegen/llvm-codegen.h"
 
 #include "common/object-pool.h"
+#include "gutil/strings/substitute.h"
+#include "runtime/mem-pool.h"
+#include "runtime/mem-tracker.h"
 
 #include "common/names.h"
 
@@ -23,30 +29,18 @@ using namespace impala_udf;
 
 namespace impala {
 
-AnyVal* CreateAnyVal(ObjectPool* pool, const ColumnType& type) {
-  return pool->Add(CreateAnyVal(type));
-}
-
-AnyVal* CreateAnyVal(const ColumnType& type) {
-  switch(type.type) {
-    case TYPE_NULL: return new AnyVal;
-    case TYPE_BOOLEAN: return new BooleanVal;
-    case TYPE_TINYINT: return new TinyIntVal;
-    case TYPE_SMALLINT: return new SmallIntVal;
-    case TYPE_INT: return new IntVal;
-    case TYPE_BIGINT: return new BigIntVal;
-    case TYPE_FLOAT: return new FloatVal;
-    case TYPE_DOUBLE: return new DoubleVal;
-    case TYPE_STRING:
-    case TYPE_VARCHAR:
-    case TYPE_CHAR:
-      return new StringVal;
-    case TYPE_TIMESTAMP: return new TimestampVal;
-    case TYPE_DECIMAL: return new DecimalVal;
-    default:
-      DCHECK(false) << "Unsupported type: " << type;
-      return NULL;
+Status AllocateAnyVal(RuntimeState* state, MemPool* pool, const ColumnType& type,
+    const std::string& mem_limit_exceeded_msg, AnyVal** result) {
+  const int anyval_size = AnyValUtil::AnyValSize(type);
+  const int anyval_alignment = AnyValUtil::AnyValAlignment(type);
+  *result =
+      reinterpret_cast<AnyVal*>(pool->TryAllocateAligned(anyval_size, anyval_alignment));
+  if (*result == NULL) {
+    return pool->mem_tracker()->MemLimitExceeded(
+        state, mem_limit_exceeded_msg, anyval_size);
   }
+  memset(*result, 0, anyval_size);
+  return Status::OK();
 }
 
 FunctionContext::TypeDesc AnyValUtil::ColumnTypeToTypeDesc(const ColumnType& type) {
@@ -98,17 +92,33 @@ FunctionContext::TypeDesc AnyValUtil::ColumnTypeToTypeDesc(const ColumnType& typ
   return out;
 }
 
+vector<FunctionContext::TypeDesc> AnyValUtil::ColumnTypesToTypeDescs(
+    const vector<ColumnType>& types) {
+  vector<FunctionContext::TypeDesc> type_descs;
+  for (const ColumnType& type : types) type_descs.push_back(ColumnTypeToTypeDesc(type));
+  return type_descs;
+}
+
 ColumnType AnyValUtil::TypeDescToColumnType(const FunctionContext::TypeDesc& type) {
   switch (type.type) {
-    case FunctionContext::TYPE_BOOLEAN: return ColumnType(TYPE_BOOLEAN);
-    case FunctionContext::TYPE_TINYINT: return ColumnType(TYPE_TINYINT);
-    case FunctionContext::TYPE_SMALLINT: return ColumnType(TYPE_SMALLINT);
-    case FunctionContext::TYPE_INT: return ColumnType(TYPE_INT);
-    case FunctionContext::TYPE_BIGINT: return ColumnType(TYPE_BIGINT);
-    case FunctionContext::TYPE_FLOAT: return ColumnType(TYPE_FLOAT);
-    case FunctionContext::TYPE_DOUBLE: return ColumnType(TYPE_DOUBLE);
-    case FunctionContext::TYPE_TIMESTAMP: return ColumnType(TYPE_TIMESTAMP);
-    case FunctionContext::TYPE_STRING: return ColumnType(TYPE_STRING);
+    case FunctionContext::TYPE_BOOLEAN:
+      return ColumnType(TYPE_BOOLEAN);
+    case FunctionContext::TYPE_TINYINT:
+      return ColumnType(TYPE_TINYINT);
+    case FunctionContext::TYPE_SMALLINT:
+      return ColumnType(TYPE_SMALLINT);
+    case FunctionContext::TYPE_INT:
+      return ColumnType(TYPE_INT);
+    case FunctionContext::TYPE_BIGINT:
+      return ColumnType(TYPE_BIGINT);
+    case FunctionContext::TYPE_FLOAT:
+      return ColumnType(TYPE_FLOAT);
+    case FunctionContext::TYPE_DOUBLE:
+      return ColumnType(TYPE_DOUBLE);
+    case FunctionContext::TYPE_TIMESTAMP:
+      return ColumnType(TYPE_TIMESTAMP);
+    case FunctionContext::TYPE_STRING:
+      return ColumnType(TYPE_STRING);
     case FunctionContext::TYPE_DECIMAL:
       return ColumnType::CreateDecimalType(type.precision, type.scale);
     case FunctionContext::TYPE_FIXED_BUFFER:

@@ -1,22 +1,24 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "runtime/types.h"
 
 #include <ostream>
 #include <sstream>
-#include <boost/foreach.hpp>
 
 #include "gen-cpp/TCLIService_constants.h"
 #include "codegen/llvm-codegen.h"
@@ -27,6 +29,13 @@ using namespace apache::hive::service::cli::thrift;
 using namespace llvm;
 
 namespace impala {
+
+const int ColumnType::MAX_PRECISION;
+const int ColumnType::MAX_SCALE;
+const int ColumnType::MIN_ADJUSTED_SCALE;
+
+const int ColumnType::MAX_DECIMAL4_PRECISION;
+const int ColumnType::MAX_DECIMAL8_PRECISION;
 
 const char* ColumnType::LLVM_CLASS_NAME = "struct.impala::ColumnType";
 
@@ -195,12 +204,12 @@ void ColumnType::ToThrift(TColumnType* thrift_type) const {
       DCHECK_EQ(type, TYPE_STRUCT);
       node.type = TTypeNodeType::STRUCT;
       node.__set_struct_fields(vector<TStructField>());
-      BOOST_FOREACH(const string& field_name, field_names) {
+      for (const string& field_name: field_names) {
         node.struct_fields.push_back(TStructField());
         node.struct_fields.back().name = field_name;
       }
     }
-    BOOST_FOREACH(const ColumnType& child, children) {
+    for (const ColumnType& child: children) {
       child.ToThrift(thrift_type);
     }
   } else {
@@ -301,11 +310,20 @@ string ColumnType::DebugString() const {
       ss << "CHAR(" << len << ")";
       return ss.str();
     case TYPE_DECIMAL:
-      ss << "DECIMAL(" << precision << ", " << scale << ")";
+      ss << "DECIMAL(" << precision << "," << scale << ")";
+      return ss.str();
+    case TYPE_VARCHAR:
+      ss << "VARCHAR(" << len << ")";
       return ss.str();
     default:
       return TypeToString(type);
   }
+}
+
+vector<ColumnType> ColumnType::FromThrift(const vector<TColumnType>& ttypes) {
+  vector<ColumnType> types;
+  for (const TColumnType& ttype : ttypes) types.push_back(FromThrift(ttype));
+  return types;
 }
 
 ostream& operator<<(ostream& os, const ColumnType& type) {

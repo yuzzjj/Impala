@@ -1,19 +1,22 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 namespace cpp impala
-namespace java com.cloudera.impala.thrift
+namespace java org.apache.impala.thrift
 
 include "CatalogObjects.thrift"
 include "JniCatalog.thrift"
@@ -49,11 +52,21 @@ struct TCatalogUpdateResult {
   // The status of the operation, OK if the operation was successful.
   3: required Status.TStatus status
 
+  // The resulting TCatalogObject that was added or modified, if applicable.
+  // This field is superceded by the updated_catalog_objects list below, but is still
+  // maintained for backwards compatibility. BDR relies on a stable catalog API.
+  4: optional CatalogObjects.TCatalogObject updated_catalog_object_DEPRECATED
+
+  // The resulting TCatalogObject that was removed, if applicable.
+  // This field is superceded by the removed_catalog_objects list below, but is still
+  // maintained for backwards compatibility. BDR relies on a stable catalog API.
+  5: optional CatalogObjects.TCatalogObject removed_catalog_object_DEPRECATED
+
   // The resulting TCatalogObjects that were added or modified, if applicable.
-  4: optional list<CatalogObjects.TCatalogObject> updated_catalog_objects
+  6: optional list<CatalogObjects.TCatalogObject> updated_catalog_objects
 
   // The resulting TCatalogObjects that were removed, if applicable.
-  5: optional list<CatalogObjects.TCatalogObject> removed_catalog_objects
+  7: optional list<CatalogObjects.TCatalogObject> removed_catalog_objects
 }
 
 // Request for executing a DDL operation (CREATE, ALTER, DROP).
@@ -132,7 +145,7 @@ struct TDdlExecResponse {
   2: optional bool new_table_created;
 
   // Result of DDL operation to be returned to the client. Currently only set
-  // by COMPUTE STATS.
+  // by COMPUTE STATS and ALTER TABLE.
   3: optional Results.TResultSet result_set
 }
 
@@ -176,6 +189,10 @@ struct TResetMetadataRequest {
   // Fully qualified name of the table to refresh or invalidate; not set if invalidating
   // the entire catalog
   3: optional CatalogObjects.TTableName table_name
+
+  // If set, refreshes the specified partition, otherwise
+  // refreshes the whole table
+  5: optional list<CatalogObjects.TPartitionKeyValue> partition_spec
 }
 
 // Response from TResetMetadataRequest

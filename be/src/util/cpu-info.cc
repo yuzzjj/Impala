@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/cpu-info.h"
 
@@ -18,21 +21,29 @@
 #include <sys/sysctl.h>
 #endif
 
-#include <boost/algorithm/string.hpp>
-#include <iostream>
-#include <fstream>
 #include <mmintrin.h>
-#include <sstream>
+#include <sched.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <algorithm>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <boost/algorithm/string.hpp>
+#include <boost/filesystem.hpp>
+#include <sys/sysinfo.h>
 
+#include "common/config.h"
+#include "gutil/strings/substitute.h"
 #include "util/pretty-printer.h"
+#include "util/string-parser.h"
 
 #include "common/names.h"
 
 using boost::algorithm::contains;
 using boost::algorithm::trim;
+namespace fs = boost::filesystem;
 using std::max;
 
 DECLARE_bool(abort_on_config_error);
@@ -40,15 +51,34 @@ DEFINE_int32(num_cores, 0, "(Advanced) If > 0, it sets the number of cores avail
     " Impala. Setting it to 0 means Impala will use all available cores on the machine"
     " according to /proc/cpuinfo.");
 
+namespace {
+// Helper function to warn if a given file does not contain an expected string as its
+// first line. If the file cannot be opened, no error is reported.
+void WarnIfFileNotEqual(
+    const string& filename, const string& expected, const string& warning_text) {
+  ifstream file(filename);
+  if (!file) return;
+  string line;
+  getline(file, line);
+  if (line != expected) {
+    LOG(ERROR) << "Expected " << expected << ", actual " << line << endl << warning_text;
+  }
+}
+} // end anonymous namespace
+
 namespace impala {
 
 bool CpuInfo::initialized_ = false;
 int64_t CpuInfo::hardware_flags_ = 0;
 int64_t CpuInfo::original_hardware_flags_;
-long CpuInfo::cache_sizes_[L3_CACHE + 1];
 int64_t CpuInfo::cycles_per_ms_;
 int CpuInfo::num_cores_ = 1;
+int CpuInfo::max_num_cores_;
 string CpuInfo::model_name_ = "unknown";
+int CpuInfo::max_num_numa_nodes_;
+unique_ptr<int[]> CpuInfo::core_to_numa_node_;
+vector<vector<int>> CpuInfo::numa_node_to_cores_;
+vector<int> CpuInfo::numa_node_core_idx_;
 
 static struct {
   string name;
@@ -59,6 +89,8 @@ static struct {
   { "sse4_1", CpuInfo::SSE4_1 },
   { "sse4_2", CpuInfo::SSE4_2 },
   { "popcnt", CpuInfo::POPCNT },
+  { "avx",    CpuInfo::AVX },
+  { "avx2",   CpuInfo::AVX2 },
 };
 static const long num_flags = sizeof(flag_mappings) / sizeof(flag_mappings[0]);
 
@@ -84,10 +116,8 @@ void CpuInfo::Init() {
   float max_mhz = 0;
   int num_cores = 0;
 
-  memset(&cache_sizes_, 0, sizeof(cache_sizes_));
-
   // Read from /proc/cpuinfo
-  ifstream cpuinfo("/proc/cpuinfo", ios::in);
+  ifstream cpuinfo("/proc/cpuinfo");
   while (cpuinfo) {
     getline(cpuinfo, line);
     size_t colon = line.find(':');
@@ -112,24 +142,6 @@ void CpuInfo::Init() {
       }
     }
   }
-  if (cpuinfo.is_open()) cpuinfo.close();
-
-#ifdef __APPLE__
-  // On Mac OS X use sysctl() to get the cache sizes
-  size_t len = 0;
-  sysctlbyname("hw.cachesize", NULL, &len, NULL, 0);
-  uint64_t* data = static_cast<uint64_t*>(malloc(len));
-  sysctlbyname("hw.cachesize", data, &len, NULL, 0);
-  DCHECK(len / sizeof(uint64_t) >= 3);
-  for (size_t i = 0; i < 3; ++i) {
-    cache_sizes_[i] = data[i];
-  }
-#else
-  // Call sysconf to query for the cache sizes
-  cache_sizes_[0] = sysconf(_SC_LEVEL1_DCACHE_SIZE);
-  cache_sizes_[1] = sysconf(_SC_LEVEL2_CACHE_SIZE);
-  cache_sizes_[2] = sysconf(_SC_LEVEL3_CACHE_SIZE);
-#endif
 
   if (max_mhz != 0) {
     cycles_per_ms_ = max_mhz * 1000;
@@ -138,23 +150,125 @@ void CpuInfo::Init() {
   }
   original_hardware_flags_ = hardware_flags_;
 
-
   if (num_cores > 0) {
     num_cores_ = num_cores;
   } else {
     num_cores_ = 1;
   }
-
   if (FLAGS_num_cores > 0) num_cores_ = FLAGS_num_cores;
+  max_num_cores_ = get_nprocs_conf();
 
+  // Print a warning if something is wrong with sched_getcpu().
+#ifdef HAVE_SCHED_GETCPU
+  if (sched_getcpu() == -1) {
+    LOG(WARNING) << "Kernel does not support getcpu(). Performance may be impacted.";
+  }
+#else
+  LOG(WARNING) << "Built on a system without sched_getcpu() support. Performance may"
+               << " be impacted.";
+#endif
+
+  InitNuma();
   initialized_ = true;
+}
+
+void CpuInfo::InitNuma() {
+  // Use the NUMA info in the /sys filesystem. which is part of the Linux ABI:
+  // see https://www.kernel.org/doc/Documentation/ABI/stable/sysfs-devices-node and
+  // https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-devices-system-cpu
+  // The filesystem entries are only present if the kernel was compiled with NUMA support.
+  core_to_numa_node_.reset(new int[max_num_cores_]);
+
+  if (!fs::is_directory("/sys/devices/system/node")) {
+    LOG(WARNING) << "/sys/devices/system/node is not present - no NUMA support";
+    // Assume a single NUMA node.
+    max_num_numa_nodes_ = 1;
+    std::fill_n(core_to_numa_node_.get(), max_num_cores_, 0);
+    InitNumaNodeToCores();
+    return;
+  }
+
+  // Search for node subdirectories - node0, node1, node2, etc to determine possible
+  // NUMA nodes.
+  fs::directory_iterator dir_it("/sys/devices/system/node");
+  max_num_numa_nodes_ = 0;
+  for (; dir_it != fs::directory_iterator(); ++dir_it) {
+    const string filename = dir_it->path().filename().string();
+    if (filename.find("node") == 0) ++max_num_numa_nodes_;
+  }
+  if (max_num_numa_nodes_ == 0) {
+    LOG(WARNING) << "Could not find nodes in /sys/devices/system/node";
+    max_num_numa_nodes_ = 1;
+  }
+
+  // Check which NUMA node each core belongs to based on the existence of a symlink
+  // to the node subdirectory.
+  for (int core = 0; core < max_num_cores_; ++core) {
+    bool found_numa_node = false;
+    for (int node = 0; node < max_num_numa_nodes_; ++node) {
+      if (fs::exists(Substitute("/sys/devices/system/cpu/cpu$0/node$1", core, node))) {
+        core_to_numa_node_[core] = node;
+        found_numa_node = true;
+        break;
+      }
+    }
+    if (!found_numa_node) {
+      LOG(WARNING) << "Could not determine NUMA node for core " << core
+                   << " from /sys/devices/system/cpu/";
+      core_to_numa_node_[core] = 0;
+    }
+  }
+  InitNumaNodeToCores();
+}
+
+void CpuInfo::InitFakeNumaForTest(
+    int max_num_numa_nodes, const vector<int>& core_to_numa_node) {
+  DCHECK_EQ(max_num_cores_, core_to_numa_node.size());
+  max_num_numa_nodes_ = max_num_numa_nodes;
+  for (int i = 0; i < max_num_cores_; ++i) {
+    core_to_numa_node_[i] = core_to_numa_node[i];
+  }
+  numa_node_to_cores_.clear();
+  InitNumaNodeToCores();
+}
+
+void CpuInfo::InitNumaNodeToCores() {
+  DCHECK(numa_node_to_cores_.empty());
+  numa_node_to_cores_.resize(max_num_numa_nodes_);
+  numa_node_core_idx_.resize(max_num_cores_);
+  for (int core = 0; core < max_num_cores_; ++core) {
+    vector<int>* cores_of_node = &numa_node_to_cores_[core_to_numa_node_[core]];
+    numa_node_core_idx_[core] = cores_of_node->size();
+    cores_of_node->push_back(core);
+  }
 }
 
 void CpuInfo::VerifyCpuRequirements() {
   if (!CpuInfo::IsSupported(CpuInfo::SSSE3)) {
-    LOG(ERROR) << "CPU does not support the Supplemental SSE3 (SSSE3) instruction set, "
-               << "which is required. Exiting if Supplemental SSE3 is not functional...";
+    LOG(ERROR) << "CPU does not support the Supplemental SSE3 (SSSE3) instruction set. "
+               << "This setup is generally unsupported and Impala might be unstable.";
   }
+}
+
+void CpuInfo::VerifyPerformanceGovernor() {
+  for (int cpu_id = 0; cpu_id < CpuInfo::num_cores(); ++cpu_id) {
+    const string governor_file =
+        Substitute("/sys/devices/system/cpu/cpu$0/cpufreq/scaling_governor", cpu_id);
+    const string warning_text = Substitute(
+        "WARNING: CPU $0 is not using 'performance' governor. Note that changing the "
+        "governor to 'performance' will reset the no_turbo setting to 0.",
+        cpu_id);
+    WarnIfFileNotEqual(governor_file, "performance", warning_text);
+  }
+}
+
+void CpuInfo::VerifyTurboDisabled() {
+  WarnIfFileNotEqual("/sys/devices/system/cpu/intel_pstate/no_turbo", "1",
+      "WARNING: CPU turbo is enabled. This setting can change the clock frequency of CPU "
+      "cores during the benchmark run, which can lead to inaccurate results. You can "
+      "disable CPU turbo by writing a 1 to "
+      "/sys/devices/system/cpu/intel_pstate/no_turbo. Note that changing the governor to "
+      "'performance' will reset this to 0.");
 }
 
 void CpuInfo::EnableFeature(long flag, bool enable) {
@@ -168,24 +282,84 @@ void CpuInfo::EnableFeature(long flag, bool enable) {
   }
 }
 
+int CpuInfo::GetCurrentCore() {
+  // sched_getcpu() is not supported on some old kernels/glibcs (like the versions that
+  // shipped with CentOS 5). In that case just pretend we're always running on CPU 0
+  // so that we can build and run with degraded perf.
+#ifdef HAVE_SCHED_GETCPU
+  int cpu = sched_getcpu();
+  // The syscall may not be supported even if the function exists.
+  return cpu == -1 ? 0 : cpu;
+#else
+  return 0;
+#endif
+}
+
+void CpuInfo::GetCacheInfo(long cache_sizes[NUM_CACHE_LEVELS],
+      long cache_line_sizes[NUM_CACHE_LEVELS]) {
+#ifdef __APPLE__
+  // On Mac OS X use sysctl() to get the cache sizes
+  size_t len = 0;
+  sysctlbyname("hw.cachesize", NULL, &len, NULL, 0);
+  uint64_t* data = static_cast<uint64_t*>(malloc(len));
+  sysctlbyname("hw.cachesize", data, &len, NULL, 0);
+  DCHECK(len / sizeof(uint64_t) >= 3);
+  for (size_t i = 0; i < NUM_CACHE_LEVELS; ++i) {
+    cache_sizes[i] = data[i];
+  }
+  size_t linesize;
+  size_t sizeof_linesize = sizeof(linesize);
+  sysctlbyname("hw.cachelinesize", &linesize, &sizeof_linesize, NULL, 0);
+  for (size_t i = 0; i < NUM_CACHE_LEVELS; ++i) cache_line_sizes[i] = linesize;
+#else
+  // Call sysconf to query for the cache sizes
+  // Note: on some systems (e.g. RHEL 5 on AWS EC2), this returns 0 instead of the
+  // actual cache line size.
+  cache_sizes[L1_CACHE] = sysconf(_SC_LEVEL1_DCACHE_SIZE);
+  cache_sizes[L2_CACHE] = sysconf(_SC_LEVEL2_CACHE_SIZE);
+  cache_sizes[L3_CACHE] = sysconf(_SC_LEVEL3_CACHE_SIZE);
+
+  cache_line_sizes[L1_CACHE] = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+  cache_line_sizes[L2_CACHE] = sysconf(_SC_LEVEL2_CACHE_LINESIZE);
+  cache_line_sizes[L3_CACHE] = sysconf(_SC_LEVEL3_CACHE_LINESIZE);
+#endif
+}
+
 string CpuInfo::DebugString() {
   DCHECK(initialized_);
   stringstream stream;
-  int64_t L1 = CacheSize(L1_CACHE);
-  int64_t L2 = CacheSize(L2_CACHE);
-  int64_t L3 = CacheSize(L3_CACHE);
+  long cache_sizes[NUM_CACHE_LEVELS];
+  long cache_line_sizes[NUM_CACHE_LEVELS];
+  GetCacheInfo(cache_sizes, cache_line_sizes);
+
+  string L1 = Substitute("L1 Cache: $0 (Line: $1)",
+      PrettyPrinter::Print(cache_sizes[L1_CACHE], TUnit::BYTES),
+      PrettyPrinter::Print(cache_line_sizes[L1_CACHE], TUnit::BYTES));
+  string L2 = Substitute("L2 Cache: $0 (Line: $1)",
+      PrettyPrinter::Print(cache_sizes[L2_CACHE], TUnit::BYTES),
+      PrettyPrinter::Print(cache_line_sizes[L2_CACHE], TUnit::BYTES));
+  string L3 = Substitute("L3 Cache: $0 (Line: $1)",
+      PrettyPrinter::Print(cache_sizes[L3_CACHE], TUnit::BYTES),
+      PrettyPrinter::Print(cache_line_sizes[L3_CACHE], TUnit::BYTES));
   stream << "Cpu Info:" << endl
          << "  Model: " << model_name_ << endl
          << "  Cores: " << num_cores_ << endl
-         << "  L1 Cache: " << PrettyPrinter::Print(L1, TUnit::BYTES) << endl
-         << "  L2 Cache: " << PrettyPrinter::Print(L2, TUnit::BYTES) << endl
-         << "  L3 Cache: " << PrettyPrinter::Print(L3, TUnit::BYTES) << endl
+         << "  Max Possible Cores: " << max_num_cores_ << endl
+         << "  " << L1 << endl
+         << "  " << L2 << endl
+         << "  " << L3 << endl
          << "  Hardware Supports:" << endl;
   for (int i = 0; i < num_flags; ++i) {
     if (IsSupported(flag_mappings[i].flag)) {
       stream << "    " << flag_mappings[i].name << endl;
     }
   }
+  stream << "  Numa Nodes: " << max_num_numa_nodes_ << endl;
+  stream << "  Numa Nodes of Cores:";
+  for (int core = 0; core < max_num_cores_; ++core) {
+    stream << " " << core << "->" << core_to_numa_node_[core] << " |";
+  }
+  stream << endl;
   return stream.str();
 }
 

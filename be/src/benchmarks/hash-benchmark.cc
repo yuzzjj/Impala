@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <iostream>
 #include <stdlib.h>
@@ -22,8 +25,8 @@
 #include "codegen/llvm-codegen.h"
 #include "experiments/data-provider.h"
 #include "runtime/mem-tracker.h"
-#include "runtime/raw-value.h"
 #include "runtime/string-value.h"
+#include "runtime/test-env.h"
 #include "util/benchmark.h"
 #include "util/cpu-info.h"
 #include "util/hash-util.h"
@@ -341,7 +344,7 @@ Function* CodegenCrcHash(LlvmCodeGen* codegen, bool mixed) {
   prototype.AddArgument(
       LlvmCodeGen::NamedVariable("results", codegen->GetPtrType(TYPE_INT)));
 
-  LlvmCodeGen::LlvmBuilder builder(codegen->context());
+  LlvmBuilder builder(codegen->context());
   Value* args[3];
   Function* fn = prototype.GeneratePrototype(&builder, &args[0]);
 
@@ -382,7 +385,7 @@ Function* CodegenCrcHash(LlvmCodeGen* codegen, bool mixed) {
   Value* data = builder.CreateGEP(args[1], offset);
 
   Value* seed = codegen->GetIntConstant(TYPE_INT, HashUtil::FNV_SEED);
-  seed = builder.CreateCall3(fixed_fn, data, dummy_len, seed);
+  seed = builder.CreateCall(fixed_fn, ArrayRef<Value*>({data, dummy_len, seed}));
 
   // Get the string data
   if (mixed) {
@@ -390,11 +393,11 @@ Function* CodegenCrcHash(LlvmCodeGen* codegen, bool mixed) {
         data, codegen->GetIntConstant(TYPE_INT, fixed_byte_size));
     Value* string_val =
         builder.CreateBitCast(string_data, codegen->GetPtrType(TYPE_STRING));
-    Value* str_ptr = builder.CreateStructGEP(string_val, 0);
-    Value* str_len = builder.CreateStructGEP(string_val, 1);
+    Value* str_ptr = builder.CreateStructGEP(NULL, string_val, 0);
+    Value* str_len = builder.CreateStructGEP(NULL, string_val, 1);
     str_ptr = builder.CreateLoad(str_ptr);
     str_len = builder.CreateLoad(str_len);
-    seed = builder.CreateCall3(string_hash_fn, str_ptr, str_len, seed);
+    seed = builder.CreateCall(string_hash_fn, ArrayRef<Value*>({str_ptr, str_len, seed}));
   }
 
   Value* result = builder.CreateGEP(args[2], counter);
@@ -417,17 +420,29 @@ int main(int argc, char **argv) {
 
   const int NUM_ROWS = 1024;
 
-  ObjectPool obj_pool;
+  Status status;
+  RuntimeState* state;
+  TestEnv test_env;
+  status = test_env.Init();
+  if (!status.ok()) {
+    cout << "Could not init TestEnv";
+    return -1;
+  }
+  status = test_env.CreateQueryState(0, nullptr, &state);
+  if (!status.ok()) {
+    cout << "Could not create RuntimeState";
+    return -1;
+  }
+
   MemTracker tracker;
   MemPool mem_pool(&tracker);
-  RuntimeProfile int_profile(&obj_pool, "IntGen");
-  RuntimeProfile mixed_profile(&obj_pool, "MixedGen");
+  RuntimeProfile int_profile(state->obj_pool(), "IntGen");
+  RuntimeProfile mixed_profile(state->obj_pool(), "MixedGen");
   DataProvider int_provider(&mem_pool, &int_profile);
   DataProvider mixed_provider(&mem_pool, &mixed_profile);
 
-  Status status;
   scoped_ptr<LlvmCodeGen> codegen;
-  status = LlvmCodeGen::LoadImpalaIR(&obj_pool, "test", &codegen);
+  status = LlvmCodeGen::CreateImpalaCodegen(state, NULL, "test", &codegen);
   if (!status.ok()) {
     cout << "Could not start codegen.";
     return -1;

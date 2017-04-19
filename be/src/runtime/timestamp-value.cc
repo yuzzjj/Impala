@@ -1,18 +1,25 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "runtime/timestamp-value.h"
+
+#include <boost/date_time/posix_time/posix_time.hpp>
+
+#include "runtime/timestamp-parse-util.h"
 
 #include "common/names.h"
 
@@ -57,7 +64,7 @@ TimestampValue::TimestampValue(const char* str, int len,
   TimestampParser::Parse(str, len, dt_ctx, &date_, &time_);
 }
 
-int TimestampValue::Format(const DateTimeFormatContext& dt_ctx, int len, char* buff) {
+int TimestampValue::Format(const DateTimeFormatContext& dt_ctx, int len, char* buff) const {
   return TimestampParser::Format(dt_ctx, date_, time_, len, buff);
 }
 
@@ -86,7 +93,7 @@ void TimestampValue::UtcToLocal() {
         static_cast<unsigned short>(temp.tm_mday));
     time_ = time_duration(temp.tm_hour, temp.tm_min, temp.tm_sec,
         time().fractional_seconds());
-  } catch (std::exception& from_boost) {
+  } catch (std::exception& /* from Boost */) {
     *this = ptime(not_a_date_time);
   }
 }
@@ -111,9 +118,21 @@ ptime TimestampValue::UnixTimeToPtime(time_t unix_time) const {
   }
   try {
     return ptime_from_tm(temp_tm);
-  } catch (std::exception& e) {
+  } catch (std::exception&) {
     return ptime(not_a_date_time);
   }
+}
+
+string TimestampValue::DebugString() const {
+  stringstream ss;
+  if (HasDate()) {
+    ss << boost::gregorian::to_iso_extended_string(date_);
+  }
+  if (HasTime()) {
+    if (HasDate()) ss << " ";
+    ss << boost::posix_time::to_simple_string(time_);
+  }
+  return ss.str();
 }
 
 }

@@ -1,24 +1,31 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "literal.h"
 
 #include <sstream>
+#include <boost/date_time/posix_time/posix_time_types.hpp>
 
 #include "codegen/codegen-anyval.h"
 #include "codegen/llvm-codegen.h"
+#include "gen-cpp/Exprs_types.h"
+#include "runtime/decimal-value.inline.h"
 #include "runtime/runtime-state.h"
+#include "runtime/timestamp-parse-util.h"
 #include "gen-cpp/Exprs_types.h"
 
 #include "common/names.h"
@@ -70,7 +77,7 @@ Literal::Literal(const TExprNode& node)
     case TYPE_VARCHAR: {
       DCHECK_EQ(node.node_type, TExprNodeType::STRING_LITERAL);
       DCHECK(node.__isset.string_literal);
-      value_ = ExprValue(node.string_literal.value);
+      value_.Init(node.string_literal.value);
       if (type_.type == TYPE_VARCHAR) {
         value_.string_val.len = min(type_.len, value_.string_val.len);
       }
@@ -87,7 +94,7 @@ Literal::Literal(const TExprNode& node)
         // Pad out literal with spaces.
         str.replace(str_len, type_.len - str_len, type_.len - str_len, ' ');
       }
-      value_ = ExprValue(str);
+      value_.Init(str);
       break;
     }
     case TYPE_DECIMAL: {
@@ -116,49 +123,57 @@ Literal::Literal(const TExprNode& node)
       }
       break;
     }
+    case TYPE_TIMESTAMP: {
+      DCHECK_EQ(node.node_type, TExprNodeType::TIMESTAMP_LITERAL);
+      DCHECK(node.__isset.timestamp_literal);
+      const string& ts_val = node.timestamp_literal.value;
+      DCHECK_EQ(type_.GetSlotSize(), ts_val.size());
+      memcpy(&value_.timestamp_val, ts_val.data(), type_.GetSlotSize());
+      break;
+    }
     default:
       DCHECK(false) << "Invalid type: " << TypeToString(type_.type);
   }
 }
 
 Literal::Literal(ColumnType type, bool v)
-  : Expr(type) {
+  : Expr(type, true, false) {
   DCHECK_EQ(type.type, TYPE_BOOLEAN) << type;
   value_.bool_val = v;
 }
 
 Literal::Literal(ColumnType type, int8_t v)
-  : Expr(type) {
+  : Expr(type, true, false) {
   DCHECK_EQ(type.type, TYPE_TINYINT) << type;
   value_.tinyint_val = v;
 }
 
 Literal::Literal(ColumnType type, int16_t v)
-  : Expr(type) {
+  : Expr(type, true, false) {
   DCHECK_EQ(type.type, TYPE_SMALLINT) << type;
   value_.smallint_val = v;
 }
 
 Literal::Literal(ColumnType type, int32_t v)
-  : Expr(type) {
+  : Expr(type, true, false) {
   DCHECK_EQ(type.type, TYPE_INT) << type;
   value_.int_val = v;
 }
 
 Literal::Literal(ColumnType type, int64_t v)
-  : Expr(type) {
+  : Expr(type, true, false) {
   DCHECK_EQ(type.type, TYPE_BIGINT) << type;
   value_.bigint_val = v;
 }
 
 Literal::Literal(ColumnType type, float v)
-  : Expr(type) {
+  : Expr(type, true, false) {
   DCHECK_EQ(type.type, TYPE_FLOAT) << type;
   value_.float_val = v;
 }
 
 Literal::Literal(ColumnType type, double v)
-  : Expr(type) {
+  : Expr(type, true, false) {
   if (type.type == TYPE_DOUBLE) {
     value_.double_val = v;
   } else if (type.type == TYPE_TIMESTAMP) {
@@ -167,13 +182,13 @@ Literal::Literal(ColumnType type, double v)
     bool overflow = false;
     switch (type.GetByteSize()) {
       case 4:
-        value_.decimal4_val = Decimal4Value::FromDouble(type, v, &overflow);
+        value_.decimal4_val = Decimal4Value::FromDouble(type, v, true, &overflow);
         break;
       case 8:
-        value_.decimal8_val = Decimal8Value::FromDouble(type, v, &overflow);
+        value_.decimal8_val = Decimal8Value::FromDouble(type, v, true, &overflow);
         break;
       case 16:
-        value_.decimal16_val = Decimal16Value::FromDouble(type, v, &overflow);
+        value_.decimal16_val = Decimal16Value::FromDouble(type, v, true, &overflow);
         break;
     }
     DCHECK(!overflow);
@@ -182,17 +197,25 @@ Literal::Literal(ColumnType type, double v)
   }
 }
 
-Literal::Literal(ColumnType type, const string& v)
-  : Expr(type),
-    value_(v) {
+Literal::Literal(ColumnType type, const string& v) : Expr(type, true, false) {
+  value_.Init(v);
   DCHECK(type.type == TYPE_STRING || type.type == TYPE_CHAR || type.type == TYPE_VARCHAR)
       << type;
 }
 
-Literal::Literal(ColumnType type, const StringValue& v)
-  : Expr(type),
-    value_(v.DebugString()) {
+Literal::Literal(ColumnType type, const StringValue& v) : Expr(type, true, false) {
+  value_.Init(v.DebugString());
   DCHECK(type.type == TYPE_STRING || type.type == TYPE_CHAR) << type;
+}
+
+Literal::Literal(ColumnType type, const TimestampValue& v)
+  : Expr(type, true, false) {
+  DCHECK_EQ(type.type, TYPE_TIMESTAMP) << type;
+  value_.timestamp_val = v;
+}
+
+bool Literal::IsLiteral() const {
+  return true;
 }
 
 template<class T>
@@ -200,6 +223,16 @@ bool ParseString(const string& str, T* val) {
   istringstream stream(str);
   stream >> *val;
   return !stream.fail();
+}
+
+template<>
+bool ParseString(const string& str, TimestampValue* val) {
+  boost::gregorian::date date;
+  boost::posix_time::time_duration time;
+  bool success = TimestampParser::Parse(str.data(), str.length(), &date, &time);
+  val->set_date(date);
+  val->set_time(time);
+  return success;
 }
 
 Literal* Literal::CreateLiteral(const ColumnType& type, const string& str) {
@@ -244,8 +277,8 @@ Literal* Literal::CreateLiteral(const ColumnType& type, const string& str) {
     case TYPE_CHAR:
       return new Literal(type, str);
     case TYPE_TIMESTAMP: {
-      double v = 0;
-      DCHECK(ParseString<double>(str, &v));
+      TimestampValue v;
+      DCHECK(ParseString<TimestampValue>(str, &v));
       return new Literal(type, v);
     }
     case TYPE_DECIMAL: {
@@ -259,49 +292,49 @@ Literal* Literal::CreateLiteral(const ColumnType& type, const string& str) {
   }
 }
 
-BooleanVal Literal::GetBooleanVal(ExprContext* context, TupleRow* row) {
+BooleanVal Literal::GetBooleanVal(ExprContext* context, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_BOOLEAN) << type_;
   return BooleanVal(value_.bool_val);
 }
 
-TinyIntVal Literal::GetTinyIntVal(ExprContext* context, TupleRow* row) {
+TinyIntVal Literal::GetTinyIntVal(ExprContext* context, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_TINYINT) << type_;
   return TinyIntVal(value_.tinyint_val);
 }
 
-SmallIntVal Literal::GetSmallIntVal(ExprContext* context, TupleRow* row) {
+SmallIntVal Literal::GetSmallIntVal(ExprContext* context, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_SMALLINT) << type_;
   return SmallIntVal(value_.smallint_val);
 }
 
-IntVal Literal::GetIntVal(ExprContext* context, TupleRow* row) {
+IntVal Literal::GetIntVal(ExprContext* context, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_INT) << type_;
   return IntVal(value_.int_val);
 }
 
-BigIntVal Literal::GetBigIntVal(ExprContext* context, TupleRow* row) {
+BigIntVal Literal::GetBigIntVal(ExprContext* context, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_BIGINT) << type_;
   return BigIntVal(value_.bigint_val);
 }
 
-FloatVal Literal::GetFloatVal(ExprContext* context, TupleRow* row) {
+FloatVal Literal::GetFloatVal(ExprContext* context, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_FLOAT) << type_;
   return FloatVal(value_.float_val);
 }
 
-DoubleVal Literal::GetDoubleVal(ExprContext* context, TupleRow* row) {
+DoubleVal Literal::GetDoubleVal(ExprContext* context, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_DOUBLE) << type_;
   return DoubleVal(value_.double_val);
 }
 
-StringVal Literal::GetStringVal(ExprContext* context, TupleRow* row) {
+StringVal Literal::GetStringVal(ExprContext* context, const TupleRow* row) {
   DCHECK(type_.IsStringType()) << type_;
   StringVal result;
   value_.string_val.ToStringVal(&result);
   return result;
 }
 
-DecimalVal Literal::GetDecimalVal(ExprContext* context, TupleRow* row) {
+DecimalVal Literal::GetDecimalVal(ExprContext* context, const TupleRow* row) {
   DCHECK_EQ(type_.type, TYPE_DECIMAL) << type_;
   switch (type().GetByteSize()) {
     case 4:
@@ -315,6 +348,13 @@ DecimalVal Literal::GetDecimalVal(ExprContext* context, TupleRow* row) {
   }
   // Quieten GCC.
   return DecimalVal();
+}
+
+TimestampVal Literal::GetTimestampVal(ExprContext* context, const TupleRow* row) {
+  DCHECK_EQ(type_.type, TYPE_TIMESTAMP) << type_;
+  TimestampVal result;
+  value_.timestamp_val.ToTimestampVal(&result);
+  return result;
 }
 
 string Literal::DebugString() const {
@@ -360,6 +400,9 @@ string Literal::DebugString() const {
           DCHECK(false) << type_.DebugString();
       }
       break;
+    case TYPE_TIMESTAMP:
+      out << value_.timestamp_val;
+      break;
     default:
       out << "[bad type! " << type_ << "]";
   }
@@ -373,19 +416,17 @@ string Literal::DebugString() const {
 // entry:
 //   ret { i8, i64 } { i8 0, i64 10 }
 // }
-Status Literal::GetCodegendComputeFn(RuntimeState* state, llvm::Function** fn) {
+Status Literal::GetCodegendComputeFn(LlvmCodeGen* codegen, llvm::Function** fn) {
   if (ir_compute_fn_ != NULL) {
     *fn = ir_compute_fn_;
     return Status::OK();
   }
 
   DCHECK_EQ(GetNumChildren(), 0);
-  LlvmCodeGen* codegen;
-  RETURN_IF_ERROR(state->GetCodegen(&codegen));
   Value* args[2];
   *fn = CreateIrFunctionPrototype(codegen, "Literal", &args);
   BasicBlock* entry_block = BasicBlock::Create(codegen->context(), "entry", *fn);
-  LlvmCodeGen::LlvmBuilder builder(entry_block);
+  LlvmBuilder builder(entry_block);
 
   CodegenAnyVal v = CodegenAnyVal::GetNonNullVal(codegen, &builder, type_);
   switch (type_.type) {
@@ -414,7 +455,8 @@ Status Literal::GetCodegendComputeFn(RuntimeState* state, llvm::Function** fn) {
     case TYPE_VARCHAR:
     case TYPE_CHAR:
       v.SetLen(builder.getInt32(value_.string_val.len));
-      v.SetPtr(codegen->CastPtrToLlvmPtr(codegen->ptr_type(), value_.string_val.ptr));
+      v.SetPtr(codegen->GetStringConstant(
+          &builder, value_.string_val.ptr, value_.string_val.len));
       break;
     case TYPE_DECIMAL:
       switch (type().GetByteSize()) {
@@ -431,6 +473,12 @@ Status Literal::GetCodegendComputeFn(RuntimeState* state, llvm::Function** fn) {
           DCHECK(false) << type_.DebugString();
       }
       break;
+    case TYPE_TIMESTAMP:
+      v.SetTimeOfDay(builder.getInt64(
+          *reinterpret_cast<const int64_t*>(&value_.timestamp_val.time())));
+      v.SetDate(builder.getInt32(
+          *reinterpret_cast<const int32_t*>(&value_.timestamp_val.date())));
+      break;
     default:
       stringstream ss;
       ss << "Invalid type: " << type_;
@@ -438,7 +486,7 @@ Status Literal::GetCodegendComputeFn(RuntimeState* state, llvm::Function** fn) {
       return Status(ss.str());
   }
 
-  builder.CreateRet(v.value());
+  builder.CreateRet(v.GetLoweredValue());
   *fn = codegen->FinalizeFunction(*fn);
   ir_compute_fn_ = *fn;
   return Status::OK();

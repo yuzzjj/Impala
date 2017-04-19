@@ -1,4 +1,3 @@
-// Copyright 2012 Cloudera Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,22 +17,22 @@
 #include "runtime/row-batch.h"
 #include "runtime/sorter.h"
 #include "runtime/tuple-row.h"
-#include "util/runtime-profile.h"
+#include "util/runtime-profile-counters.h"
 
 #include "common/names.h"
 
 namespace impala {
 
-/// BatchedRowSupplier returns individual rows in a batch obtained from a sorted input
-/// run (a RunBatchSupplier). Used as the heap element in the min heap maintained by the
+/// SortedRunWrapper returns individual rows in a batch obtained from a sorted input run
+/// (a RunBatchSupplierFn). Used as the heap element in the min heap maintained by the
 /// merger.
-/// Next() advances the row supplier to the next row in the input batch and retrieves
+/// Advance() advances the row supplier to the next row in the input batch and retrieves
 /// the next batch from the input if the current input batch is exhausted. Transfers
 /// ownership from the current input batch to an output batch if requested.
-class SortedRunMerger::BatchedRowSupplier {
+class SortedRunMerger::SortedRunWrapper {
  public:
   /// Construct an instance from a sorted input run.
-  BatchedRowSupplier(SortedRunMerger* parent, const RunBatchSupplier& sorted_run)
+  SortedRunWrapper(SortedRunMerger* parent, const RunBatchSupplierFn& sorted_run)
     : sorted_run_(sorted_run),
       input_row_batch_(NULL),
       input_row_batch_index_(-1),
@@ -41,35 +40,45 @@ class SortedRunMerger::BatchedRowSupplier {
   }
 
   /// Retrieves the first batch of sorted rows from the run.
-  Status Init(bool* done) {
-    *done = false;
+  Status Init(bool* eos) {
+    *eos = false;
     RETURN_IF_ERROR(sorted_run_(&input_row_batch_));
     if (input_row_batch_ == NULL) {
-      *done = true;
+      *eos = true;
       return Status::OK();
     }
-    RETURN_IF_ERROR(Next(NULL, done));
+    RETURN_IF_ERROR(Advance(NULL, eos));
     return Status::OK();
   }
 
-  /// Increment the current row index. If the current input batch is exhausted fetch the
+  /// Increment the current row index. If the current input batch is exhausted, fetch the
   /// next one from the sorted run. Transfer ownership to transfer_batch if not NULL.
-  Status Next(RowBatch* transfer_batch, bool* done) {
+  Status Advance(RowBatch* transfer_batch, bool* eos) {
     DCHECK(input_row_batch_ != NULL);
     ++input_row_batch_index_;
     if (input_row_batch_index_ < input_row_batch_->num_rows()) {
-      *done = false;
-    } else {
-      ScopedTimer<MonotonicStopWatch> timer(parent_->get_next_batch_timer_);
+      *eos = false;
+      return Status::OK();
+    }
+
+    // Iterate until we hit eos or get a non-empty batch.
+    do {
+      // Make sure to transfer resources from every batch received from 'sorted_run_'.
       if (transfer_batch != NULL) {
+        DCHECK(!input_row_batch_->needs_deep_copy())
+            << "Run batch suppliers that set the "
+               "needs_deep_copy flag must use a deep-copying merger";
         input_row_batch_->TransferResourceOwnership(transfer_batch);
       }
 
-      RETURN_IF_ERROR(sorted_run_(&input_row_batch_));
-      DCHECK(input_row_batch_ == NULL || input_row_batch_->num_rows() > 0);
-      *done = input_row_batch_ == NULL;
-      input_row_batch_index_ = 0;
-    }
+      {
+        ScopedTimer<MonotonicStopWatch> timer(parent_->get_next_batch_timer_);
+        RETURN_IF_ERROR(sorted_run_(&input_row_batch_));
+      }
+    } while (input_row_batch_ != NULL && input_row_batch_->num_rows() == 0);
+
+    *eos = input_row_batch_ == NULL;
+    input_row_batch_index_ = 0;
     return Status::OK();
   }
 
@@ -81,7 +90,7 @@ class SortedRunMerger::BatchedRowSupplier {
   friend class SortedRunMerger;
 
   /// The run from which this object supplies rows.
-  RunBatchSupplier sorted_run_;
+  RunBatchSupplierFn sorted_run_;
 
   /// The current input batch being processed.
   RowBatch* input_row_batch_;
@@ -100,8 +109,8 @@ void SortedRunMerger::Heapify(int parent_index) {
   int least_child;
   // Find the least child of parent.
   if (right_index >= min_heap_.size() ||
-      compare_less_than_(min_heap_[left_index]->current_row(),
-          min_heap_[right_index]->current_row())) {
+      comparator_.Less(
+          min_heap_[left_index]->current_row(), min_heap_[right_index]->current_row())) {
     least_child = left_index;
   } else {
     least_child = right_index;
@@ -109,27 +118,27 @@ void SortedRunMerger::Heapify(int parent_index) {
 
   // If the parent is out of place, swap it with the least child and invoke
   // Heapify recursively.
-  if (compare_less_than_(min_heap_[least_child]->current_row(),
-      min_heap_[parent_index]->current_row())) {
+  if (comparator_.Less(min_heap_[least_child]->current_row(),
+          min_heap_[parent_index]->current_row())) {
     iter_swap(min_heap_.begin() + least_child, min_heap_.begin() + parent_index);
     Heapify(least_child);
   }
 }
 
-SortedRunMerger::SortedRunMerger(const TupleRowComparator& compare_less_than,
+SortedRunMerger::SortedRunMerger(const TupleRowComparator& comparator,
     RowDescriptor* row_desc, RuntimeProfile* profile, bool deep_copy_input)
-  : compare_less_than_(compare_less_than),
+  : comparator_(comparator),
     input_row_desc_(row_desc),
     deep_copy_input_(deep_copy_input) {
   get_next_timer_ = ADD_TIMER(profile, "MergeGetNext");
   get_next_batch_timer_ = ADD_TIMER(profile, "MergeGetNextBatch");
 }
 
-Status SortedRunMerger::Prepare(const vector<RunBatchSupplier>& input_runs) {
+Status SortedRunMerger::Prepare(const vector<RunBatchSupplierFn>& input_runs) {
   DCHECK_EQ(min_heap_.size(), 0);
   min_heap_.reserve(input_runs.size());
-  BOOST_FOREACH(const RunBatchSupplier& input_run, input_runs) {
-    BatchedRowSupplier* new_elem = pool_.Add(new BatchedRowSupplier(this, input_run));
+  for (const RunBatchSupplierFn& input_run: input_runs) {
+    SortedRunWrapper* new_elem = pool_.Add(new SortedRunWrapper(this, input_run));
     DCHECK(new_elem != NULL);
     bool empty;
     RETURN_IF_ERROR(new_elem->Init(&empty));
@@ -146,13 +155,9 @@ Status SortedRunMerger::Prepare(const vector<RunBatchSupplier>& input_runs) {
 
 Status SortedRunMerger::GetNext(RowBatch* output_batch, bool* eos) {
   ScopedTimer<MonotonicStopWatch> timer(get_next_timer_);
-  if (min_heap_.empty()) {
-    *eos = true;
-    return Status::OK();
-  }
 
-  while (!output_batch->AtCapacity()) {
-    BatchedRowSupplier* min = min_heap_[0];
+  while (!output_batch->AtCapacity() && !min_heap_.empty()) {
+    SortedRunWrapper* min = min_heap_[0];
     int output_row_index = output_batch->AddRow();
     TupleRow* output_row = output_batch->GetRow(output_row_index);
     if (deep_copy_input_) {
@@ -165,23 +170,28 @@ Status SortedRunMerger::GetNext(RowBatch* output_batch, bool* eos) {
     }
 
     output_batch->CommitLastRow();
-
-    bool min_run_complete = false;
-    // Advance to the next element in min. output_batch is supplied to transfer
-    // resource ownership if the input batch in min is exhausted.
-    RETURN_IF_ERROR(min->Next(deep_copy_input_ ? NULL : output_batch,
-        &min_run_complete));
-    if (min_run_complete) {
-      // Remove the element from the heap.
-      iter_swap(min_heap_.begin(), min_heap_.end() - 1);
-      min_heap_.pop_back();
-      if (min_heap_.empty()) break;
-    }
-
-    Heapify(0);
+    RETURN_IF_ERROR(AdvanceMinRow(output_batch));
   }
+  // Free local allocations made by comparator_.Less();
+  comparator_.FreeLocalAllocations();
 
   *eos = min_heap_.empty();
+  return Status::OK();
+}
+
+Status SortedRunMerger::AdvanceMinRow(RowBatch* transfer_batch) {
+  SortedRunWrapper* min = min_heap_[0];
+  bool min_run_complete;
+  // Advance to the next element in min. output_batch is supplied to transfer
+  // resource ownership if the input batch in min is exhausted.
+  RETURN_IF_ERROR(min->Advance(deep_copy_input_ ? NULL : transfer_batch,
+      &min_run_complete));
+  if (min_run_complete) {
+    // Remove the element from the heap.
+    iter_swap(min_heap_.begin(), min_heap_.end() - 1);
+    min_heap_.pop_back();
+  }
+  if (!min_heap_.empty()) Heapify(0);
   return Status::OK();
 }
 

@@ -570,26 +570,6 @@
     "key": "impala-server.version"
   },
   {
-    "description": "The number of active connections to the Llama Callback Service.",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Llama Callback Service Active Connections",
-    "units": "NONE",
-    "kind": "GAUGE",
-    "key": "impala.thrift-server.llama-callback.connections-in-use"
-  },
-  {
-    "description": "The total number of connections made to the Llama Callback Service over its lifetime.",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Llama Callback Service Total Connections",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "key": "impala.thrift-server.llama-callback.total-connections"
-  },
-  {
     "description": "The number of active catalog service connections to this Catalog Server.",
     "contexts": [
       "CATALOGSERVER"
@@ -608,6 +588,16 @@
     "units": "UNIT",
     "kind": "COUNTER",
     "key": "impala.thrift-server.CatalogService.total-connections"
+  },
+  {
+    "description": "The number of connections to the Catalog Service that have been accepted and are waiting to be setup.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Catalog Service Connections Queued for Setup",
+    "units": "NONE",
+    "kind": "GAUGE",
+    "key": "impala.thrift-server.CatalogService.connection-setup-queue-size"
   },
   {
     "description": "The number of active connections to this StateStore's StateStore service.",
@@ -630,6 +620,16 @@
     "key": "impala.thrift-server.StatestoreService.total-connections"
   },
   {
+    "description": "The number of connections to the Statestore Service that have been accepted and are waiting to be setup.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Statestore Service Connections Queued for Setup",
+    "units": "NONE",
+    "kind": "GAUGE",
+    "key": "impala.thrift-server.StatestoreService.connection-setup-queue-size"
+  },
+  {
     "description": "The number of active Impala Backend client connections to this Impala Daemon.",
     "contexts": [
       "IMPALAD"
@@ -648,6 +648,16 @@
     "units": "UNIT",
     "kind": "COUNTER",
     "key": "impala.thrift-server.backend.total-connections"
+  },
+  {
+    "description": "The number of connections to the Impala Backend Server that have been accepted and are waiting to be setup.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Backend Server Connections Queued for Setup",
+    "units": "NONE",
+    "kind": "GAUGE",
+    "key": "impala.thrift-server.backend.connection-setup-queue-size"
   },
   {
     "description": "The number of active Beeswax API connections to this Impala Daemon.",
@@ -740,216 +750,6 @@
     "key": "request-pool-service.resolve-pool-duration-ms"
   },
   {
-    "description": "The number of clients in use by the resource broker client cache.",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Client Cache Clients In Use",
-    "units": "NONE",
-    "kind": "GAUGE",
-    "key": "resource-broker.client-cache.clients-in-use"
-  },
-  {
-    "description": "The total number of clients in the resource broker client cache.",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Client Cache Total Clients",
-    "units": "NONE",
-    "kind": "GAUGE",
-    "key": "resource-broker.client-cache.total-clients"
-  },
-  {
-    "key": "resource-broker.active-llama",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Active Llama",
-    "units": "NONE",
-    "kind": "PROPERTY",
-    "description": "The address of the active Llama server."
-  },
-  {
-    "key": "resource-broker.active-llama-handle",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Active Llama Handle",
-    "units": "NONE",
-    "kind": "PROPERTY",
-    "description": "The Llama client handle provided by the active Llama server."
-  },
-  {
-    "key": "resource-broker.expansion-request-response-time",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Expansion Request Response Time",
-    "units": "TIME_S",
-    "kind": "STATS",
-    "description": "The time, in seconds, that a expansion request takes to be fulfilled by Llama"
-  },
-  {
-    "key": "resource-broker.expansion-request-rpc-time",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Expansion Request Rpc Time",
-    "units": "TIME_S",
-    "kind": "STATS",
-    "description": "The time, in seconds, that a Reserve() RPC takes to Llama"
-  },
-  {
-    "key": "resource-broker.expansion-requests-failed",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Expansion Requests Failed",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The number of expansion requests made by this Impala daemon to Llama which failed"
-  },
-  {
-    "key": "resource-broker.expansion-requests-fulfilled",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Expansion Requests Fulfilled",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The number of expansion requests made by this Impala daemon to Llama which succeeded"
-  },
-  {
-    "key": "resource-broker.expansion-requests-rejected",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Expansion Requests Rejected",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The number of expansion requests made by this Impala daemon to Llama which were rejected"
-  },
-  {
-    "key": "resource-broker.expansion-requests-timedout",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Expansion Requests Timedout",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The number of expansion requests made by this Impala daemon to Llama which timed out"
-  },
-  {
-    "key": "resource-broker.expansion-requests-total",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Expansion Requests Total",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The total number of expansion requests made by this Impala daemon to Llama"
-  },
-  {
-    "key": "resource-broker.memory-resources-in-use",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Memory Resources In Use",
-    "units": "BYTES",
-    "kind": "GAUGE",
-    "description": "The total number of bytes currently allocated to this Impala daemon by Llama"
-  },
-  {
-    "key": "resource-broker.requests-released",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Requests Released",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The number of resource-release requests received from Llama"
-  },
-  {
-    "key": "resource-broker.reservation-request-response-time",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Reservation Request Response Time",
-    "units": "TIME_S",
-    "kind": "STATS",
-    "description": "The time, in seconds, that a reservation request takes to be fulfilled by Llama"
-  },
-  {
-    "key": "resource-broker.reservation-request-rpc-time",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Reservation Request Rpc Time",
-    "units": "TIME_S",
-    "kind": "STATS",
-    "description": "The time, in seconds, that a Reserve() RPC takes to Llama"
-  },
-  {
-    "key": "resource-broker.reservation-requests-failed",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Reservation Requests Failed",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The number of reservation requests made by this Impala daemon to Llama which failed"
-  },
-  {
-    "key": "resource-broker.reservation-requests-fulfilled",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Reservation Requests Fulfilled",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The number of reservation requests made by this Impala daemon to Llama which succeeded"
-  },
-  {
-    "key": "resource-broker.reservation-requests-rejected",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Reservation Requests Rejected",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The number of reservation requests made by this Impala daemon to Llama which were rejected"
-  },
-  {
-    "key": "resource-broker.reservation-requests-timedout",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Reservation Requests Timedout",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The number of reservation requests made by this Impala daemon to Llama which timed out"
-  },
-  {
-    "key": "resource-broker.reservation-requests-total",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Reservation Requests Total",
-    "units": "UNIT",
-    "kind": "COUNTER",
-    "description": "The total number of reservation requests made by this Impala daemon to Llama"
-  },
-  {
-    "key": "resource-broker.vcpu-resources-in-use",
-    "contexts": [
-      "IMPALAD"
-    ],
-    "label": "Resource Broker Vcpu Resources In Use",
-    "units": "UNIT",
-    "kind": "GAUGE",
-    "description": "The total number of vcpus currently allocated to this Impala daemon by Llama"
-  },
-  {
     "description": "Duration (ms) of RPC calls to $0",
     "contexts": [
       "CATALOGSERVER",
@@ -958,7 +758,7 @@
     ],
     "label": "$0 RPC Call Duration",
     "units": "TIME_MS",
-    "kind": "STATS",
+    "kind": "HISTOGRAM",
     "key": "rpc-method.$0.call_duration"
   },
   {
@@ -1290,6 +1090,48 @@
     "units": "BYTES",
     "kind": "GAUGE",
     "key": "tcmalloc.total-bytes-reserved"
+  },
+  {
+    "description": "Maximum allowed bytes allocated by the buffer pool.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Buffer Pool Allocated Memory Limit.",
+    "units": "BYTES",
+    "kind": "GAUGE",
+    "key": "buffer-pool.limit"
+  },
+  {
+    "description": "Total buffer memory currently allocated by the buffer pool.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Buffer Pool Total Allocated Memory.",
+    "units": "BYTES",
+    "kind": "GAUGE",
+    "key": "buffer-pool.system-allocated"
+  },
+  {
+    "description": "Total memory currently reserved for buffers.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Buffer Pool Total Reserved Memory.",
+    "units": "BYTES",
+    "kind": "GAUGE",
+    "key": "buffer-pool.reserved"
+  },
+  {
+    "description": "Total memory currently used by TCMalloc and buffer pool.",
+    "contexts": [
+      "STATESTORE",
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Total Used Memory.",
+    "units": "BYTES",
+    "kind": "GAUGE",
+    "key": "memory.total-used"
   },
   {
     "description": "The number of running threads in this process.",

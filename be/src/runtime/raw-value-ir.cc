@@ -1,18 +1,28 @@
-// Copyright 2015 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "runtime/raw-value.h"
+
+#include <cmath>
+
+#include "runtime/decimal-value.inline.h"
+#include "runtime/raw-value.inline.h"
+#include "runtime/string-value.inline.h"
+#include "runtime/timestamp-value.h"
 
 using namespace impala;
 
@@ -47,17 +57,17 @@ int RawValue::Compare(const void* v1, const void* v2, const ColumnType& type) {
       // TODO: can this be faster? (just returning the difference has underflow problems)
       f1 = *reinterpret_cast<const float*>(v1);
       f2 = *reinterpret_cast<const float*>(v2);
-      if (UNLIKELY(isnan(f1) && isnan(f2))) return 0;
-      if (UNLIKELY(isnan(f1))) return -1;
-      if (UNLIKELY(isnan(f2))) return 1;
+      if (UNLIKELY(std::isnan(f1) && std::isnan(f2))) return 0;
+      if (UNLIKELY(std::isnan(f1))) return -1;
+      if (UNLIKELY(std::isnan(f2))) return 1;
       return f1 > f2 ? 1 : (f1 < f2 ? -1 : 0);
     case TYPE_DOUBLE:
       // TODO: can this be faster?
       d1 = *reinterpret_cast<const double*>(v1);
       d2 = *reinterpret_cast<const double*>(v2);
-      if (isnan(d1) && isnan(d2)) return 0;
-      if (isnan(d1)) return -1;
-      if (isnan(d2)) return 1;
+      if (std::isnan(d1) && std::isnan(d2)) return 0;
+      if (std::isnan(d1)) return -1;
+      if (std::isnan(d2)) return 1;
       return d1 > d2 ? 1 : (d1 < d2 ? -1 : 0);
     case TYPE_STRING:
     case TYPE_VARCHAR:
@@ -94,4 +104,60 @@ int RawValue::Compare(const void* v1, const void* v2, const ColumnType& type) {
       DCHECK(false) << "invalid type: " << type.DebugString();
       return 0;
   };
+}
+
+uint32_t IR_ALWAYS_INLINE RawValue::GetHashValue(const void* v, const ColumnType& type,
+    uint32_t seed) noexcept {
+  // The choice of hash function needs to be consistent across all hosts of the cluster.
+
+  // Use HashCombine with arbitrary constant to ensure we don't return seed.
+  if (v == NULL) return HashUtil::HashCombine32(HASH_VAL_NULL, seed);
+
+  switch (type.type) {
+    case TYPE_CHAR:
+    case TYPE_STRING:
+    case TYPE_VARCHAR:
+      return RawValue::GetHashValueNonNull<impala::StringValue>(
+        reinterpret_cast<const StringValue*>(v), type, seed);
+    case TYPE_BOOLEAN:
+      return RawValue::GetHashValueNonNull<bool>(
+        reinterpret_cast<const bool*>(v), type, seed);
+    case TYPE_TINYINT:
+      return RawValue::GetHashValueNonNull<int8_t>(
+        reinterpret_cast<const int8_t*>(v), type, seed);
+    case TYPE_SMALLINT:
+      return RawValue::GetHashValueNonNull<int16_t>(
+        reinterpret_cast<const int16_t*>(v), type, seed);
+    case TYPE_INT:
+      return RawValue::GetHashValueNonNull<int32_t>(
+        reinterpret_cast<const int32_t*>(v), type, seed);
+    case TYPE_BIGINT:
+      return RawValue::GetHashValueNonNull<int64_t>(
+        reinterpret_cast<const int64_t*>(v), type, seed);
+    case TYPE_FLOAT:
+      return  RawValue::GetHashValueNonNull<float>(
+        reinterpret_cast<const float*>(v), type, seed);
+    case TYPE_DOUBLE:
+      return RawValue::GetHashValueNonNull<double>(
+        reinterpret_cast<const double*>(v), type, seed);
+    case TYPE_TIMESTAMP:
+      return  RawValue::GetHashValueNonNull<TimestampValue>(
+        reinterpret_cast<const TimestampValue*>(v), type, seed);
+    case TYPE_DECIMAL:
+      switch(type.GetByteSize()) {
+        case 4: return
+          RawValue::GetHashValueNonNull<Decimal4Value>(
+            reinterpret_cast<const impala::Decimal4Value*>(v), type, seed);
+        case 8:
+          return RawValue::GetHashValueNonNull<Decimal8Value>(
+            reinterpret_cast<const Decimal8Value*>(v), type, seed);
+        case 16:
+          return RawValue::GetHashValueNonNull<Decimal16Value>(
+            reinterpret_cast<const Decimal16Value*>(v), type, seed);
+        DCHECK(false);
+    }
+    default:
+      DCHECK(false);
+      return 0;
+  }
 }

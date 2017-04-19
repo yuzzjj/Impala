@@ -1,7 +1,8 @@
 ====
 ---- QUERY
 # First create a partitioned table
-create table t1 like functional.alltypes;
+create table t1 like functional.alltypes
+location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/t1';
 insert into t1 partition(year, month) select * from functional.alltypes;
 compute incremental stats t1;
 show table stats t1;
@@ -55,7 +56,7 @@ COLUMN, TYPE, #DISTINCT VALUES, #NULLS, MAX SIZE, AVG SIZE
 'year','INT',2,0,4,4
 'month','INT',12,0,4,4
 ---- TYPES
-STRING, STRING, BIGINT, BIGINT, INT, DOUBLE
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE
 ====
 ---- QUERY
 # Show that the truncation removed all files, table stats, and incremental stats,
@@ -113,11 +114,12 @@ COLUMN, TYPE, #DISTINCT VALUES, #NULLS, MAX SIZE, AVG SIZE
 'year','INT',2,0,4,4
 'month','INT',12,0,4,4
 ---- TYPES
-STRING, STRING, BIGINT, BIGINT, INT, DOUBLE
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE
 ====
 ---- QUERY
 # Create an unpartitioned table.
-create table t2 like functional.tinytable;
+create table t2 like functional.tinytable
+location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/t2';
 insert into t2 select * from functional.tinytable;
 compute incremental stats t2;
 show table stats t2;
@@ -136,7 +138,7 @@ COLUMN, TYPE, #DISTINCT VALUES, #NULLS, MAX SIZE, AVG SIZE
 'a','STRING',3,-1,8,6.666666507720947
 'b','STRING',3,-1,7,4
 ---- TYPES
-STRING, STRING, BIGINT, BIGINT, INT, DOUBLE
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE
 ====
 ---- QUERY
 # Show that the truncation removed all files, table stats, and incremental stats.
@@ -158,7 +160,7 @@ COLUMN, TYPE, #DISTINCT VALUES, #NULLS, MAX SIZE, AVG SIZE
 'a','STRING',-1,-1,-1,-1
 'b','STRING',-1,-1,-1,-1
 ---- TYPES
-STRING, STRING, BIGINT, BIGINT, INT, DOUBLE
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE
 ====
 ---- QUERY
 # TRUNCATE IF EXISTS does not fail on non existent table
@@ -167,7 +169,8 @@ truncate table if exists non_existent;
 ====
 ---- QUERY
 # Create an unpartitioned table.
-create table t3 like functional.tinytable;
+create table t3 like functional.tinytable
+location '$FILESYSTEM_PREFIX/test-warehouse/$DATABASE.db/t3';
 insert into t3 select * from functional.tinytable;
 select count(*) from t3;
 ---- RESULTS

@@ -1,16 +1,19 @@
-// Copyright 2014 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef SCHEDULING_ADMISSION_CONTROLLER_H
@@ -175,7 +178,8 @@ class ExecEnv;
 ///       better idea of what is perhaps unnecessary.
 class AdmissionController {
  public:
-  AdmissionController(RequestPoolService* request_pool_service, MetricGroup* metrics,
+  AdmissionController(StatestoreSubscriber* subscriber,
+      RequestPoolService* request_pool_service, MetricGroup* metrics,
       const TNetworkAddress& host_addr);
   ~AdmissionController();
 
@@ -193,8 +197,8 @@ class AdmissionController {
   /// This does not block.
   Status ReleaseQuery(QuerySchedule* schedule);
 
-  /// Registers with the subscription manager.
-  Status Init(StatestoreSubscriber* subscriber);
+  /// Registers the request queue topic with the statestore.
+  Status Init();
 
  private:
   class PoolStats;
@@ -202,6 +206,10 @@ class AdmissionController {
 
   /// Statestore topic name.
   static const std::string IMPALA_REQUEST_QUEUE_TOPIC;
+
+  /// Subscription manager used to handle admission control updates. This is not
+  /// owned by this class.
+  StatestoreSubscriber* subscriber_;
 
   /// Used for user-to-pool resolution and looking up pool configurations. Not owned by
   /// the AdmissionController.

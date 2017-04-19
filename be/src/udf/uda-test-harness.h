@@ -1,27 +1,32 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_UDA_TEST_HARNESS_H
 #define IMPALA_UDA_TEST_HARNESS_H
+
+// THIS FILE IS USED BY THE STANDALONE IMPALA UDF DEVELOPMENT KIT.
+// IT MUST BE BUILDABLE WITH C++98 AND WITHOUT ANY INTERNAL IMPALA HEADERS.
 
 #include <string>
 #include <sstream>
 #include <vector>
 
 #include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
 
 #include "udf/udf.h"
 #include "udf/udf-debug.h"
@@ -39,12 +44,14 @@ enum UdaExecutionMode {
 template<typename RESULT, typename INTERMEDIATE>
 class UdaTestHarnessBase {
  public:
+  virtual ~UdaTestHarnessBase() = default;
+
   typedef void (*InitFn)(FunctionContext* context, INTERMEDIATE* result);
 
   typedef void (*MergeFn)(FunctionContext* context, const INTERMEDIATE& src,
       INTERMEDIATE* dst);
 
-  typedef const INTERMEDIATE (*SerializeFn)(FunctionContext* context,
+  typedef INTERMEDIATE (*SerializeFn)(FunctionContext* context,
       const INTERMEDIATE& type);
 
   typedef RESULT (*FinalizeFn)(FunctionContext* context, const INTERMEDIATE& value);
@@ -140,6 +147,8 @@ class UdaTestHarnessBase {
 template<typename RESULT, typename INTERMEDIATE, typename INPUT>
 class UdaTestHarness : public UdaTestHarnessBase<RESULT, INTERMEDIATE> {
  public:
+  virtual ~UdaTestHarness() = default;
+
   typedef void (*UpdateFn)(FunctionContext* context, const INPUT& input,
       INTERMEDIATE* result);
 

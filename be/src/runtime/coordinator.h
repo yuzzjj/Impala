@@ -1,17 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_RUNTIME_COORDINATOR_H
 #define IMPALA_RUNTIME_COORDINATOR_H
@@ -28,24 +30,24 @@
 #include <boost/accumulators/statistics/variance.hpp>
 #include <boost/unordered_map.hpp>
 #include <boost/unordered_set.hpp>
-#include <boost/thread/thread.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition_variable.hpp>
 
-#include "common/status.h"
 #include "common/global-types.h"
-#include "util/progress-updater.h"
-#include "util/histogram-metric.h"
-#include "util/runtime-profile.h"
-#include "runtime/runtime-state.h"
-#include "scheduling/simple-scheduler.h"
-#include "gen-cpp/Types_types.h"
+#include "common/hdfs.h"
+#include "common/status.h"
 #include "gen-cpp/Frontend_types.h"
+#include "gen-cpp/Types_types.h"
+#include "runtime/query-state.h"
+#include "runtime/runtime-state.h" // for PartitionStatusMap; TODO: disentangle
+#include "scheduling/query-schedule.h"
+#include "util/histogram-metric.h"
+#include "util/progress-updater.h"
+#include "util/runtime-profile.h"
 
 namespace impala {
 
 class CountingBarrier;
-class BloomFilter;
 class DataStreamMgr;
 class DataSink;
 class RowBatch;
@@ -53,7 +55,6 @@ class RowDescriptor;
 class PlanFragmentExecutor;
 class ObjectPool;
 class RuntimeState;
-class ImpalaInternalServiceClient;
 class Expr;
 class ExprContext;
 class ExecEnv;
@@ -65,43 +66,52 @@ class TPlanExecRequest;
 class TRuntimeProfileTree;
 class RuntimeProfile;
 class TablePrinter;
+class TPlanFragment;
+class QueryResultSet;
+class MemTracker;
+class PlanRootSink;
+class FragmentInstanceState;
 
 struct DebugOptions;
 
-/// Query coordinator: handles execution of plan fragments on remote nodes, given
-/// a TQueryExecRequest. As part of that, it handles all interactions with the
-/// executing backends; it is also responsible for implementing all client requests
-/// regarding the query, including cancellation.
-/// The coordinator fragment is executed locally in the calling thread, all other
-/// fragments are sent to remote nodes. The coordinator also monitors
-/// the execution status of the remote fragments and aborts the entire query if an error
-/// occurs, either in any of the remote fragments or in the local fragment.
+/// Query coordinator: handles execution of fragment instances on remote nodes, given a
+/// TQueryExecRequest. As part of that, it handles all interactions with the executing
+/// backends; it is also responsible for implementing all client requests regarding the
+/// query, including cancellation.
+///
+/// The coordinator monitors the execution status of fragment instances and aborts the
+/// entire query if an error is reported by any of them.
+///
+/// Queries that have results have those results fetched by calling GetNext(). Results
+/// rows are produced by a fragment instance that always executes on the same machine as
+/// the coordinator.
+///
 /// Once a query has finished executing and all results have been returned either to the
 /// caller of GetNext() or a data sink, execution_completed() will return true. If the
-/// query is aborted, execution_completed should also be set to true.
-/// Coordinator is thread-safe, with the exception of GetNext().
+/// query is aborted, execution_completed should also be set to true. Coordinator is
+/// thread-safe, with the exception of GetNext().
 //
 /// A typical sequence of calls for a single query (calls under the same numbered
 /// item can happen concurrently):
 /// 1. client: Exec()
 /// 2. client: Wait()/client: Cancel()/backend: UpdateFragmentExecStatus()
 /// 3. client: GetNext()*/client: Cancel()/backend: UpdateFragmentExecStatus()
-//
+///
 /// The implementation ensures that setting an overall error status and initiating
 /// cancellation of local and all remote fragments is atomic.
-class Coordinator {
+///
+/// TODO: move into separate subdirectory and move nested classes into separate files
+/// and unnest them
+class Coordinator { // NOLINT: The member variables could be re-ordered to save space
  public:
-  Coordinator(ExecEnv* exec_env, RuntimeProfile::EventSequence* events);
+  Coordinator(const QuerySchedule& schedule, ExecEnv* exec_env,
+      RuntimeProfile::EventSequence* events);
   ~Coordinator();
 
-  /// Initiate asynchronous execution of a query with the given schedule. Returns as soon
-  /// as all plan fragments have started executing at their respective backends.
-  /// 'schedule' must contain at least a coordinator plan fragment (ie, can't
-  /// be for a query like 'SELECT 1').
-  /// Populates and prepares output_expr_ctxs from the coordinator's fragment if there is
-  /// one, and LLVM optimizes them together with the fragment's other exprs.
+  /// Initiate asynchronous execution of a query with the given schedule. When it returns,
+  /// all fragment instances have started executing at their respective backends.
   /// A call to Exec() must precede all other member function calls.
-  Status Exec(QuerySchedule& schedule, std::vector<ExprContext*>* output_expr_ctxs);
+  Status Exec();
 
   /// Blocks until result rows are ready to be retrieved via GetNext(), or, if the
   /// query doesn't return rows, until the query finishes or is cancelled.
@@ -110,25 +120,25 @@ class Coordinator {
   /// Wait() calls concurrently.
   Status Wait();
 
-  /// Returns tuples from the coordinator fragment. Any returned tuples are valid until
-  /// the next GetNext() call. If *batch is NULL, execution has completed and GetNext()
-  /// must not be called again.
-  /// GetNext() will not set *batch=NULL until all fragment instances have
-  /// either completed or have failed.
-  /// It is safe to call GetNext() even in the case where there is no coordinator fragment
-  /// (distributed INSERT).
-  /// '*batch' is owned by the underlying PlanFragmentExecutor and must not be deleted.
-  /// *state is owned by the caller, and must not be deleted.
-  /// Returns an error status if an error was encountered either locally or by
-  /// any of the remote fragments or if the query was cancelled.
-  /// GetNext() is not thread-safe: multiple threads must not make concurrent
-  /// GetNext() calls (but may call any of the other member functions concurrently
-  /// with GetNext()).
-  Status GetNext(RowBatch** batch, RuntimeState* state);
+  /// Fills 'results' with up to 'max_rows' rows. May return fewer than 'max_rows'
+  /// rows, but will not return more.
+  ///
+  /// If *eos is true, execution has completed. Subsequent calls to GetNext() will be a
+  /// no-op.
+  ///
+  /// GetNext() will not set *eos=true until all fragment instances have either completed
+  /// or have failed.
+  ///
+  /// Returns an error status if an error was encountered either locally or by any of the
+  /// remote fragments or if the query was cancelled.
+  ///
+  /// GetNext() is not thread-safe: multiple threads must not make concurrent GetNext()
+  /// calls (but may call any of the other member functions concurrently with GetNext()).
+  Status GetNext(QueryResultSet* results, int max_rows, bool* eos);
 
   /// Cancel execution of query. This includes the execution of the local plan fragment,
-  /// if any, as well as all plan fragments on remote nodes. Sets query_status_ to
-  /// the given cause if non-NULL. Otherwise, sets query_status_ to Status::CANCELLED.
+  /// if any, as well as all plan fragments on remote nodes. Sets query_status_ to the
+  /// given cause if non-NULL. Otherwise, sets query_status_ to Status::CANCELLED.
   /// Idempotent.
   void Cancel(const Status* cause = NULL);
 
@@ -141,13 +151,21 @@ class Coordinator {
   /// to CancelInternal().
   Status UpdateFragmentExecStatus(const TReportExecStatusParams& params);
 
-  /// only valid *after* calling Exec(), and may return NULL if there is no executor
-  RuntimeState* runtime_state();
-  const RowDescriptor& row_desc() const;
+  /// Returns the query state.
+  /// Only valid to call after Exec() and before TearDown(). The returned
+  /// reference only remains valid until TearDown() is called.
+  QueryState* query_state() const {
+    DCHECK(!torn_down_);
+    return query_state_;
+  }
 
-  /// Only valid after Exec(). Returns runtime_state()->query_mem_tracker() if there
-  /// is a coordinator fragment, or query_mem_tracker_ (initialized in Exec()) otherwise.
-  MemTracker* query_mem_tracker();
+  /// Only valid *after* calling Exec(). Return nullptr if the running query does not
+  /// produce any rows.
+  ///
+  /// TODO: The only dependency on this is QueryExecState, used to track memory for the
+  /// result cache. Remove this dependency, possibly by moving result caching inside this
+  /// class.
+  RuntimeState* runtime_state();
 
   /// Get cumulative profile aggregated over all fragments of the query.
   /// This is a snapshot of the current state of execution and will change in
@@ -156,8 +174,15 @@ class Coordinator {
 
   const TUniqueId& query_id() const { return query_id_; }
 
+  MemTracker* query_mem_tracker() const { return query_state()->query_mem_tracker(); }
+
   /// This is safe to call only after Wait()
   const PartitionStatusMap& per_partition_status() { return per_partition_status_; }
+
+  /// Returns the latest Kudu timestamp observed across any backends where DML into Kudu
+  /// was executed, or 0 if there were no Kudu timestamps reported.
+  /// This should only be called after Wait().
+  uint64_t GetLatestKuduInsertTimestamp() const;
 
   /// Gathers all updates to the catalog required once this query has completed execution.
   /// Returns true if a catalog update is required, false otherwise.
@@ -180,6 +205,7 @@ class Coordinator {
     return exec_summary_;
   }
 
+  /// See the ImpalaServer class comment for the required lock acquisition order.
   SpinLock& GetExecSummaryLock() const { return exec_summary_lock_; }
 
   /// Receive a local filter update from a fragment instance. Aggregate that filter update
@@ -188,8 +214,13 @@ class Coordinator {
   /// filter to fragment instances.
   void UpdateFilter(const TUpdateFilterParams& params);
 
+  /// Called once the query is complete to tear down any remaining state.
+  void TearDown();
+
  private:
-  class FragmentInstanceState;
+  class InstanceState;
+  struct FilterTarget;
+  class FilterState;
 
   /// Typedef for boost utility to compute averaged stats
   /// TODO: including the median doesn't compile, looks like some includes are missing
@@ -201,6 +232,7 @@ class Coordinator {
       boost::accumulators::tag::variance>
   > SummaryStats;
 
+  const QuerySchedule schedule_;
   ExecEnv* exec_env_;
   TUniqueId query_id_;
 
@@ -223,8 +255,10 @@ class Coordinator {
     CounterMap scan_ranges_complete_counters;
   };
 
-  /// FragmentInstanceState owned by obj_pool()
-  std::vector<FragmentInstanceState*> fragment_instance_states_;
+  /// InstanceStates for all fragment instances, including that of the coordinator
+  /// fragment. All elements are non-nullptr. Owned by obj_pool(). Filled in
+  /// StartFInstances().
+  std::vector<InstanceState*> fragment_instance_states_;
 
   /// True if the query needs a post-execution step to tidy up
   bool needs_finalization_;
@@ -240,7 +274,12 @@ class Coordinator {
   /// Keeps track of number of completed ranges and total scan ranges.
   ProgressUpdater progress_;
 
-  /// protects all fields below
+  /// Protects all fields below. This is held while making RPCs, so this lock should
+  /// only be acquired if the acquiring thread is prepared to wait for a significant
+  /// time.
+  /// Lock ordering is
+  /// 1. lock_
+  /// 2. InstanceState::lock_
   boost::mutex lock_;
 
   /// Overall status of the entire query; set to the first reported fragment error
@@ -253,20 +292,32 @@ class Coordinator {
   /// Once this is set to true, errors from remote fragments are ignored.
   bool returned_all_results_;
 
-  /// execution state of coordinator fragment
-  boost::scoped_ptr<PlanFragmentExecutor> executor_;
+  /// The QueryState for this coordinator. Set in Exec(). Released in TearDown().
+  QueryState* query_state_;
 
-  /// Query mem tracker for this coordinator initialized in Exec(). Only valid if there
-  /// is no coordinator fragment (i.e. executor_ == NULL). If executor_ is not NULL,
-  /// this->runtime_state()->query_mem_tracker() returns the query mem tracker.
-  /// (See this->query_mem_tracker())
-  boost::shared_ptr<MemTracker> query_mem_tracker_;
+  /// Non-null if and only if the query produces results for the client; i.e. is of
+  /// TStmtType::QUERY. Coordinator uses these to pull results from plan tree and return
+  /// them to the client in GetNext(), and also to access the fragment instance's runtime
+  /// state.
+  ///
+  /// Result rows are materialized by this fragment instance in its own thread. They are
+  /// materialized into a QueryResultSet provided to the coordinator during GetNext().
+  ///
+  /// Not owned by this class. Set in Exec(). Reset to nullptr (and the implied
+  /// reference of QueryState released) in TearDown().
+  FragmentInstanceState* coord_instance_ = nullptr;
+
+  /// Not owned by this class. Set in Exec(). Reset to nullptr in TearDown() or when
+  /// GetNext() hits eos.
+  PlanRootSink* coord_sink_ = nullptr;
 
   /// owned by plan root, which resides in runtime_state_'s pool
   const RowDescriptor* row_desc_;
 
   /// Returns a local object pool.
   ObjectPool* obj_pool() { return obj_pool_.get(); }
+
+  PlanFragmentExecutor* executor();
 
   // Sets the TDescriptorTable(s) for the current fragment.
   void SetExecPlanDescriptorTable(const TPlanFragment& fragment,
@@ -278,10 +329,10 @@ class Coordinator {
   /// Number of remote fragments that have completed
   int num_remote_fragements_complete_;
 
-  /// If there is no coordinator fragment, Wait simply waits until all
-  /// backends report completion by notifying on backend_completion_cv_.
+  /// If there is no coordinator fragment, Wait() simply waits until all
+  /// backends report completion by notifying on instance_completion_cv_.
   /// Tied to lock_.
-  boost::condition_variable backend_completion_cv_;
+  boost::condition_variable instance_completion_cv_;
 
   /// Count of the number of backends for which done != true. When this
   /// hits 0, any Wait()'ing thread is notified
@@ -306,6 +357,7 @@ class Coordinator {
   boost::scoped_ptr<ObjectPool> obj_pool_;
 
   /// Execution summary for this query.
+  /// See the ImpalaServer class comment for the required lock acquisition order.
   mutable SpinLock exec_summary_lock_;
   TExecSummary exec_summary_;
 
@@ -341,9 +393,12 @@ class Coordinator {
 
     /// Execution rates for instances of this fragment
     SummaryStats rates;
+
+    PerFragmentProfileData()
+      : averaged_profile(nullptr), num_instances(-1), root_profile(nullptr) {}
   };
 
-  /// This is indexed by fragment_idx.
+  /// This is indexed by fragment idx (TPlanFragment.idx).
   /// This array is only modified at coordinator startup and query completion and
   /// does not need locks.
   std::vector<PerFragmentProfileData> fragment_profiles_;
@@ -358,33 +413,8 @@ class Coordinator {
   RuntimeProfile::Counter* finalization_timer_;
 
   /// Barrier that is released when all calls to ExecRemoteFragment() have
-  /// returned, successfully or not. Initialised during StartRemoteFragments().
+  /// returned, successfully or not. Initialised during Exec().
   boost::scoped_ptr<CountingBarrier> exec_complete_barrier_;
-
-  struct FilterState {
-    TRuntimeFilterDesc desc;
-
-    TPlanNodeId src;
-    TPlanNodeId dst;
-
-    // Index into fragment_instance_states_
-    std::vector<int> fragment_instance_idxs;
-
-    /// Number of remaining backends to hear from before filter is complete.
-    int pending_count;
-
-    /// BloomFilter aggregated from all source plan nodes, to be broadcast to all
-    /// destination plan fragment instances. Owned by the coordinator's object pool.
-    BloomFilter* bloom_filter;
-
-    /// Time at which first local filter arrived.
-    int64_t first_arrival_time;
-
-    /// Time at which all local filters arrived.
-    int64_t completion_time;
-
-    FilterState() : bloom_filter(NULL), first_arrival_time(0L), completion_time(0L) { }
-  };
 
   /// Protects filter_routing_table_.
   SpinLock filter_lock_;
@@ -393,28 +423,38 @@ class Coordinator {
   typedef boost::unordered_map<int32_t, FilterState> FilterRoutingTable;
   FilterRoutingTable filter_routing_table_;
 
-  RuntimeProfile::Counter* filters_received_;
+  /// Set to true when all calls to UpdateFilterRoutingTable() have finished, and it's
+  /// safe to concurrently read from filter_routing_table_.
+  bool filter_routing_table_complete_;
 
+  /// Total number of filter updates received (always 0 if filter mode is not
+  /// GLOBAL). Excludes repeated broadcast filter updates.
+  RuntimeProfile::Counter* filter_updates_received_;
+
+  /// The filtering mode for this query. Set in constructor.
+  TRuntimeFilterMode::type filter_mode_;
+
+  /// Tracks the memory consumed by runtime filters during aggregation. Child of
+  /// the query mem tracker in 'query_state_'.
+  std::unique_ptr<MemTracker> filter_mem_tracker_;
+
+  /// True if and only if TearDown() has been called.
+  bool torn_down_;
+
+  /// Returns a pretty-printed table of the current filter state.
   std::string FilterDebugString();
 
-  /// Fill in rpc_params based on parameters.
-  /// 'fragment_instance_idx' is the 0-based query-wide ordinal of the fragment instance.
-  /// 'fragment_idx' is the 0-based query-wide ordinal of the fragment of which it is an
-  /// instance.
-  /// 'per_fragment_instance_idx' is the 0-based ordinal of this particular fragment
-  /// instance within its fragment.
-  void SetExecPlanFragmentParams(QuerySchedule& schedule, const TPlanFragment& fragment,
-      const FragmentExecParams& params, int fragment_instance_idx, int fragment_idx,
-      int per_fragment_instance_idx, const TNetworkAddress& coord,
-      TExecPlanFragmentParams* rpc_params);
+  /// Sets 'filter_routing_table_complete_' and prints the table to the profile and log.
+  void MarkFilterRoutingTableComplete();
+
+  /// Fill in rpc_params based on params.
+  void SetExecPlanFragmentParams(
+      const FInstanceExecParams& params, TExecPlanFragmentParams* rpc_params);
 
   /// Wrapper for ExecPlanFragment() RPC. This function will be called in parallel from
-  /// multiple threads. Creates a new FragmentInstanceState and registers it in
-  /// fragment_instance_states_, then calls RPC to issue fragment on remote impalad.
-  void ExecRemoteFragment(const FragmentExecParams* fragment_exec_params,
-      const TPlanFragment* plan_fragment, DebugOptions* debug_options,
-      QuerySchedule* schedule, int fragment_instance_idx, int fragment_idx,
-      int per_fragment_instance_idx);
+  /// multiple threads.
+  void ExecRemoteFInstance(
+      const FInstanceExecParams& exec_params, const DebugOptions* debug_options);
 
   /// Determine fragment number, given fragment id.
   int GetFragmentNum(const TUniqueId& fragment_id);
@@ -423,28 +463,16 @@ class Coordinator {
   /// Attaches split size summary to the appropriate runtime profile
   void PrintFragmentInstanceInfo();
 
-  /// Create aggregate counters for all scan nodes in any of the fragments
-  void CreateAggregateCounters(const std::vector<TPlanFragment>& fragments);
-
   /// Collect scan node counters from the profile.
   /// Assumes lock protecting profile and result is held.
   void CollectScanNodeCounters(RuntimeProfile*, FragmentInstanceCounters* result);
 
-  /// Derived counter function: aggregates throughput for node_id across all fragment
-  /// instances (id needs to be for a ScanNode).
-  int64_t ComputeTotalThroughput(int node_id);
-
-  /// Derived counter function: aggregates total completed scan ranges for node_id
-  /// across all fragment instances (id needs to be for a ScanNode).
-  int64_t ComputeTotalScanRangesComplete(int node_id);
-
   /// Runs cancel logic. Assumes that lock_ is held.
   void CancelInternal();
 
-  /// Cancels remote fragments. Assumes that lock_ is held.  This can be called when
-  /// the query is not being cancelled in the case where the query limit is
-  /// reached.
-  void CancelRemoteFragments();
+  /// Cancels all fragment instances. Assumes that lock_ is held. This may be called when
+  /// the query is not being cancelled in the case where the query limit is reached.
+  void CancelFragmentInstances();
 
   /// Acquires lock_ and updates query_status_ with 'status' if it's not already
   /// an error status, and returns the current query_status_.
@@ -457,9 +485,9 @@ class Coordinator {
   /// Returns only when either all fragment instances have reported success or the query
   /// is in error. Returns the status of the query.
   /// It is safe to call this concurrently, but any calls must be made only after Exec().
-  /// WaitForAllBackends may be called before Wait(), but note that Wait() guarantees
+  /// WaitForAllInstances may be called before Wait(), but note that Wait() guarantees
   /// that any coordinator fragment has finished, which this method does not.
-  Status WaitForAllBackends();
+  Status WaitForAllInstances();
 
   /// Perform any post-query cleanup required. Called by Wait() only after all fragment
   /// instances have returned, or if the query has failed, in which case it only cleans up
@@ -469,21 +497,20 @@ class Coordinator {
   /// Moves all temporary staging files to their final destinations.
   Status FinalizeSuccessfulInsert();
 
-  /// Initializes the structures in runtime profile and exec_summary_. Must be
-  /// called before RPCs to start remote fragments.
-  void InitExecProfile(const TQueryExecRequest& request);
+  /// Initializes the structures in fragment_profiles_. Must be called before RPCs to
+  /// start remote fragments.
+  void InitExecProfiles();
+
+  /// Initialize the structures to collect execution summary of every plan node
+  /// (exec_summary_ and plan_node_id_to_summary_map_)
+  void InitExecSummary();
 
   /// Update fragment profile information from a fragment instance state.
-  /// This is called repeatedly from UpdateFragmentExecStatus(),
-  /// and also at the end of the query from ReportQuerySummary().
-  /// This method calls UpdateAverage() and AddChild(), which obtain their own locks
-  /// on the instance state.
-  void UpdateAverageProfile(FragmentInstanceState* fragment_instance_state);
+  void UpdateAverageProfile(InstanceState* instance_state);
 
   /// Compute the summary stats (completion_time and rates)
-  /// for an individual fragment_profile_ based on the specified backed_exec_state.
-  /// Called only from ReportQuerySummary() below.
-  void ComputeFragmentSummaryStats(FragmentInstanceState* fragment_instance_state);
+  /// for an individual fragment_profile_ based on the specified instance state.
+  void ComputeFragmentSummaryStats(InstanceState* instance_state);
 
   /// Outputs aggregate query profile summary.  This is assumed to be called at the end of
   /// a query -- remote fragments' profiles must not be updated while this is running.
@@ -491,7 +518,7 @@ class Coordinator {
 
   /// Populates the summary execution stats from the profile. Can only be called when the
   /// query is done.
-  void UpdateExecSummary(int fragment_idx, int instance_idx, RuntimeProfile* profile);
+  void UpdateExecSummary(const InstanceState& instance_state);
 
   /// Determines what the permissions of directories created by INSERT statements should
   /// be if permission inheritance is enabled. Populates a map from all prefixes of
@@ -503,21 +530,23 @@ class Coordinator {
   /// permissions of the path. The PermissionCache argument is also used to cache the
   /// output across repeated calls, to avoid repeatedly calling hdfsGetPathInfo() on the
   /// same path.
-  typedef boost::unordered_map<std::string, std::pair<bool, short> > PermissionCache;
+  typedef boost::unordered_map<std::string, std::pair<bool, short>> PermissionCache;
   void PopulatePathPermissionCache(hdfsFS fs, const std::string& path_str,
       PermissionCache* permissions_cache);
 
-  /// Validates that all collection-typed slots in the given batch are set to NULL.
-  /// See SubplanNode for details on when collection-typed slots are set to NULL.
-  /// TODO: This validation will become obsolete when we can return collection values.
-  /// We will then need a different mechanism to assert the correct behavior of the
-  /// SubplanNode with respect to setting collection-slots to NULL.
-  void ValidateCollectionSlots(RowBatch* batch);
+  /// Starts all fragment instances contained in the schedule by issuing RPCs in
+  /// parallel and then waiting for all of the RPCs to complete. Also sets up and
+  /// registers the state for all fragment instances.
+  void StartFInstances();
 
-  /// Starts all remote fragments contained in the schedule by issuing RPCs in parallel,
-  /// and then waiting for all of the RPCs to complete. Returns an error if there was any
-  /// error starting the fragments.
-  Status StartRemoteFragments(QuerySchedule* schedule);
+  /// Calls CancelInternal() and returns an error if there was any error starting the
+  /// fragments.
+  /// Also updates query_profile_ with the startup latency histogram.
+  Status FinishInstanceStartup();
+
+  /// Build the filter routing table by iterating over all plan nodes and collecting the
+  /// filters that they either produce or consume.
+  void UpdateFilterRoutingTable(const FragmentExecParams& fragment_params);
 };
 
 }

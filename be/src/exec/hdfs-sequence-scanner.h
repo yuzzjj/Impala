@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_EXEC_HDFS_SEQUENCE_SCANNER_H
@@ -159,16 +162,18 @@ class HdfsSequenceScanner : public BaseSequenceScanner {
   /// SeqFile file: {'S', 'E', 'Q', 6}
   static const uint8_t SEQFILE_VERSION_HEADER[4];
 
-  HdfsSequenceScanner(HdfsScanNode* scan_node, RuntimeState* state);
+  HdfsSequenceScanner(HdfsScanNodeBase* scan_node, RuntimeState* state);
 
   virtual ~HdfsSequenceScanner();
-  
-  /// Implementation of HdfsScanner interface.
-  virtual Status Prepare(ScannerContext* context);
 
-  /// Codegen writing tuples and evaluating predicates.
-  static llvm::Function* Codegen(HdfsScanNode*,
-                                 const std::vector<ExprContext*>& conjunct_ctxs);
+  /// Implementation of HdfsScanner interface.
+  virtual Status Open(ScannerContext* context);
+
+  /// Codegen WriteAlignedTuples(). Stores the resulting function in
+  /// 'write_aligned_tuples_fn' if codegen was successful or NULL otherwise.
+  static Status Codegen(HdfsScanNodeBase* node,
+      const std::vector<ExprContext*>& conjunct_ctxs,
+      llvm::Function** write_aligned_tuples_fn);
 
  protected:
   /// Implementation of sequence container super class methods.
@@ -176,9 +181,9 @@ class HdfsSequenceScanner : public BaseSequenceScanner {
   virtual Status ReadFileHeader();
   virtual Status InitNewRange();
   virtual Status ProcessRange();
-  
-  virtual THdfsFileFormat::type file_format() const { 
-    return THdfsFileFormat::SEQUENCE_FILE; 
+
+  virtual THdfsFileFormat::type file_format() const {
+    return THdfsFileFormat::SEQUENCE_FILE;
   }
 
  private:
@@ -213,11 +218,7 @@ class HdfsSequenceScanner : public BaseSequenceScanner {
   ///   record_ptr: ponter to the record.
   ///   record_len: length of the record
   Status GetRecord(uint8_t** record_ptr, int64_t *record_len);
-  
-  /// Appends the current file and line to the RuntimeState's error log.
-  /// row_idx is 0-based (in current batch) where the parse error occurred.
-  virtual void LogRowParseError(int row_idx, std::stringstream*);
-  
+
   /// Helper class for picking fields and rows from delimited text.
   boost::scoped_ptr<DelimitedTextParser> delimited_text_parser_;
   std::vector<FieldLocation> field_locations_;

@@ -1,16 +1,19 @@
-# Copyright (c) 2015 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 '''This module is intended to standardize workflows when working with various databases
    such as Impala, Postgresql, etc. Even with pep-249 (DB API 2), workflows differ
@@ -20,6 +23,7 @@
 '''
 import hashlib
 import impala.dbapi
+import re
 import shelve
 from abc import ABCMeta, abstractmethod
 from contextlib import closing
@@ -36,19 +40,19 @@ from pyparsing import (
     nums,
     Suppress,
     Word)
-from re import compile
 from tempfile import gettempdir
+from textwrap import dedent
 from threading import Lock
 from time import time
 
-from common import (
+from tests.comparison.common import (
     ArrayColumn,
     Column,
     MapColumn,
     StructColumn,
     Table,
     TableExprList)
-from db_types import (
+from tests.comparison.db_types import (
     Char,
     Decimal,
     Double,
@@ -70,6 +74,7 @@ IMPALA = "IMPALA"
 MYSQL = "MYSQL"
 ORACLE = "ORACLE"
 POSTGRESQL = "POSTGRESQL"
+
 
 class DbCursor(object):
   '''Wraps a DB API 2 cursor to provide access to the related conn. This class
@@ -109,8 +114,16 @@ class DbCursor(object):
               ' It has a different number of columns across databases.', table_name)
           mismatch = True
           break
+        if common_table.primary_key_names != table.primary_key_names:
+          LOG.debug(
+              'Ignoring table {name} because of differing primary keys: '
+              '{common_table_keys} vs. {table_keys}'.format(
+                  name=table_name, common_table_keys=common_table.primary_key_names,
+                  table_keys=table.primary_key_names))
+          mismatch = True
+          break
         for left, right in izip(common_table.cols, table.cols):
-          if not left.name == right.name and left.type == right.type:
+          if not (left.name == right.name and left.type == right.type):
             LOG.debug('Ignoring table %s. It has different columns %s vs %s.' %
                 (table_name, left, right))
             mismatch = True
@@ -122,10 +135,10 @@ class DbCursor(object):
 
     return tables
 
-  SQL_TYPE_PATTERN = compile(r'([^()]+)(\((\d+,? ?)*\))?')
+  SQL_TYPE_PATTERN = re.compile(r'([^()]+)(\((\d+,? ?)*\))?')
   TYPE_NAME_ALIASES = \
       dict((type_.name().upper(), type_.name().upper()) for type_ in EXACT_TYPES)
-  TYPES_BY_NAME =  dict((type_.name().upper(), type_) for type_ in EXACT_TYPES)
+  TYPES_BY_NAME = dict((type_.name().upper(), type_) for type_ in EXACT_TYPES)
   EXACT_TYPES_TO_SQL = dict((type_, type_.name().upper()) for type_ in EXACT_TYPES)
 
   @classmethod
@@ -221,6 +234,11 @@ class DbCursor(object):
     LOG.info("Creating database %s", db_name)
     db_name = db_name.lower()
     self.execute('CREATE DATABASE ' + db_name)
+
+  def create_db_if_not_exists(self, db_name):
+    LOG.info("Creating database %s", db_name)
+    db_name = db_name.lower()
+    self.execute('CREATE DATABASE IF NOT EXISTS ' + db_name)
 
   def drop_db_if_exists(self, db_name):
     '''This should not be called from a conn to the database being dropped.'''
@@ -388,11 +406,13 @@ class DbCursor(object):
     raise Exception('unable to parse: {0}, type: {1}'.format(col_name, col_type))
 
   def create_table_from_describe(self, table_name, describe_rows):
+    primary_key_names = self._fetch_primary_key_names(table_name)
     table = Table(table_name.lower())
     for row in describe_rows:
       col_name, data_type = row[:2]
       col_type = self.parse_col_desc(data_type)
       col = self.create_column(col_name, col_type)
+      col.is_primary_key = col_name in primary_key_names
       table.add_col(col)
     return table
 
@@ -427,13 +447,34 @@ class DbCursor(object):
     LOG.debug('Created table %s', table.name)
 
   def make_create_table_sql(self, table):
-    sql = 'CREATE TABLE %s (%s)' % (
-        table.name,
-        ', '.join('%s %s' %
-            (col.name, self.get_sql_for_data_type(col.exact_type)) +
-            ('' if self.conn.data_types_are_implictly_nullable else ' NULL')
-            for col in table.cols))
-    return sql
+    column_declarations = []
+    primary_key_names = []
+    for col in table.cols:
+      if col.is_primary_key:
+        null_constraint = ''
+        primary_key_names.append(col.name)
+      elif self.conn.data_types_are_implictly_nullable:
+        null_constraint = ''
+      else:
+        null_constraint = ' NULL'
+      column_declaration = '{name} {col_type}{null_constraint}'.format(
+          name=col.name, col_type=self.get_sql_for_data_type(col.exact_type),
+          null_constraint=null_constraint)
+      column_declarations.append(column_declaration)
+
+    if primary_key_names:
+      primary_key_constraint = ', PRIMARY KEY ({keys})'.format(
+          keys=', '.join(primary_key_names))
+    else:
+      primary_key_constraint = ''
+
+    create_table = ('CREATE TABLE {table_name} ('
+                    '{all_columns}'
+                    '{primary_key_constraint}'
+                    ')'.format(
+                        table_name=table.name, all_columns=', '.join(column_declarations),
+                        primary_key_constraint=primary_key_constraint))
+    return create_table
 
   def get_sql_for_data_type(self, data_type):
     if issubclass(data_type, VarChar):
@@ -518,6 +559,16 @@ class DbCursor(object):
         unique_cols.append(cols)
       table.unique_cols = unique_cols
 
+  def _fetch_primary_key_names(self, table_name):
+    """
+    This must return a tuple of strings representing the primary keys of table_name,
+    or an empty tuple if there are no primary keys.
+    """
+    # This is the base method. Since we haven't tested this on Oracle or Mysql or plan
+    # to implement this for those databases, the base method needs to return an empty
+    # tuple.
+    return ()
+
 
 class DbConnection(object):
 
@@ -550,7 +601,7 @@ class DbConnection(object):
         try:
           unlink(link)
         except OSError as e:
-          if not 'No such file' in str(e):
+          if 'No such file' not in str(e):
             raise e
         try:
           symlink(sql_log_path, link)
@@ -633,6 +684,9 @@ class DbConnection(object):
 
 class ImpalaCursor(DbCursor):
 
+  PK_SEARCH_PATTERN = re.compile('PRIMARY KEY \((?P<keys>.*?)\)')
+  STORAGE_FORMATS_WITH_PRIMARY_KEYS = ('KUDU',)
+
   @classmethod
   def make_insert_sql_from_data(cls, table, rows):
     if not rows:
@@ -664,6 +718,31 @@ class ImpalaCursor(DbCursor):
   @property
   def cluster(self):
     return self.conn.cluster
+
+  def _fetch_primary_key_names(self, table_name):
+    self.execute("SHOW CREATE TABLE {0}".format(table_name))
+    # This returns 1 column with 1 multiline string row, resembling:
+    #
+    # CREATE TABLE db.table (
+    #   pk1 BIGINT,
+    #   pk2 BIGINT,
+    #   col BIGINT,
+    #   PRIMARY KEY (pk1, pk2)
+    # )
+    #
+    # Even a 1-column primary key will be shown as a PRIMARY KEY constraint, like:
+    #
+    # CREATE TABLE db.table (
+    #   pk1 BIGINT,
+    #   col BIGINT,
+    #   PRIMARY KEY (pk1)
+    # )
+    (raw_result,) = self.fetchone()
+    search_result = ImpalaCursor.PK_SEARCH_PATTERN.search(raw_result)
+    if search_result is None:
+      return ()
+    else:
+      return tuple(search_result.group("keys").split(", "))
 
   def invalidate_metadata(self, table_name=None):
     self.execute("INVALIDATE METADATA %s" % (table_name or ""))
@@ -709,6 +788,28 @@ class ImpalaCursor(DbCursor):
 
   def make_create_table_sql(self, table):
     sql = super(ImpalaCursor, self).make_create_table_sql(table)
+
+    if table.primary_keys:
+      if table.storage_format in ImpalaCursor.STORAGE_FORMATS_WITH_PRIMARY_KEYS:
+        # IMPALA-4424 adds support for parametrizing the partitions; for now, on our
+        # small scale, this is ok, especially since the model is to migrate tables from
+        # Impala into Postgres anyway. 3 was chosen for the buckets because our
+        # minicluster tends to have 3 tablet servers, but otherwise it's arbitrary and
+        # provides valid syntax for creating Kudu tables in Impala.
+        sql += '\nPARTITION BY HASH ({col}) PARTITIONS 3'.format(
+            col=table.primary_key_names[0])
+      else:
+        raise Exception(
+            'table representation has primary keys {keys} but is not in a format that '
+            'supports them: {storage_format}'.format(
+                keys=str(table.primary_key_names),
+                storage_format=table.storage_format))
+    elif table.storage_format in ImpalaCursor.STORAGE_FORMATS_WITH_PRIMARY_KEYS:
+      raise Exception(
+          'table representation has storage format {storage_format} '
+          'but does not have any primary keys'.format(
+              storage_format=table.storage_format))
+
     if table.storage_format != 'TEXTFILE':
       sql += "\nSTORED AS " + table.storage_format
     if table.storage_location:
@@ -786,11 +887,28 @@ class ImpalaConnection(DbConnection):
         auth_mechanism=('GSSAPI' if self._use_kerberos else self._NON_KERBEROS_AUTH_MECH))
 
 
+class HiveCursor(ImpalaCursor):
+
+  def invalidate_metadata(self, table_name=None):
+    # There is no equivalent of "INVALIDATE METADATA" in Hive
+    pass
+
+  def compute_stats(self, table_name=None):
+    if table_name:
+      self.execute("ANALYZE TABLE %s COMPUTE STATISTICS" % table_name)
+      self.execute("ANALYZE TABLE %s COMPUTE STATISTICS FOR COLUMNS" % table_name)
+    else:
+      for table_name in self.list_table_names():
+        self.execute("ANALYZE TABLE %s COMPUTE STATISTICS" % table_name)
+        self.execute("ANALYZE TABLE %s COMPUTE STATISTICS FOR COLUMNS" % table_name)
+
+
 class HiveConnection(ImpalaConnection):
 
   PORT = 11050
 
   _DB_TYPE = HIVE
+  _CURSOR_CLASS = HiveCursor
   _NON_KERBEROS_AUTH_MECH = 'PLAIN'
 
 
@@ -882,6 +1000,27 @@ class PostgresqlCursor(DbCursor):
       return 'VARCHAR(%s)' % String.MAX
     return super(PostgresqlCursor, self).get_sql_for_data_type(data_type)
 
+  def _fetch_primary_key_names(self, table_name):
+    # see:
+    # https://www.postgresql.org/docs/9.5/static/infoschema-key-column-usage.html
+    # https://www.postgresql.org/docs/9.5/static/infoschema-table-constraints.html
+    sql = dedent('''
+        SELECT
+          key_cols.column_name AS column_name
+        FROM
+          information_schema.key_column_usage key_cols,
+          information_schema.table_constraints table_constraints
+        WHERE
+          key_cols.constraint_catalog = table_constraints.constraint_catalog AND
+          key_cols.table_name = table_constraints.table_name AND
+          key_cols.constraint_name = table_constraints.constraint_name AND
+          table_constraints.constraint_type = 'PRIMARY KEY' AND
+          key_cols.table_name = '{table_name}'
+        ORDER BY key_cols.ordinal_position'''.format(table_name=table_name))
+    self.execute(sql)
+    rows = self.fetchall()
+    return tuple(row[0] for row in rows)
+
 
 class PostgresqlConnection(DbConnection):
 
@@ -933,6 +1072,10 @@ class MySQLConnection(DbConnection):
   PORT = 3306
   USER_NAME = "root"
 
+  def __init__(self, client, conn, db_name=None):
+    DbConnection.__init__(self, client, conn, db_name=db_name)
+    self._session_id = self.execute_and_fetchall('SELECT connection_id()')[0][0]
+
   def _connect(self):
     try:
       import MySQLdb
@@ -947,12 +1090,6 @@ class MySQLConnection(DbConnection):
         passwd=self._password,
         db=self.db_name)
     self._conn.autocommit = True
-
-class MySQLConnection(DbConnection):
-
-  def __init__(self, client, conn, db_name=None):
-    DbConnection.__init__(self, client, conn, db_name=db_name)
-    self._session_id = self.execute_and_fetchall('SELECT connection_id()')[0][0]
 
   @property
   def supports_kill_connection(self):

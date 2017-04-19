@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+-->
+<!DOCTYPE concept PUBLIC "-//OASIS//DTD DITA Concept//EN" "concept.dtd">
+<concept id="upsert" rev="kudu IMPALA-3725">
+
+  <title>UPSERT Statement (<keyword keyref="impala28"/> or higher only)</title>
+  <titlealts audience="PDF"><navtitle>UPSERT</navtitle></titlealts>
+  <prolog>
+    <metadata>
+      <data name="Category" value="Impala"/>
+      <data name="Category" value="SQL"/>
+      <data name="Category" value="Kudu"/>
+      <data name="Category" value="ETL"/>
+      <data name="Category" value="Ingest"/>
+      <data name="Category" value="DML"/>
+      <data name="Category" value="Developers"/>
+      <data name="Category" value="Data Analysts"/>
+    </metadata>
+  </prolog>
+
+  <conbody>
+
+    <p>
+      <indexterm audience="hidden">UPSERT statement</indexterm>
+      Acts as a combination of the <codeph>INSERT</codeph>
+      and <codeph>UPDATE</codeph> statements.
+      For each row processed by the <codeph>UPSERT</codeph>
+      statement:
+      <ul>
+        <li>
+          <p>
+            If another row already exists with the same set of primary key
+            values, the other columns are updated to match the values
+            from the row being <q>UPSERTed</q>.
+          </p>
+        </li>
+        <li>
+          <p>
+            If there is not any row with the same set of primary key values,
+            the row is created, the same as if the <codeph>INSERT</codeph>
+            statement was used.
+          </p>
+        </li>
+      </ul>
+    </p>
+
+    <p>
+      This statement only works for Impala tables that use the Kudu storage engine.
+    </p>
+
+    <p conref="../shared/impala_common.xml#common/syntax_blurb"/>
+
+<codeblock>
+UPSERT INTO [TABLE] [<varname>db_name</varname>.]<varname>table_name</varname>
+  [(<varname>column_list</varname>)]
+{
+    [<varname>hint_clause</varname>] <varname>select_statement</varname>
+  | VALUES (<varname>value</varname> [, <varname>value</varname> ...]) [, (<varname>value</varname> [, <varname>value</varname> ...]) ...]
+}
+
+hint_clause ::= [SHUFFLE] | [NOSHUFFLE]
+  (Note: the square brackets are part of the syntax.)
+</codeblock>
+
+    <p>
+      The <varname>select_statement</varname> clause can use the full syntax, such as
+      <codeph>WHERE</codeph> and join clauses, as <xref href="impala_select.xml#select"/>.
+    </p>
+
+    <p conref="../shared/impala_common.xml#common/dml_blurb_kudu"/>
+
+    <p conref="../shared/impala_common.xml#common/usage_notes_blurb"/>
+
+    <p>
+      If you specify a column list, any omitted columns in the inserted or updated rows are
+      set to their default value (if the column has one) or <codeph>NULL</codeph> (if the
+      column does not have a default value). Therefore, if a column is not nullable and
+      has no default value, it must be included in the column list for any <codeph>UPSERT</codeph>
+      statement. Because all primary key columns meet these conditions, all the primary key
+      columns must be specified in every <codeph>UPSERT</codeph> statement.
+    </p>
+
+    <p>
+      Because Kudu tables can efficiently handle small incremental changes, the <codeph>VALUES</codeph>
+      clause is more practical to use with Kudu tables than with HDFS-based tables.
+    </p>
+
+    <note conref="../shared/impala_common.xml#common/compute_stats_next"/>
+
+    <p conref="../shared/impala_common.xml#common/example_blurb"/>
+
+<codeblock>
+UPSERT INTO kudu_table (pk, c1, c2, c3) VALUES (0, 'hello', 50, true), (1, 'world', -1, false);
+UPSERT INTO production_table SELECT * FROM staging_table;
+UPSERT INTO production_table SELECT * FROM staging_table WHERE c1 IS NOT NULL AND c2 > 0;
+</codeblock>
+
+    <p conref="../shared/impala_common.xml#common/related_info"/>
+
+    <p>
+      <xref href="impala_kudu.xml#impala_kudu"/>,
+      <xref href="impala_insert.xml#insert"/>,
+      <xref href="impala_update.xml#update"/>
+    </p>
+
+  </conbody>
+
+</concept>

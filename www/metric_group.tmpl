@@ -1,32 +1,64 @@
+{{!
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+}}
 {{!Renders a metric group and all its children, one table each}}
 <a id="{{name}}"><h3>{{name}}</h3></a>
 
-<table class='table table-bordered table-hover'>
-  <tr>
-    <th>Name</th>
-    <th>Value</th>
-    <th>Description</th>
-  </tr>
+<table id ="{{name}}-tbl" class='table table-bordered table-hover'>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Value</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
     {{#metrics}}
-  <tr>
-    <td><tt>{{name}}</tt></td>
-    {{! Is this a stats metric? }}
-    {{?mean}}
-    <td>
-      Last (of {{count}}): <strong>{{last}}</strong>.
-      Min: {{min}}, max: {{max}}, avg: {{mean}}</td>
-    {{/mean}}
-    {{^mean}}
-    <td>
-      {{human_readable}}
-    </td>
-    {{/mean}}
-    <td>
-      {{description}}
-    </td>
-  </tr>
-  {{/metrics}}
+    <tr>
+      <td><tt>{{name}}</tt></td>
+      {{! Is this a stats metric? }}
+      {{?mean}}
+      <td>
+        Last (of {{count}}): <strong>{{last}}</strong>.
+        Min: {{min}}, max: {{max}}, avg: {{mean}}</td>
+      {{/mean}}
+      {{^mean}}
+      <td>
+        {{human_readable}}
+      </td>
+      {{/mean}}
+      <td>
+        {{description}}
+      </td>
+    </tr>
+    {{/metrics}}
+  </tbody>
 </table>
+
+<script>
+    $(document).ready(function() {
+        $('#{{name}}-tbl').DataTable({
+            "order": [[ 1, "desc" ]],
+            "pageLength": 100
+        });
+    });
+</script>
+
 
 {{! Recurse into all child groups }}
 {{#child_groups}}

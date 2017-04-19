@@ -1,33 +1,117 @@
-# Copyright (c) 2014 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
+from abc import ABCMeta, abstractproperty
 from copy import deepcopy
 from logging import getLogger
 
-from common import Column, TableExpr, TableExprList, ValExpr, ValExprList
-from db_types import Float
+from tests.comparison.common import Column, TableExpr, TableExprList, ValExpr, ValExprList
+
 
 LOG = getLogger(__name__)
 
-class Query(object):
-  '''A representation of the structure of a SQL query. Only the select_clause and
-     from_clause are required for a valid query.
-  '''
+
+class StatementExecutionMode(object):
+  """
+  Provide a name space for statement execution modes.
+  """
+  (
+      # A SELECT statement is executed and results are compared.
+      SELECT_STATEMENT,
+      # If this is chosen, statement execution will run the CTAS statement and then
+      # SELECT * on the table for comparision. The table is torn down after.
+      CREATE_TABLE_AS,
+      # Same as above, except with a few.
+      CREATE_VIEW_AS,
+      # a DML operation that isn't actually a test, but some setup operation that needs
+      # to be run concurrently
+      DML_SETUP,
+      # a DML statement that's actually a test
+      DML_TEST,
+  ) = xrange(5)
+
+
+class AbstractStatement(object):
+  """
+  Abstract query representation
+  """
+
+  __metaclass__ = ABCMeta
 
   def __init__(self):
+    # reference to statement's parent. For example the right side of a UNION clause
+    # SELECT will have a parent as the SELECT on the left, which for the query
+    # generator's purpose is the parent
     self.parent = None
+    # optional WITH clause some statements may have
     self.with_clause = None
+    self._execution = None
+
+  @abstractproperty
+  def table_exprs(self):
+    """
+    Return a list of all table expressions that are declared by this query. This is
+    abstract as the clauses that do this differ across query types. Since all supported
+    queries may have a WITH clause, getting table expressions from the WITH clause is
+    supported here.
+    """
+    # This is an abstractproperty because it's only a *partial* implementation, however
+    # for any statement or query that has a WITH clause, we can handle that here.
+    table_exprs = TableExprList([])
+    if self.with_clause:
+      table_exprs.extend(self.with_clause.table_exprs)
+    return table_exprs
+
+  @abstractproperty
+  def nested_queries(self):
+    """
+    Returns a list of queries contained within this query. Different queries may have
+    different clauses containing subqueries, so this is an abtract property.
+    """
+    pass
+
+  @property
+  def execution(self):
+    """
+    one of the possible StatementExecutionMode values (see class definition for meaning)
+    """
+    if self._execution is None:
+      raise Exception('execution is not set on this object')
+    return self._execution
+
+  @execution.setter
+  def execution(self, val):
+    self._execution = val
+
+
+class Query(AbstractStatement):
+  # TODO: This has to be called Query for as long as we want to unpickle old reports, or
+  # we have to get into the legalese weeds. See:
+  # https://gerrit.cloudera.org/#/c/5162/5/tests/comparison/query.py@61
+  # https://gerrit.cloudera.org/#/c/5162/1/tests/comparison/leopard/custom_pickle.py@9
+  # If we decide at some point we don't need to unpickle some of the recent reports,
+  # then this can be renamed to something like SelectStatement.
+  """
+  A representation of the structure of a SQL SELECT query. Only the select_clause and
+  from_clause are required for a valid query.
+  """
+
+  def __init__(self):
+    super(Query, self).__init__()
     self.select_clause = None
     self.from_clause = None
     self.where_clause = None
@@ -36,13 +120,17 @@ class Query(object):
     self.union_clause = None
     self.order_by_clause = None
     self.limit_clause = None
-    self.execution = 'RAW'
+    # This is a fine default value, because any well-formed object will be a SELECT
+    # statement. Only the discrepancy searcher makes the decision at run time to change
+    # this.
+    self.execution = StatementExecutionMode.SELECT_STATEMENT
 
   def __deepcopy__(self, memo):
     other = Query()
     memo[self] = other
     other.parent = memo[self.parent] if self.parent in memo else None
     other.with_clause = deepcopy(self.with_clause, memo)
+    other.execution = self.execution
     other.from_clause = deepcopy(self.from_clause, memo)
     other.select_clause = deepcopy(self.select_clause, memo)
     other.where_clause = deepcopy(self.where_clause, memo)
@@ -51,7 +139,6 @@ class Query(object):
     other.union_clause = deepcopy(self.union_clause, memo)
     other.order_by_clause = deepcopy(self.order_by_clause, memo)
     other.limit_clause = deepcopy(self.limit_clause, memo)
-    other.execution = self.execution
     return other
 
   @property
@@ -59,14 +146,9 @@ class Query(object):
     '''Provides a list of all table_exprs that are declared by this query. This
        includes table_exprs in the WITH and FROM sections.
     '''
-    table_exprs = self.from_clause.table_exprs
-    if self.with_clause:
-      table_exprs += self.with_clause.table_exprs
+    table_exprs = super(Query, self).table_exprs  # WITH clause
+    table_exprs.extend(self.from_clause.table_exprs)
     return table_exprs
-
-  @property
-  def is_nested_query(self):
-    return self.parent
 
   @property
   def is_unioned_query(self):
@@ -87,7 +169,8 @@ class Query(object):
     if self.union_clause:
       queries.append(self.union_clause.query)
     if self.where_clause:
-      queries.extend(subquery.query for subquery in \
+      queries.extend(
+          subquery.query for subquery in
           self.where_clause.boolean_expr.iter_exprs(lambda expr: expr.is_subquery))
     for query in list(queries):
       queries.extend(query.nested_queries)
@@ -333,8 +416,8 @@ class Subquery(ValExpr):
      result set.
 
   '''
-  # XXX: So far it seems fine to use this class for both scalar/non scalar cases but
-  #      this could lead to unexpected behavior or be a silent cause of problems...
+  # TODO: So far it seems fine to use this class for both scalar/non scalar cases but
+  #       this could lead to unexpected behavior or be a silent cause of problems...
 
   def __init__(self, query):
     self.query = query
@@ -345,6 +428,7 @@ class Subquery(ValExpr):
 
   def __deepcopy__(self, memo):
     return Subquery(deepcopy(self.query, memo))
+
 
 class FromClause(object):
   '''A representation of a FROM clause. The member variable join_clauses may optionally
@@ -367,7 +451,8 @@ class FromClause(object):
 
   def __deepcopy__(self, memo):
     other = FromClause(deepcopy(self.table_expr, memo))
-    other.join_clauses = [deepcopy(join_clause, memo) for join_clause in self.join_clauses]
+    other.join_clauses = [deepcopy(join_clause, memo)
+                          for join_clause in self.join_clauses]
     return other
 
   @property
@@ -393,6 +478,7 @@ class FromClause(object):
     for join_clause in self.join_clauses:
       if 'ANTI' in join_clause.join_type or 'SEMI' in join_clause.join_type:
         return True
+
 
 class InlineView(TableExpr):
   '''Represents an inline view.
@@ -599,7 +685,7 @@ class OrderByClause(object):
       self.exprs_to_order.append((item, order))
 
   def __deepcopy__(self, memo):
-    other = OrderByClause(val_exprs = list())
+    other = OrderByClause(val_exprs=list())
     for (item, order) in self.exprs_to_order:
       other.exprs_to_order.append((deepcopy(item, memo), order))
     return other
@@ -611,4 +697,173 @@ class LimitClause(object):
     self.limit = limit
 
   def __deepcopy__(self, memo):
-    return LimitClause(deepcopy(limit, memo))
+    return LimitClause(deepcopy(self.limit, memo))
+
+
+class InsertClause(object):
+
+  # This enum represents possibilities for different types of INSERTs. A user of this
+  # object, like StatementGenerator, is responsible for setting the conflict_action
+  # value appropriately. These values are valid for the conflict_action parameter.
+  # Because an InsertStatement is a single piece of data shared across multiple SQL
+  # dialects, this setting can alter the written SQL in multiple dialects.
+  #
+  # CONLICT_ACTION_DEFAULT
+  #
+  # For Impala, this is a statement like INSERT INTO hdfs_table SELECT * FROM foo
+  # For PostgreSQL, this is a statement like INSERT INTO hdfs_table SELECT * FROM foo
+  #
+  # Example uses cases: inserting into tables that do not have primary keys, or
+  # inserting into PostgreSQL tables where you want to error if there are attempts to
+  # insert duplicate primary keys
+  #
+  # CONFLICT_ACTION_IGNORE
+  #
+  # For Impala, this is a statement like INSERT INTO kudu_table SELECT * FROM foo
+  # For PostgreSQL, this is a statement like INSERT INTO kudu_table SELECT * FROM foo
+  #                                          ON CONFLICT DO NOTHING
+  #
+  # Example use case: inserting into Kudu tables, where attempts to insert duplicate
+  # primary key rows are ignored by Impala, so they must also be ignored by PostgreSQL.
+  # Note that the *syntax* for INSERT doesn't change with Impala, but because it's a
+  # Kudu table, the behavior differs.
+  #
+  # CONFLICT_ACTION_UPDATE
+  #
+  # For Impala, this is a statement like UPSERT INTO kudu_table SELECT * FROM foo
+  # For PostgreSQL, this is a statement like INSERT INTO kudu_table SELECT * FROM foo
+  #                                          ON CONFLICT DO UPDATE SET
+  #                                          (col1 = EXCLUDED.col1, ...)
+  #
+  # Example use case: upserting into Kudu tables, where attempts to insert duplicate
+  # primary key rows will either insert a single row, or update a single row already
+  # there, without error. In PostgreSQL, UPSERT is written via this "ON CONFLICT DO
+  # UPDATE" clause.
+  #
+  # More on PostgreSQL INSERT/UPSERT syntax here:
+  # https://www.postgresql.org/docs/9.5/static/sql-insert.html
+
+  (CONFLICT_ACTION_DEFAULT,
+   CONFLICT_ACTION_IGNORE,
+   CONFLICT_ACTION_UPDATE) = range(3)
+
+  def __init__(self, table, column_list=None, conflict_action=CONFLICT_ACTION_DEFAULT):
+    """
+    Represent an INSERT/UPSERT clause, which is the first half of an INSERT/UPSERT
+    statement. Note that UPSERTs are very similar to INSERTs, so this data structure can
+    easily deal with both.
+
+    The table is a Table object.
+
+    column_list is an optional list, tuple, or other sequence of
+    tests.comparison.common.Column objects. In an Impala INSERT/UPSERT SQL statement,
+    it's a sequence of column names. See
+    http://www.cloudera.com/documentation/enterprise/latest/topics/impala_insert.html
+
+    conflict_action takes in one of the CONFLICT_ACTION_* class attributes. See above.
+    """
+    self.table = table
+    self.column_list = column_list
+    self.conflict_action = conflict_action
+
+
+class ValuesRow(object):
+  def __init__(self, items):
+    """
+    Represent a single row in a VALUES clause. The items are literals or expressions.
+    """
+    self.items = items
+
+
+class ValuesClause(object):
+  def __init__(self, values_rows):
+    """
+    Represent the VALUES clause of an INSERT/UPSERT statement. The values_rows is a
+    sequence of ValuesRow objects.
+    """
+    self.values_rows = values_rows
+
+
+class InsertStatement(AbstractStatement):
+
+  def __init__(self, with_clause=None, insert_clause=None, select_query=None,
+               values_clause=None, execution=None):
+    """
+    Represent an INSERT/UPSERT statement. Note that UPSERTs are very similar to INSERTs,
+    so this data structure can easily deal with both.
+
+    The INSERT/UPSERT may have an optional WithClause, and then either a SELECT query
+    (Query) object from whose rows we INSERT, or a VALUES clause, but not both.
+
+    The execution attribute is used by the discrepancy_searcher to track whether this
+    InsertStatement is some sort of setup operation or a true random statement test.
+    """
+    super(InsertStatement, self).__init__()
+    self._select_query = None
+    self._values_clause = None
+    self.execution = execution
+    self.select_query = select_query
+    self.values_clause = values_clause
+    self.with_clause = with_clause
+    self.insert_clause = insert_clause
+
+  @property
+  def select_query(self):
+    return self._select_query
+
+  @select_query.setter
+  def select_query(self, select_query):
+    if self.values_clause is None or select_query is None:
+      self._select_query = select_query
+    else:
+      raise Exception('An INSERT/UPSERT statement may not have both the select_query and '
+                      'values_clause set: {select}; {values}'.format(
+                          select=select_query, values=self.values_clause))
+
+  @property
+  def values_clause(self):
+    return self._values_clause
+
+  @values_clause.setter
+  def values_clause(self, values_clause):
+    if self.select_query is None or values_clause is None:
+      self._values_clause = values_clause
+    else:
+      raise Exception('An INSERT/UPSERT statement may not have both the select_query and '
+                      'values_clause set: {select}; {values}'.format(
+                          select=self.select_query, values=values_clause))
+
+  @property
+  def table_exprs(self):
+    table_exprs = super(InsertStatement, self).table_exprs  # WITH clause
+    if self.select_query is not None:
+      table_exprs.extend(self.select_query.table_exprs)
+    return table_exprs
+
+  @property
+  def nested_queries(self):
+    queries = list()
+    if self.with_clause is not None:
+      for inline_view in self.with_clause.with_clause_inline_views:
+        queries.append(inline_view.query)
+    if self.select_query is not None:
+      queries.append(self.select_query)
+      queries.extend(self.select_query.nested_queries)
+    return queries
+
+  @property
+  def dml_table(self):
+    return self.insert_clause.table
+
+  @property
+  def conflict_action(self):
+    return self.insert_clause.conflict_action
+
+  @property
+  def primary_key_string(self):
+    return '({primary_key_list})'.format(
+        primary_key_list=', '.join(self.insert_clause.table.primary_key_names))
+
+  @property
+  def updatable_column_names(self):
+    return self.insert_clause.table.updatable_column_names

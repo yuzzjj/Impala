@@ -1,11 +1,6 @@
 ====
 ---- QUERY
-use functional
-====
----- QUERY
 # Stats on a partitioned Hdfs table stored as text
-drop stats alltypes;
-compute stats alltypes;
 show table stats alltypes
 ---- LABELS
 YEAR, MONTH, #ROWS, #FILES, SIZE, BYTES CACHED, CACHE REPLICATION, FORMAT, INCREMENTAL STATS, LOCATION
@@ -149,7 +144,7 @@ COLUMN, TYPE, #DISTINCT VALUES, #NULLS, MAX SIZE, AVG SIZE
 'year','INT',2,0,4,4
 'month','INT',12,0,4,4
 ---- TYPES
-STRING, STRING, BIGINT, BIGINT, INT, DOUBLE
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE
 ====
 ---- QUERY
 # Column column stats for a table with complex types.
@@ -174,5 +169,5 @@ COLUMN, TYPE, #DISTINCT VALUES, #NULLS, MAX SIZE, AVG SIZE
 'year','INT',0,0,4,4
 'month','INT',0,0,4,4
 ---- TYPES
-STRING, STRING, BIGINT, BIGINT, INT, DOUBLE
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE
 ====

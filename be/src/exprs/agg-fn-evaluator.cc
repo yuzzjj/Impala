@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "exprs/agg-fn-evaluator.h"
 
@@ -20,10 +23,13 @@
 #include "common/logging.h"
 #include "exec/aggregation-node.h"
 #include "exprs/aggregate-functions.h"
-#include "exprs/expr-context.h"
 #include "exprs/anyval-util.h"
+#include "exprs/expr-context.h"
+#include "exprs/scalar-fn-call.h"
 #include "runtime/lib-cache.h"
+#include "runtime/raw-value.h"
 #include "runtime/runtime-state.h"
+#include "runtime/string-value.inline.h"
 #include "udf/udf-internal.h"
 #include "util/debug-util.h"
 
@@ -34,6 +40,7 @@
 using namespace impala;
 using namespace impala_udf;
 using namespace llvm;
+using std::move;
 
 // typedef for builtin aggregate functions. Unfortunately, these type defs don't
 // really work since the actual builtin is implemented not in terms of the base
@@ -88,6 +95,8 @@ AggFnEvaluator::AggFnEvaluator(const TExprNode& desc, bool is_analytic_fn)
     is_analytic_fn_(is_analytic_fn),
     intermediate_slot_desc_(NULL),
     output_slot_desc_(NULL),
+    arg_type_descs_(AnyValUtil::ColumnTypesToTypeDescs(
+        ColumnType::FromThrift(desc.agg_expr.arg_types))),
     cache_entry_(NULL),
     init_fn_(NULL),
     update_fn_(NULL),
@@ -139,13 +148,19 @@ Status AggFnEvaluator::Prepare(RuntimeState* state, const RowDescriptor& desc,
   RETURN_IF_ERROR(
       Expr::Prepare(input_expr_ctxs_, state, desc, agg_fn_pool->mem_tracker()));
 
-  ObjectPool* obj_pool = state->obj_pool();
   for (int i = 0; i < input_expr_ctxs_.size(); ++i) {
-    staging_input_vals_.push_back(
-        CreateAnyVal(obj_pool, input_expr_ctxs_[i]->root()->type()));
+    AnyVal* staging_input_val;
+    RETURN_IF_ERROR(
+        AllocateAnyVal(state, agg_fn_pool, input_expr_ctxs_[i]->root()->type(),
+            "Could not allocate aggregate expression input value", &staging_input_val));
+    staging_input_vals_.push_back(staging_input_val);
   }
-  staging_intermediate_val_ = CreateAnyVal(obj_pool, intermediate_type());
-  staging_merge_input_val_ = CreateAnyVal(obj_pool, intermediate_type());
+  RETURN_IF_ERROR(AllocateAnyVal(state, agg_fn_pool, intermediate_type(),
+      "Could not allocate aggregate expression intermediate value",
+      &staging_intermediate_val_));
+  RETURN_IF_ERROR(AllocateAnyVal(state, agg_fn_pool, intermediate_type(),
+      "Could not allocate aggregate expression merge input value",
+      &staging_merge_input_val_));
 
   if (is_merge_) {
     DCHECK_EQ(staging_input_vals_.size(), 1) << "Merge should only have 1 input.";
@@ -186,28 +201,15 @@ Status AggFnEvaluator::Prepare(RuntimeState* state, const RowDescriptor& desc,
         &cache_entry_));
   }
   if (!fn_.aggregate_fn.remove_fn_symbol.empty()) {
-    RETURN_IF_ERROR(LibCache::instance()->GetSoFunctionPtr(
-        fn_.hdfs_location, fn_.aggregate_fn.remove_fn_symbol, &remove_fn_,
-        &cache_entry_));
+    RETURN_IF_ERROR(LibCache::instance()->GetSoFunctionPtr(fn_.hdfs_location,
+        fn_.aggregate_fn.remove_fn_symbol, &remove_fn_, &cache_entry_));
   }
   if (!fn_.aggregate_fn.finalize_fn_symbol.empty()) {
-    RETURN_IF_ERROR(LibCache::instance()->GetSoFunctionPtr(
-        fn_.hdfs_location, fn_.aggregate_fn.finalize_fn_symbol, &finalize_fn_,
-        &cache_entry_));
+    RETURN_IF_ERROR(LibCache::instance()->GetSoFunctionPtr(fn_.hdfs_location,
+        fn_.aggregate_fn.finalize_fn_symbol, &finalize_fn_, &cache_entry_));
   }
-
-  vector<FunctionContext::TypeDesc> arg_types;
-  for (int i = 0; i < input_expr_ctxs_.size(); ++i) {
-    arg_types.push_back(
-        AnyValUtil::ColumnTypeToTypeDesc(input_expr_ctxs_[i]->root()->type()));
-  }
-
-  FunctionContext::TypeDesc intermediate_type =
-      AnyValUtil::ColumnTypeToTypeDesc(intermediate_slot_desc_->type());
-  FunctionContext::TypeDesc output_type =
-       AnyValUtil::ColumnTypeToTypeDesc(output_slot_desc_->type());
-  *agg_fn_ctx = FunctionContextImpl::CreateContext(
-      state, agg_fn_pool, intermediate_type, output_type, arg_types);
+  *agg_fn_ctx = FunctionContextImpl::CreateContext(state, agg_fn_pool,
+      GetIntermediateTypeDesc(), GetOutputTypeDesc(), arg_type_descs_);
   return Status::OK();
 }
 
@@ -218,9 +220,12 @@ Status AggFnEvaluator::Open(RuntimeState* state, FunctionContext* agg_fn_ctx) {
   // on them).
   vector<AnyVal*> constant_args(input_expr_ctxs_.size());
   for (int i = 0; i < input_expr_ctxs_.size(); ++i) {
-    constant_args[i] = input_expr_ctxs_[i]->root()->GetConstVal(input_expr_ctxs_[i]);
+    ExprContext* input_ctx = input_expr_ctxs_[i];
+    AnyVal* const_val;
+    RETURN_IF_ERROR(input_ctx->root()->GetConstVal(state, input_ctx, &const_val));
+    constant_args[i] = const_val;
   }
-  agg_fn_ctx->impl()->SetConstantArgs(constant_args);
+  agg_fn_ctx->impl()->SetConstantArgs(move(constant_args));
   return Status::OK();
 }
 
@@ -296,8 +301,7 @@ inline void AggFnEvaluator::SetDstSlot(FunctionContext* ctx, const AnyVal* src,
           // This code seems to trip up clang causing it to generate code that crashes.
           // Be careful when modifying this. See IMPALA-959 for more details.
           // I suspect an issue with xmm registers not reading from aligned memory.
-          memcpy(slot, &reinterpret_cast<const DecimalVal*>(src)->val4,
-              dst_slot_desc->type().GetByteSize());
+          memcpy(slot, &reinterpret_cast<const DecimalVal*>(src)->val16, 16);
 #else
           DCHECK(false) << "Not implemented.";
 #endif
@@ -313,6 +317,8 @@ inline void AggFnEvaluator::SetDstSlot(FunctionContext* ctx, const AnyVal* src,
 // This function would be replaced in codegen.
 void AggFnEvaluator::Init(FunctionContext* agg_fn_ctx, Tuple* dst) {
   DCHECK(init_fn_ != NULL);
+  for (ExprContext* ctx : input_expr_ctxs_) DCHECK(ctx->opened());
+
   if (intermediate_type().type == TYPE_CHAR) {
     // For type char, we want to initialize the staging_intermediate_val_ with
     // a pointer into the tuple (the UDA should not be allocating it).
@@ -337,7 +343,7 @@ static void SetAnyVal(const SlotDescriptor* desc, Tuple* tuple, AnyVal* dst) {
 }
 
 void AggFnEvaluator::Update(
-    FunctionContext* agg_fn_ctx, TupleRow* row, Tuple* dst, void* fn) {
+    FunctionContext* agg_fn_ctx, const TupleRow* row, Tuple* dst, void* fn) {
   if (fn == NULL) return;
 
   SetAnyVal(intermediate_slot_desc_, dst, staging_intermediate_val_);
@@ -503,6 +509,40 @@ void AggFnEvaluator::SerializeOrFinalize(FunctionContext* agg_fn_ctx, Tuple* src
     default:
       DCHECK(false) << "NYI";
   }
+}
+
+/// Gets the update or merge function for this UDA.
+Status AggFnEvaluator::GetUpdateOrMergeFunction(LlvmCodeGen* codegen, Function** uda_fn) {
+  const string& symbol =
+      is_merge_ ? fn_.aggregate_fn.merge_fn_symbol : fn_.aggregate_fn.update_fn_symbol;
+  vector<ColumnType> fn_arg_types;
+  for (ExprContext* input_expr_ctx : input_expr_ctxs_) {
+    fn_arg_types.push_back(input_expr_ctx->root()->type());
+  }
+  // The intermediate value is passed as the last argument.
+  fn_arg_types.push_back(intermediate_type());
+  RETURN_IF_ERROR(codegen->LoadFunction(fn_, symbol, NULL, fn_arg_types,
+      fn_arg_types.size(), false, uda_fn, &cache_entry_));
+
+  // Inline constants into the function body (if there is an IR body).
+  if (!(*uda_fn)->isDeclaration()) {
+    // TODO: IMPALA-4785: we should also replace references to GetIntermediateType()
+    // with constants.
+    codegen->InlineConstFnAttrs(GetOutputTypeDesc(), arg_type_descs_, *uda_fn);
+    *uda_fn = codegen->FinalizeFunction(*uda_fn);
+    if (*uda_fn == NULL) {
+      return Status(TErrorCode::UDF_VERIFY_FAILED, symbol, fn_.hdfs_location);
+    }
+  }
+  return Status::OK();
+}
+
+FunctionContext::TypeDesc AggFnEvaluator::GetIntermediateTypeDesc() const {
+  return AnyValUtil::ColumnTypeToTypeDesc(intermediate_slot_desc_->type());
+}
+
+FunctionContext::TypeDesc AggFnEvaluator::GetOutputTypeDesc() const {
+  return AnyValUtil::ColumnTypeToTypeDesc(output_slot_desc_->type());
 }
 
 string AggFnEvaluator::DebugString(const vector<AggFnEvaluator*>& exprs) {

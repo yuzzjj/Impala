@@ -1,17 +1,21 @@
 #!/usr/bin/env python
-# Copyright 2014 Cloudera Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 import sasl
 import time
@@ -111,6 +115,9 @@ class ImpalaClient(object):
 
     Returns the index of the next exec node in summary.exec_nodes that should be
     processed, used internally to this method only.
+
+    NOTE: This is duplicated in impala_beeswax.py, and changes made here should also be
+    made there.
     """
     attrs = ["latency_ns", "cpu_time_ns", "cardinality", "memory_used"]
 
@@ -138,7 +145,7 @@ class ImpalaClient(object):
     # is the max over all instances (which should all have received the same number of
     # rows). Otherwise, the cardinality is the sum over all instances which process
     # disjoint partitions.
-    if node.is_broadcast and is_fragment_root:
+    if node.is_broadcast:
       cardinality = max_stats.cardinality
     else:
       cardinality = agg_stats.cardinality
@@ -229,10 +236,12 @@ class ImpalaClient(object):
     self.transport.open()
     protocol = TBinaryProtocol.TBinaryProtocol(self.transport)
     self.imp_service = ImpalaService.Client(protocol)
-    result = self.imp_service.PingImpalaService()
-    server_version = result.version
+    result = self.ping_impala_service()
     self.connected = True
-    return server_version
+    return result
+
+  def ping_impala_service(self):
+    return self.imp_service.PingImpalaService()
 
   def close_connection(self):
     """Close the transport if it's still open"""
@@ -251,16 +260,16 @@ class ImpalaClient(object):
     if self.use_ssl:
       # TSSLSocket needs the ssl module, which may not be standard on all Operating
       # Systems. Only attempt to import TSSLSocket if the user wants an SSL connection.
-      from thrift.transport import TSSLSocket
+      from TSSLSocketWithWildcardSAN import TSSLSocketWithWildcardSAN
 
     # sasl does not accept unicode strings, explicitly encode the string into ascii.
     host, port = self.impalad[0].encode('ascii', 'ignore'), int(self.impalad[1])
     if self.use_ssl:
       if self.ca_cert is None:
         # No CA cert means don't try to verify the certificate
-        sock = TSSLSocket.TSSLSocket(host, port, validate=False)
+        sock = TSSLSocketWithWildcardSAN(host, port, validate=False)
       else:
-        sock = TSSLSocket.TSSLSocket(host, port, validate=True, ca_certs=self.ca_cert)
+        sock = TSSLSocketWithWildcardSAN(host, port, validate=True, ca_certs=self.ca_cert)
     else:
       sock = TSocket(host, port)
     if not (self.use_ldap or self.use_kerberos):
@@ -336,8 +345,11 @@ class ImpalaClient(object):
         if not result.has_more:
           break
 
-  def close_insert(self, last_query_handle):
-    """Fetches the results of an INSERT query"""
+  def close_dml(self, last_query_handle):
+    """Fetches the results of a DML query. Returns a tuple containing the
+       number of rows modified and the number of row errors, in that order. If the DML
+       operation doesn't return 'num_row_errors', then the second element in the tuple
+       is None."""
     rpc_result = self._do_rpc(
         lambda: self.imp_service.CloseInsert(last_query_handle))
     insert_result, status = rpc_result
@@ -345,8 +357,8 @@ class ImpalaClient(object):
     if status != RpcStatus.OK:
       raise RPCException()
 
-    num_rows = sum([int(k) for k in insert_result.rows_appended.values()])
-    return num_rows
+    num_rows = sum([int(k) for k in insert_result.rows_modified.values()])
+    return (num_rows, insert_result.num_row_errors)
 
   def close_query(self, last_query_handle, query_handle_closed=False):
     """Close the query handle"""
@@ -441,7 +453,7 @@ class ImpalaClient(object):
 
   def expect_result_metadata(self, query_str):
     """ Given a query string, return True if impalad expects result metadata"""
-    excluded_query_types = ['use', 'alter', 'drop']
+    excluded_query_types = ['use', 'drop']
     if True in set(map(query_str.startswith, excluded_query_types)):
       return False
     return True

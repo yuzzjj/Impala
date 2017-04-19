@@ -1,35 +1,36 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <sstream>
 
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
-#include <llvm/PassManager.h>
+#include <llvm/IR/InstIterator.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Transforms/Utils/UnrollLoop.h>
-#include <llvm/Support/InstIterator.h>
 #include <thrift/protocol/TDebugProtocol.h>
 
 #include "codegen/codegen-anyval.h"
 #include "codegen/llvm-codegen.h"
 #include "common/object-pool.h"
 #include "common/status.h"
-#include "exprs/anyval-util.h"
-#include "exprs/expr.h"
-#include "exprs/expr-context.h"
 #include "exprs/aggregate-functions.h"
+#include "exprs/anyval-util.h"
 #include "exprs/bit-byte-functions.h"
 #include "exprs/case-expr.h"
 #include "exprs/cast-functions.h"
@@ -37,6 +38,8 @@
 #include "exprs/conditional-functions.h"
 #include "exprs/decimal-functions.h"
 #include "exprs/decimal-operators.h"
+#include "exprs/expr-context.h"
+#include "exprs/expr.h"
 #include "exprs/hive-udf-call.h"
 #include "exprs/in-predicate.h"
 #include "exprs/is-not-empty-predicate.h"
@@ -53,13 +56,16 @@
 #include "exprs/tuple-is-null-predicate.h"
 #include "exprs/udf-builtins.h"
 #include "exprs/utility-functions.h"
-#include "gen-cpp/Exprs_types.h"
 #include "gen-cpp/Data_types.h"
+#include "gen-cpp/Exprs_types.h"
 #include "runtime/lib-cache.h"
-#include "runtime/runtime-state.h"
+#include "runtime/mem-tracker.h"
 #include "runtime/raw-value.h"
-#include "udf/udf.h"
+#include "runtime/runtime-state.h"
+#include "runtime/tuple-row.h"
+#include "runtime/tuple.h"
 #include "udf/udf-internal.h"
+#include "udf/udf.h"
 
 #include "gen-cpp/Exprs_types.h"
 #include "gen-cpp/ImpalaService_types.h"
@@ -72,8 +78,6 @@ using namespace llvm;
 namespace impala {
 
 const char* Expr::LLVM_CLASS_NAME = "class.impala::Expr";
-
-const char* Expr::GET_CONSTANT_SYMBOL_PREFIX = "_ZN6impala4Expr11GetConstant";
 
 template<class T>
 bool ParseString(const string& str, T* val) {
@@ -93,8 +97,9 @@ FunctionContext* Expr::RegisterFunctionContext(ExprContext* ctx, RuntimeState* s
   return ctx->fn_context(fn_context_index_);
 }
 
-Expr::Expr(const ColumnType& type, bool is_slotref)
+Expr::Expr(const ColumnType& type, bool is_constant, bool is_slotref)
     : cache_entry_(NULL),
+      is_constant_(is_constant),
       is_slotref_(is_slotref),
       type_(type),
       output_scale_(-1),
@@ -104,6 +109,7 @@ Expr::Expr(const ColumnType& type, bool is_slotref)
 
 Expr::Expr(const TExprNode& node, bool is_slotref)
     : cache_entry_(NULL),
+      is_constant_(node.is_constant),
       is_slotref_(is_slotref),
       type_(ColumnType::FromThrift(node.type)),
       output_scale_(-1),
@@ -199,6 +205,7 @@ Status Expr::CreateExpr(ObjectPool* pool, const TExprNode& texpr_node, Expr** ex
     case TExprNodeType::INT_LITERAL:
     case TExprNodeType::STRING_LITERAL:
     case TExprNodeType::DECIMAL_LITERAL:
+    case TExprNodeType::TIMESTAMP_LITERAL:
       *expr = pool->Add(new Literal(texpr_node));
       return Status::OK();
     case TExprNodeType::CASE_EXPR:
@@ -260,6 +267,16 @@ Status Expr::CreateExpr(ObjectPool* pool, const TExprNode& texpr_node, Expr** ex
       os << "Unknown expr node type: " << texpr_node.node_type;
       return Status(os.str());
   }
+}
+
+bool Expr::NeedCodegen(const TExpr& texpr) {
+  for (const TExprNode& texpr_node : texpr.nodes) {
+    if (texpr_node.node_type == TExprNodeType::FUNCTION_CALL && texpr_node.__isset.fn &&
+        texpr_node.fn.binary_type == TFunctionBinaryType::IR) {
+      return true;
+    }
+  }
+  return false;
 }
 
 struct MemLayoutData {
@@ -429,11 +446,8 @@ string Expr::DebugString(const vector<ExprContext*>& ctxs) {
   return DebugString(exprs);
 }
 
-bool Expr::IsConstant() const {
-  for (int i = 0; i < children_.size(); ++i) {
-    if (!children_[i]->IsConstant()) return false;
-  }
-  return true;
+bool Expr::IsLiteral() const {
+  return false;
 }
 
 int Expr::GetSlotIds(vector<SlotId>* slot_ids) const {
@@ -447,27 +461,27 @@ int Expr::GetSlotIds(vector<SlotId>* slot_ids) const {
 Function* Expr::GetStaticGetValWrapper(ColumnType type, LlvmCodeGen* codegen) {
   switch (type.type) {
     case TYPE_BOOLEAN:
-      return codegen->GetFunction(IRFunction::EXPR_GET_BOOLEAN_VAL);
+      return codegen->GetFunction(IRFunction::EXPR_GET_BOOLEAN_VAL, false);
     case TYPE_TINYINT:
-      return codegen->GetFunction(IRFunction::EXPR_GET_TINYINT_VAL);
+      return codegen->GetFunction(IRFunction::EXPR_GET_TINYINT_VAL, false);
     case TYPE_SMALLINT:
-      return codegen->GetFunction(IRFunction::EXPR_GET_SMALLINT_VAL);
+      return codegen->GetFunction(IRFunction::EXPR_GET_SMALLINT_VAL, false);
     case TYPE_INT:
-      return codegen->GetFunction(IRFunction::EXPR_GET_INT_VAL);
+      return codegen->GetFunction(IRFunction::EXPR_GET_INT_VAL, false);
     case TYPE_BIGINT:
-      return codegen->GetFunction(IRFunction::EXPR_GET_BIGINT_VAL);
+      return codegen->GetFunction(IRFunction::EXPR_GET_BIGINT_VAL, false);
     case TYPE_FLOAT:
-      return codegen->GetFunction(IRFunction::EXPR_GET_FLOAT_VAL);
+      return codegen->GetFunction(IRFunction::EXPR_GET_FLOAT_VAL, false);
     case TYPE_DOUBLE:
-      return codegen->GetFunction(IRFunction::EXPR_GET_DOUBLE_VAL);
+      return codegen->GetFunction(IRFunction::EXPR_GET_DOUBLE_VAL, false);
     case TYPE_STRING:
     case TYPE_CHAR:
     case TYPE_VARCHAR:
-      return codegen->GetFunction(IRFunction::EXPR_GET_STRING_VAL);
+      return codegen->GetFunction(IRFunction::EXPR_GET_STRING_VAL, false);
     case TYPE_TIMESTAMP:
-      return codegen->GetFunction(IRFunction::EXPR_GET_TIMESTAMP_VAL);
+      return codegen->GetFunction(IRFunction::EXPR_GET_TIMESTAMP_VAL, false);
     case TYPE_DECIMAL:
-      return codegen->GetFunction(IRFunction::EXPR_GET_DECIMAL_VAL);
+      return codegen->GetFunction(IRFunction::EXPR_GET_DECIMAL_VAL, false);
     default:
       DCHECK(false) << "Invalid type: " << type.DebugString();
       return NULL;
@@ -506,135 +520,78 @@ void Expr::InitBuiltinsDummy() {
   MathFunctions::Pi(NULL);
   StringFunctions::Length(NULL, StringVal::null());
   TimestampFunctions::Year(NULL, TimestampVal::null());
+  TimestampFunctions::UnixAndFromUnixPrepare(NULL, FunctionContext::FRAGMENT_LOCAL);
   UdfBuiltins::Pi(NULL);
   UtilityFunctions::Pid(NULL);
 }
 
-AnyVal* Expr::GetConstVal(ExprContext* context) {
+Status Expr::GetConstVal(
+    RuntimeState* state, ExprContext* context, AnyVal** const_val) {
   DCHECK(context->opened_);
-  if (!IsConstant()) return NULL;
-  if (constant_val_.get() != NULL) return constant_val_.get();
+  if (!is_constant()) {
+    *const_val = NULL;
+    return Status::OK();
+  }
 
+  RETURN_IF_ERROR(AllocateAnyVal(state, context->pool_.get(), type_,
+      "Could not allocate constant expression value", const_val));
   switch (type_.type) {
-    case TYPE_BOOLEAN: {
-      constant_val_.reset(new BooleanVal(GetBooleanVal(context, NULL)));
+    case TYPE_BOOLEAN:
+      *reinterpret_cast<BooleanVal*>(*const_val) = GetBooleanVal(context, NULL);
       break;
-    }
-    case TYPE_TINYINT: {
-      constant_val_.reset(new TinyIntVal(GetTinyIntVal(context, NULL)));
+    case TYPE_TINYINT:
+      *reinterpret_cast<TinyIntVal*>(*const_val) = GetTinyIntVal(context, NULL);
       break;
-    }
-    case TYPE_SMALLINT: {
-      constant_val_.reset(new SmallIntVal(GetSmallIntVal(context, NULL)));
+    case TYPE_SMALLINT:
+      *reinterpret_cast<SmallIntVal*>(*const_val) = GetSmallIntVal(context, NULL);
       break;
-    }
-    case TYPE_INT: {
-      constant_val_.reset(new IntVal(GetIntVal(context, NULL)));
+    case TYPE_INT:
+      *reinterpret_cast<IntVal*>(*const_val) = GetIntVal(context, NULL);
       break;
-    }
-    case TYPE_BIGINT: {
-      constant_val_.reset(new BigIntVal(GetBigIntVal(context, NULL)));
+    case TYPE_BIGINT:
+      *reinterpret_cast<BigIntVal*>(*const_val) = GetBigIntVal(context, NULL);
       break;
-    }
-    case TYPE_FLOAT: {
-      constant_val_.reset(new FloatVal(GetFloatVal(context, NULL)));
+    case TYPE_FLOAT:
+      *reinterpret_cast<FloatVal*>(*const_val) = GetFloatVal(context, NULL);
       break;
-    }
-    case TYPE_DOUBLE: {
-      constant_val_.reset(new DoubleVal(GetDoubleVal(context, NULL)));
+    case TYPE_DOUBLE:
+      *reinterpret_cast<DoubleVal*>(*const_val) = GetDoubleVal(context, NULL);
       break;
-    }
     case TYPE_STRING:
     case TYPE_CHAR:
     case TYPE_VARCHAR: {
-      constant_val_.reset(new StringVal(GetStringVal(context, NULL)));
+      StringVal* sv = reinterpret_cast<StringVal*>(*const_val);
+      *sv = GetStringVal(context, NULL);
+      if (sv->len > 0) {
+        // Make sure the memory is owned by 'context'.
+        uint8_t* ptr_copy = context->pool_->TryAllocate(sv->len);
+        if (ptr_copy == NULL) {
+          return context->pool_->mem_tracker()->MemLimitExceeded(
+              state, "Could not allocate constant string value", sv->len);
+        }
+        memcpy(ptr_copy, sv->ptr, sv->len);
+        sv->ptr = ptr_copy;
+      }
       break;
     }
-    case TYPE_TIMESTAMP: {
-      constant_val_.reset(new TimestampVal(GetTimestampVal(context, NULL)));
+    case TYPE_TIMESTAMP:
+      *reinterpret_cast<TimestampVal*>(*const_val) = GetTimestampVal(context, NULL);
       break;
-    }
-    case TYPE_DECIMAL: {
-      constant_val_.reset(new DecimalVal(GetDecimalVal(context, NULL)));
+    case TYPE_DECIMAL:
+      *reinterpret_cast<DecimalVal*>(*const_val) = GetDecimalVal(context, NULL);
       break;
-    }
     default:
       DCHECK(false) << "Type not implemented: " << type();
   }
-  DCHECK(constant_val_.get() != NULL);
-  return constant_val_.get();
+  // Errors may have been set during expr evaluation.
+  return GetFnContextError(context);
 }
 
-
-template<> int Expr::GetConstant(const FunctionContext& ctx, ExprConstant c, int i) {
-  switch (c) {
-    case RETURN_TYPE_SIZE:
-      DCHECK_EQ(i, -1);
-      return AnyValUtil::TypeDescToColumnType(ctx.GetReturnType()).GetByteSize();
-    case ARG_TYPE_SIZE:
-      DCHECK_GE(i, 0);
-      DCHECK_LT(i, ctx.GetNumArgs());
-      return AnyValUtil::TypeDescToColumnType(*ctx.GetArgType(i)).GetByteSize();
-    default:
-      CHECK(false) << "NYI";
-      return -1;
-  }
-}
-
-Value* Expr::GetIrConstant(LlvmCodeGen* codegen, ExprConstant c, int i) {
-  switch (c) {
-    case RETURN_TYPE_SIZE:
-      DCHECK_EQ(i, -1);
-      return ConstantInt::get(codegen->GetType(TYPE_INT), type_.GetByteSize());
-    case ARG_TYPE_SIZE:
-      DCHECK_GE(i, 0);
-      DCHECK_LT(i, children_.size());
-      return ConstantInt::get(
-          codegen->GetType(TYPE_INT), children_[i]->type_.GetByteSize());
-    default:
-      CHECK(false) << "NYI";
-      return NULL;
-  }
-}
-
-int Expr::InlineConstants(LlvmCodeGen* codegen, Function* fn) {
-  int replaced = 0;
-  for (inst_iterator iter = inst_begin(fn), end = inst_end(fn); iter != end; ) {
-    // Increment iter now so we don't mess it up modifying the instrunction below
-    Instruction* instr = &*(iter++);
-
-    // Look for call instructions
-    if (!isa<CallInst>(instr)) continue;
-    CallInst* call_instr = cast<CallInst>(instr);
-    Function* called_fn = call_instr->getCalledFunction();
-
-    // Look for call to Expr::GetConstant()
-    if (called_fn == NULL ||
-        called_fn->getName().find(GET_CONSTANT_SYMBOL_PREFIX) == string::npos) continue;
-
-    // 'c' and 'i' arguments must be constant
-    ConstantInt* c_arg = dyn_cast<ConstantInt>(call_instr->getArgOperand(1));
-    ConstantInt* i_arg = dyn_cast<ConstantInt>(call_instr->getArgOperand(2));
-    DCHECK(c_arg != NULL) << "Non-constant 'c' argument to Expr::GetConstant()";
-    DCHECK(i_arg != NULL) << "Non-constant 'i' argument to Expr::GetConstant()";
-
-    // Replace the called function with the appropriate constant
-    ExprConstant c_val = static_cast<ExprConstant>(c_arg->getSExtValue());
-    int i_val = static_cast<int>(i_arg->getSExtValue());
-    call_instr->replaceAllUsesWith(GetIrConstant(codegen, c_val, i_val));
-    call_instr->eraseFromParent();
-    ++replaced;
-  }
-  return replaced;
-}
-
-Status Expr::GetCodegendComputeFnWrapper(RuntimeState* state, Function** fn) {
+Status Expr::GetCodegendComputeFnWrapper(LlvmCodeGen* codegen, Function** fn) {
   if (ir_compute_fn_ != NULL) {
     *fn = ir_compute_fn_;
     return Status::OK();
   }
-  LlvmCodeGen* codegen;
-  RETURN_IF_ERROR(state->GetCodegen(&codegen));
   Function* static_getval_fn = GetStaticGetValWrapper(type(), codegen);
 
   // Call it passing this as the additional first argument.
@@ -642,10 +599,10 @@ Status Expr::GetCodegendComputeFnWrapper(RuntimeState* state, Function** fn) {
   ir_compute_fn_ = CreateIrFunctionPrototype(codegen, "CodegenComputeFnWrapper", &args);
   BasicBlock* entry_block =
       BasicBlock::Create(codegen->context(), "entry", ir_compute_fn_);
-  LlvmCodeGen::LlvmBuilder builder(entry_block);
+  LlvmBuilder builder(entry_block);
   Value* this_ptr =
       codegen->CastPtrToLlvmPtr(codegen->GetPtrType(Expr::LLVM_CLASS_NAME), this);
-  Value* compute_fn_args[] = { this_ptr, args[0], args[1] };
+  Value* compute_fn_args[] = {this_ptr, args[0], args[1]};
   Value* ret = CodegenAnyVal::CreateCall(
       codegen, &builder, static_getval_fn, compute_fn_args, "ret");
   builder.CreateRet(ret);
@@ -655,47 +612,47 @@ Status Expr::GetCodegendComputeFnWrapper(RuntimeState* state, Function** fn) {
 }
 
 // At least one of these should always be subclassed.
-BooleanVal Expr::GetBooleanVal(ExprContext* context, TupleRow* row) {
+BooleanVal Expr::GetBooleanVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return BooleanVal::null();
 }
-TinyIntVal Expr::GetTinyIntVal(ExprContext* context, TupleRow* row) {
+TinyIntVal Expr::GetTinyIntVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return TinyIntVal::null();
 }
-SmallIntVal Expr::GetSmallIntVal(ExprContext* context, TupleRow* row) {
+SmallIntVal Expr::GetSmallIntVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return SmallIntVal::null();
 }
-IntVal Expr::GetIntVal(ExprContext* context, TupleRow* row) {
+IntVal Expr::GetIntVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return IntVal::null();
 }
-BigIntVal Expr::GetBigIntVal(ExprContext* context, TupleRow* row) {
+BigIntVal Expr::GetBigIntVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return BigIntVal::null();
 }
-FloatVal Expr::GetFloatVal(ExprContext* context, TupleRow* row) {
+FloatVal Expr::GetFloatVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return FloatVal::null();
 }
-DoubleVal Expr::GetDoubleVal(ExprContext* context, TupleRow* row) {
+DoubleVal Expr::GetDoubleVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return DoubleVal::null();
 }
-StringVal Expr::GetStringVal(ExprContext* context, TupleRow* row) {
+StringVal Expr::GetStringVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return StringVal::null();
 }
-CollectionVal Expr::GetCollectionVal(ExprContext* context, TupleRow* row) {
+CollectionVal Expr::GetCollectionVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return CollectionVal::null();
 }
-TimestampVal Expr::GetTimestampVal(ExprContext* context, TupleRow* row) {
+TimestampVal Expr::GetTimestampVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return TimestampVal::null();
 }
-DecimalVal Expr::GetDecimalVal(ExprContext* context, TupleRow* row) {
+DecimalVal Expr::GetDecimalVal(ExprContext* context, const TupleRow* row) {
   DCHECK(false) << DebugString();
   return DecimalVal::null();
 }
@@ -706,6 +663,12 @@ Status Expr::GetFnContextError(ExprContext* ctx) {
     if (fn_ctx->has_error()) return Status(fn_ctx->error_msg());
   }
   return Status::OK();
+}
+
+string Expr::DebugString(const string& expr_name) const {
+  stringstream out;
+  out << expr_name << "(" << Expr::DebugString() << ")";
+  return out.str();
 }
 
 }

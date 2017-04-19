@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "util/codec.h"
 
@@ -48,8 +51,7 @@ const Codec::CodecMap Codec::CODEC_MAP = map_list_of
   (SNAPPY_COMPRESSION, THdfsCompression::SNAPPY_BLOCKED);
 
 string Codec::GetCodecName(THdfsCompression::type type) {
-  BOOST_FOREACH(const CodecMap::value_type& codec,
-      g_CatalogObjects_constants.COMPRESSION_MAP) {
+  for (const CodecMap::value_type& codec: g_CatalogObjects_constants.COMPRESSION_MAP) {
     if (codec.second == type) return codec.first;
   }
   DCHECK(false) << "Missing codec in COMPRESSION_MAP: " << type;
@@ -57,7 +59,7 @@ string Codec::GetCodecName(THdfsCompression::type type) {
 }
 
 Status Codec::GetHadoopCodecClassName(THdfsCompression::type type, string* out_name) {
-  BOOST_FOREACH(const CodecMap::value_type& codec, CODEC_MAP) {
+  for (const CodecMap::value_type& codec: CODEC_MAP) {
     if (codec.second == type) {
       out_name->assign(codec.first);
       return Status::OK();
@@ -161,11 +163,12 @@ Status Codec::CreateDecompressor(MemPool* mem_pool, bool reuse,
   return (*decompressor)->Init();
 }
 
-Codec::Codec(MemPool* mem_pool, bool reuse_buffer)
+Codec::Codec(MemPool* mem_pool, bool reuse_buffer, bool supports_streaming)
   : memory_pool_(mem_pool),
     reuse_buffer_(reuse_buffer),
     out_buffer_(NULL),
-    buffer_length_(0) {
+    buffer_length_(0),
+    supports_streaming_(supports_streaming) {
   if (memory_pool_ != NULL) {
     temp_memory_pool_.reset(new MemPool(memory_pool_->mem_tracker()));
   }
@@ -182,15 +185,13 @@ Status Codec::ProcessBlock32(bool output_preallocated, int input_length,
     const uint8_t* input, int* output_length, uint8_t** output) {
   int64_t input_len64 = input_length;
   int64_t output_len64 = *output_length;
-  RETURN_IF_ERROR(ProcessBlock(output_preallocated, input_len64, input, &output_len64,
-                               output));
-  // Check whether we are going to have an overflow if we are going to cast from int64_t
-  // to int.
-  // TODO: Is there a faster way to do this check?
-  if (UNLIKELY(output_len64 > numeric_limits<int>::max())) {
+  RETURN_IF_ERROR(
+      ProcessBlock(output_preallocated, input_len64, input, &output_len64, output));
+  // Buffer size should be between [0, (2^31 - 1)] bytes.
+  if (UNLIKELY(!BitUtil::IsNonNegative32Bit(output_len64))) {
     return Status(Substitute("Arithmetic overflow in codec function. Output length is $0",
         output_len64));;
   }
-  *output_length = static_cast<int32_t>(output_len64);
+  *output_length = static_cast<int>(output_len64);
   return Status::OK();
 }

@@ -1,16 +1,19 @@
-// Copyright 2013 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_RUNTIME_SORTER_H_
 #define IMPALA_RUNTIME_SORTER_H_
@@ -46,30 +49,31 @@ class RowBatch;
 /// AddBatch(), InputDone() and GetNext() must be called in that order.
 //
 /// Batches of input rows are collected into a sequence of pinned BufferedBlockMgr blocks
-/// called a run. The maximum size of a run is determined by the maximum available buffers
-/// in the block manager. After the run is full, it is sorted in memory, unpinned and the
-/// next run is collected.  The variable-length column data (e.g. string slots) in the
-/// materialized sort tuples are stored in separate sequence of blocks from the tuples
-/// themselves.
-/// When the blocks containing tuples in a run are unpinned, the var-len slot pointers are
-/// converted to offsets from the start of the first var-len data block. When a block is
-/// read back, these offsets are converted back to pointers.
+/// called a run. The maximum size of a run is determined by the number of blocks that
+/// can be pinned by the Sorter. After the run is full, it is sorted in memory, unpinned
+/// and the next run is constructed. The variable-length column data (e.g. string slots)
+/// in the materialized sort tuples are stored in a separate sequence of blocks from the
+/// tuples themselves.  When the blocks containing tuples in a run are unpinned, the
+/// var-len slot pointers are converted to offsets from the start of the first var-len
+/// data block. When a block is read back, these offsets are converted back to pointers.
 /// The in-memory sorter sorts the fixed-length tuples in-place. The output rows have the
 /// same schema as the materialized sort tuples.
 //
-/// After the input is consumed, the sorter is left with one or more sorted runs. The
-/// client calls GetNext(output_batch) to retrieve batches of sorted rows. If there are
-/// multiple runs, the runs are merged using SortedRunMerger to produce a stream of sorted
-/// tuples. At least one block per run (two if there are var-length slots) must be pinned
-/// in memory during a merge, so multiple merges may be necessary if the number of runs is
-/// too large. During a merge, rows from multiple sorted input runs are compared and copied
-/// into a single larger run. One input batch is created to hold tuple rows for each
+/// After the input is consumed, the sorter is left with one or more sorted runs. If
+/// there are multiple runs, the runs are merged using SortedRunMerger. At least one
+/// block per run (two if there are var-length slots) must be pinned in memory during
+/// a merge, so multiple merges may be necessary if the number of runs is too large.
+/// First a series of intermediate merges are performed, until the number of runs is
+/// small enough to do a single final merge that returns batches of sorted rows to the
+/// caller of GetNext().
+///
+/// If there is a single sorted run (i.e. no merge required), only tuple rows are
+/// copied into the output batch supplied by GetNext(), and the data itself is left in
+/// pinned blocks held by the sorter.
+///
+/// When merges are performed, one input batch is created to hold tuple rows for each
 /// input run, and one batch is created to hold deep copied rows (i.e. ptrs + data) from
 /// the output of the merge.
-//
-/// If there is a single sorted run (i.e. no merge required), only tuple rows are
-/// copied into the output batch supplied by GetNext, and the data itself is left in
-/// pinned blocks held by the sorter.
 //
 /// Note that Init() must be called right after the constructor.
 //
@@ -115,44 +119,48 @@ class Sorter {
   /// may or may not have been called.
   Status Reset();
 
-  /// Estimate the memory overhead in bytes for an intermediate merge, based on the
-  /// maximum number of memory buffers available for the sort, the row descriptor for
-  /// the sorted tuples and the batch size used (in rows).
-  /// This is a pessimistic estimate of the memory needed by the sorter in addition to the
-  /// memory used by the block buffer manager. The memory overhead is 0 if the input fits
-  /// in memory. Merges incur additional memory overhead because row batches are created
-  /// to hold tuple rows from the input runs, and the merger itself deep-copies
-  /// sort-merged rows into its output batch.
-  static uint64_t EstimateMergeMem(uint64_t available_blocks, RowDescriptor* row_desc,
-      int merge_batch_size);
+  /// Close the Sorter and free resources.
+  void Close();
 
  private:
   class Run;
+  class TupleIterator;
   class TupleSorter;
 
-  /// Create a SortedRunMerger from the first 'num_runs' sorted runs in sorted_runs_ and
-  /// assign it to merger_. The runs to be merged are removed from sorted_runs_.
-  /// The Sorter sets the deep_copy_input flag to true for the merger, since the blocks
-  /// containing input run data will be unpinned as input runs are read.
-  Status CreateMerger(int num_runs);
+  /// Create a SortedRunMerger from sorted runs in 'sorted_runs_' and assign it to
+  /// 'merger_'. Attempts to set up merger with 'max_num_runs' runs but may set it
+  /// up with fewer if it cannot pin the initial blocks of all of the runs. Fails
+  /// if it cannot merge at least two runs. The runs to be merged are removed from
+  /// 'sorted_runs_'.  The Sorter sets the 'deep_copy_input' flag to true for the
+  /// merger, since the blocks containing input run data will be deleted as input
+  /// runs are read.
+  Status CreateMerger(int max_num_runs);
 
   /// Repeatedly replaces multiple smaller runs in sorted_runs_ with a single larger
-  /// merged run until the number of remaining runs is small enough for a single merge.
+  /// merged run until there are few enough runs to be merged with a single merger.
+  /// Returns when 'merger_' is set up to merge the final runs.
   /// At least 1 (2 if var-len slots) block from each sorted run must be pinned for
   /// a merge. If the number of sorted runs is too large, merge sets of smaller runs
   /// into large runs until a final merge can be performed. An intermediate row batch
   /// containing deep copied rows is used for the output of each intermediate merge.
   Status MergeIntermediateRuns();
 
-  /// Sorts unsorted_run_ and appends it to the list of sorted runs. Deletes any empty
-  /// blocks at the end of the run. Updates the sort bytes counter if necessary.
-  Status SortRun();
+  /// Execute a single step of the intermediate merge, pulling rows from 'merger_'
+  /// and adding them to 'merged_run'.
+  Status ExecuteIntermediateMerge(Sorter::Run* merged_run);
+
+  /// Called once there no more rows to be added to 'unsorted_run_'. Sorts
+  /// 'unsorted_run_' and appends it to the list of sorted runs.
+  Status SortCurrentInputRun();
+
+  /// Helper that cleans up all runs in the sorter.
+  void CleanupAllRuns();
 
   /// Runtime state instance used to check for cancellation. Not owned.
   RuntimeState* const state_;
 
   /// In memory sorter and less-than comparator.
-  TupleRowComparator compare_less_than_;
+  const TupleRowComparator& compare_less_than_;
   boost::scoped_ptr<TupleSorter> in_mem_tuple_sorter_;
 
   /// Block manager object used to allocate, pin and release runs. Not owned by Sorter.
@@ -186,7 +194,7 @@ class Sorter {
 
   /// List of sorted runs that have been produced but not merged. unsorted_run_ is added
   /// to this list after an in-memory sort. Sorted runs produced by intermediate merges
-  /// are also added to this list. Runs are added to the object pool.
+  /// are also added to this list during the merge. Runs are added to the object pool.
   std::deque<Run*> sorted_runs_;
 
   /// Merger object (intermediate or final) currently used to produce sorted runs.
@@ -198,6 +206,10 @@ class Sorter {
   /// These runs can be deleted when we are done with the current merge.
   std::deque<Run*> merging_runs_;
 
+  /// Output run for the merge. Stored in Sorter() so that it can be cleaned up
+  /// in Sorter::Close() in case of errors.
+  Run* merge_output_run_;
+
   /// Pool of owned Run objects. Maintains Runs objects across non-freeing Reset() calls.
   ObjectPool obj_pool_;
 
@@ -206,9 +218,21 @@ class Sorter {
 
   /// Runtime profile and counters for this sorter instance.
   RuntimeProfile* profile_;
+
+  /// Number of initial runs created.
   RuntimeProfile::Counter* initial_runs_counter_;
+
+  /// Number of runs that were unpinned and may have spilled to disk, including initial
+  /// and intermediate runs.
+  RuntimeProfile::Counter* spilled_runs_counter_;
+
+  /// Number of merges of sorted runs.
   RuntimeProfile::Counter* num_merges_counter_;
+
+  /// Time spent sorting initial runs in memory.
   RuntimeProfile::Counter* in_mem_sort_timer_;
+
+  /// Total size of the initial runs in bytes.
   RuntimeProfile::Counter* sorted_data_size_;
 };
 

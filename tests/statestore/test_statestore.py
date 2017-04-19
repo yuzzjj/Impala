@@ -1,31 +1,32 @@
-# Copyright (c) 2015 Cloudera, Inc. All rights reserved.
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
-import pytest
-import os
-import time
-import threading
-import socket
-import uuid
-import urllib2
 import json
+import socket
+import threading
+import time
+import urllib2
+import uuid
 
-from thrift.transport import TSocket
-from thrift.transport import TTransport
+from Types.ttypes import TNetworkAddress
 from thrift.protocol import TBinaryProtocol
 from thrift.server.TServer import TServer
-from Types.ttypes import TNetworkAddress
+from thrift.transport import TSocket
+from thrift.transport import TTransport
 
 import StatestoreService.StatestoreSubscriber as Subscriber
 import StatestoreService.StatestoreService as Statestore
@@ -33,6 +34,8 @@ from StatestoreService.StatestoreSubscriber import TUpdateStateResponse
 from StatestoreService.StatestoreSubscriber import TTopicRegistration
 from ErrorCodes.ttypes import TErrorCode
 from Status.ttypes import TStatus
+
+from tests.common.environ import specific_build_type_timeout
 
 # Tests for the statestore. The StatestoreSubscriber class is a skeleton implementation of
 # a Python-based statestore subscriber with additional hooks to allow testing. Each
@@ -58,6 +61,9 @@ def get_statestore_subscribers(host='localhost', port=25010):
 STATUS_OK = TStatus(TErrorCode.OK)
 DEFAULT_UPDATE_STATE_RESPONSE = TUpdateStateResponse(status=STATUS_OK, topic_updates=[],
                                                      skipped=False)
+
+# IMPALA-3501: the timeout needs to be higher in code coverage builds
+WAIT_FOR_FAILURE_TIMEOUT = specific_build_type_timeout(40, code_coverage_build_timeout=60)
 
 class WildcardServerSocket(TSocket.TSocketBase, TTransport.TServerTransportBase):
   """Specialised server socket that binds to a random port at construction"""
@@ -292,7 +298,8 @@ class StatestoreSubscriber(object):
     finally:
       self.update_event.release()
 
-  def wait_for_failure(self, timeout=40):
+
+  def wait_for_failure(self, timeout=WAIT_FOR_FAILURE_TIMEOUT):
     """Waits until this subscriber no longer appears in the statestore's subscriber
     list. If 'timeout' seconds pass, throws an exception."""
     start = time.time()

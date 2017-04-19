@@ -1,24 +1,28 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #ifndef IMPALA_EXPRS_EXPR_VALUE_H
 #define IMPALA_EXPRS_EXPR_VALUE_H
 
 #include "runtime/collection-value.h"
 #include "runtime/decimal-value.h"
-#include "runtime/string-value.h"
+#include "runtime/string-value.inline.h"
 #include "runtime/timestamp-value.h"
+#include "util/decimal-util.h"
 
 namespace impala {
 
@@ -63,10 +67,9 @@ struct ExprValue {
   ExprValue(double v) : double_val(v) {}
   ExprValue(int64_t t, int64_t n) : timestamp_val(t, n) {}
 
-  /// c'tor for string values
-  ExprValue(const std::string& str)
-    : string_data(str) {
-    string_val.ptr = const_cast<char*>(string_data.data());
+  void Init(const std::string& str) {
+    string_data = str;
+    string_val.ptr = &string_data[0];
     string_val.len = string_data.size();
   }
 
@@ -194,6 +197,8 @@ struct ExprValue {
 
  private:
   std::string string_data; // Stores the data for string_val if necessary.
+
+  DISALLOW_COPY_AND_ASSIGN(ExprValue);
 };
 
 }

@@ -1,10 +1,24 @@
-# Copyright (c) 2012 Cloudera, Inc. All rights reserved.
-# Unit tests for the test file parser
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-import logging
-import pytest
-from tests.util.test_file_parser import *
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Unit tests for the test file parser
+
 from tests.common.base_test_suite import BaseTestSuite
+from tests.util.test_file_parser import parse_test_file_text
 
 test_text = """
 # Text before in the header (before the first ====) should be ignored
@@ -50,8 +64,8 @@ class TestTestFileParser(BaseTestSuite):
     results = parse_test_file_text(test_text, VALID_SECTIONS)
     assert len(results) == 3
     print results[0]
-    expected_results = {'QUERY': '# comment\nSELECT blah from Foo\ns',
-                        'TYPES': 'string', 'RESULTS': "'Hi'"}
+    expected_results = {'QUERY': '# comment\nSELECT blah from Foo\ns\n',
+                        'TYPES': 'string\n', 'RESULTS': "'Hi'\n"}
     assert results[0] == expected_results
 
   def test_invalid_section(self):
@@ -59,8 +73,8 @@ class TestTestFileParser(BaseTestSuite):
     valid_sections = ['QUERY', 'RESULTS']
     results = parse_test_file_text(test_text, valid_sections, skip_unknown_sections=True)
     assert len(results) == 3
-    expected_results = {'QUERY': '# comment\nSELECT blah from Foo\ns',
-                        'RESULTS': "'Hi'"}
+    expected_results = {'QUERY': '# comment\nSELECT blah from Foo\ns\n',
+                        'RESULTS': "'Hi'\n"}
     assert results[0] == expected_results
 
     # In this case, instead of ignoring the invalid section we should get an error
@@ -74,20 +88,20 @@ class TestTestFileParser(BaseTestSuite):
   def test_parse_query_name(self):
     results = parse_test_file_text(test_text, VALID_SECTIONS, False)
     assert len(results) == 3
-    expected_results = {'QUERY': 'SELECT int_col from Bar',
-                        'TYPES': 'int', 'RESULTS': '231',
+    expected_results = {'QUERY': 'SELECT int_col from Bar\n',
+                        'TYPES': 'int\n', 'RESULTS': '231\n',
                         'QUERY_NAME': 'TEST_WORKLOAD_Q2'}
     assert results[2] == expected_results
 
   def test_parse_commented_out_test_as_comment(self):
     results = parse_test_file_text(test_text, VALID_SECTIONS)
     assert len(results) == 3
-    expected_results = {'QUERY': 'SELECT 2', 'RESULTS': "'Hello'",
+    expected_results = {'QUERY': 'SELECT 2\n', 'RESULTS': "'Hello'\n",
                         'TYPES': "string\n#====\n"\
-                        "# SHOULD PARSE COMMENTED OUT TEST PROPERLY\n"\
-                        "#---- QUERY: TEST_WORKLOAD_Q2\n"\
-                        "#SELECT int_col from Bar\n"\
-                        "#---- RESULTS\n#231\n#---- TYPES\n#int"}
+                        "# SHOULD PARSE COMMENTED OUT TEST PROPERLY\n"
+                        "#---- QUERY: TEST_WORKLOAD_Q2\n"
+                        "#SELECT int_col from Bar\n"
+                        "#---- RESULTS\n#231\n#---- TYPES\n#int\n"}
     print expected_results
     print results[1]
     assert results[1] == expected_results

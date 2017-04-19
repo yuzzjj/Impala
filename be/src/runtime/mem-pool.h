@@ -1,29 +1,33 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_RUNTIME_MEM_POOL_H
 #define IMPALA_RUNTIME_MEM_POOL_H
 
 #include <stdio.h>
+
 #include <algorithm>
-#include <vector>
+#include <cstddef>
 #include <string>
+#include <vector>
 
 #include "common/logging.h"
 #include "util/bit-util.h"
-#include "util/runtime-profile.h"
 
 namespace impala {
 
@@ -43,10 +47,17 @@ class MemTracker;
 /// recently added; if that chunk doesn't have enough memory to
 /// satisfy the allocation request, the free chunks are searched for one that is
 /// big enough otherwise a new chunk is added to the list.
-/// The current_chunk_idx_ always points to the last chunk with allocated memory.
 /// In order to keep allocation overhead low, chunk sizes double with each new one
 /// added, until they hit a maximum size.
-//
+///
+/// Allocated chunks can be reused for new allocations if Clear() is called to free
+/// all allocations or ReturnPartialAllocation() is called to return part of the last
+/// allocation.
+///
+/// All chunks before 'current_chunk_idx_' have allocated memory, while all chunks
+/// after 'current_chunk_idx_' are free. The chunk at 'current_chunk_idx_' may or may
+/// not have allocated memory.
+///
 ///     Example:
 ///     MemPool* p = new MemPool();
 ///     for (int i = 0; i < 1024; ++i) {
@@ -84,31 +95,45 @@ class MemPool {
   /// from the registered limits.
   ~MemPool();
 
-  /// Allocates 8-byte aligned section of memory of 'size' bytes at the end
+  /// Allocates a section of memory of 'size' bytes with DEFAULT_ALIGNMENT at the end
   /// of the the current chunk. Creates a new chunk if there aren't any chunks
   /// with enough capacity.
-  uint8_t* Allocate(int size) {
-    return Allocate<false>(size);
+  uint8_t* Allocate(int64_t size) noexcept {
+    return Allocate<false>(size, DEFAULT_ALIGNMENT);
   }
 
   /// Same as Allocate() except the mem limit is checked before the allocation and
   /// this call will fail (returns NULL) if it does.
   /// The caller must handle the NULL case. This should be used for allocations
   /// where the size can be very big to bound the amount by which we exceed mem limits.
-  uint8_t* TryAllocate(int size) {
-    return Allocate<true>(size);
+  uint8_t* TryAllocate(int64_t size) noexcept {
+    return Allocate<true>(size, DEFAULT_ALIGNMENT);
+  }
+
+  /// Same as TryAllocate() except a non-default alignment can be specified. It
+  /// should be a power-of-two in [1, alignof(std::max_align_t)].
+  uint8_t* TryAllocateAligned(int64_t size, int alignment) noexcept {
+    DCHECK_GE(alignment, 1);
+    DCHECK_LE(alignment, alignof(std::max_align_t));
+    DCHECK_EQ(BitUtil::RoundUpToPowerOfTwo(alignment), alignment);
+    return Allocate<true>(size, alignment);
   }
 
   /// Returns 'byte_size' to the current chunk back to the mem pool. This can
   /// only be used to return either all or part of the previous allocation returned
   /// by Allocate().
-  void ReturnPartialAllocation(int byte_size) {
+  void ReturnPartialAllocation(int64_t byte_size) {
     DCHECK_GE(byte_size, 0);
     DCHECK(current_chunk_idx_ != -1);
     ChunkInfo& info = chunks_[current_chunk_idx_];
     DCHECK_GE(info.allocated_bytes, byte_size);
     info.allocated_bytes -= byte_size;
     total_allocated_bytes_ -= byte_size;
+  }
+
+  /// Return a dummy pointer for zero-length allocations.
+  static uint8_t* EmptyAllocPtr() {
+    return reinterpret_cast<uint8_t*>(&zero_length_region_);
   }
 
   /// Makes all allocated chunks available for re-use, but doesn't delete any chunks.
@@ -137,6 +162,8 @@ class MemPool {
   /// For C++/IR interop, we need to be able to look up types by name.
   static const char* LLVM_CLASS_NAME;
 
+  static const int DEFAULT_ALIGNMENT = 8;
+
  private:
   friend class MemPoolTest;
   static const int INITIAL_CHUNK_SIZE = 4 * 1024;
@@ -160,10 +187,16 @@ class MemPool {
         allocated_bytes(0) {}
   };
 
+  /// A static field used as non-NULL pointer for zero length allocations. NULL is
+  /// reserved for allocation failures. It must be as aligned as max_align_t for
+  /// TryAllocateAligned().
+  static uint32_t zero_length_region_ alignas(std::max_align_t);
+
   /// chunk from which we served the last Allocate() call;
   /// always points to the last chunk that contains allocated data;
-  /// chunks 0..current_chunk_idx_ are guaranteed to contain data
-  /// (chunks_[i].allocated_bytes > 0 for i: 0..current_chunk_idx_);
+  /// chunks 0..current_chunk_idx_ - 1 are guaranteed to contain data
+  /// (chunks_[i].allocated_bytes > 0 for i: 0..current_chunk_idx_ - 1);
+  /// chunks after 'current_chunk_idx_' are "free chunks" that contain no data.
   /// -1 if no chunks present
   int current_chunk_idx_;
 
@@ -190,41 +223,61 @@ class MemPool {
   /// if a new chunk needs to be created.
   /// If check_limits is true, this call can fail (returns false) if adding a
   /// new chunk exceeds the mem limits.
-  bool FindChunk(int64_t min_size, bool check_limits);
+  bool FindChunk(int64_t min_size, bool check_limits) noexcept;
 
   /// Check integrity of the supporting data structures; always returns true but DCHECKs
   /// all invariants.
-  /// If 'current_chunk_empty' is false, checks that the current chunk contains data.
-  bool CheckIntegrity(bool current_chunk_empty);
+  /// If 'check_current_chunk_empty' is true, checks that the current chunk contains no
+  /// data. Otherwise the current chunk can be either empty or full.
+  bool CheckIntegrity(bool check_current_chunk_empty);
 
-  /// Return offset to unoccpied space in current chunk.
-  int GetFreeOffset() const {
+  /// Return offset to unoccupied space in current chunk.
+  int64_t GetFreeOffset() const {
     if (current_chunk_idx_ == -1) return 0;
     return chunks_[current_chunk_idx_].allocated_bytes;
   }
 
   template <bool CHECK_LIMIT_FIRST>
-  uint8_t* Allocate(int size) {
-    if (size == 0) return NULL;
+  uint8_t* Allocate(int64_t size, int alignment) noexcept {
+    DCHECK_GE(size, 0);
+    if (UNLIKELY(size == 0)) return reinterpret_cast<uint8_t*>(&zero_length_region_);
 
-    int64_t num_bytes = BitUtil::RoundUp(size, 8);
-    if (current_chunk_idx_ == -1
-        || num_bytes + chunks_[current_chunk_idx_].allocated_bytes
-          > chunks_[current_chunk_idx_].size) {
-      // If we couldn't allocate a new chunk, return NULL.
-      if (UNLIKELY(!FindChunk(num_bytes, CHECK_LIMIT_FIRST))) return NULL;
+    bool fits_in_chunk = false;
+    if (current_chunk_idx_ != -1) {
+      int64_t aligned_allocated_bytes = BitUtil::RoundUpToPowerOf2(
+          chunks_[current_chunk_idx_].allocated_bytes, alignment);
+      if (aligned_allocated_bytes + size <= chunks_[current_chunk_idx_].size) {
+        // Ensure the requested alignment is respected.
+        total_allocated_bytes_ +=
+            aligned_allocated_bytes - chunks_[current_chunk_idx_].allocated_bytes;
+        chunks_[current_chunk_idx_].allocated_bytes = aligned_allocated_bytes;
+        fits_in_chunk = true;
+      }
     }
+
+    if (!fits_in_chunk) {
+      // If we couldn't allocate a new chunk, return NULL. malloc() guarantees alignment
+      // of alignof(std::max_align_t), so we do not need to do anything additional to
+      // guarantee alignment.
+      static_assert(
+          INITIAL_CHUNK_SIZE >= alignof(std::max_align_t), "Min chunk size too low");
+      if (UNLIKELY(!FindChunk(size, CHECK_LIMIT_FIRST))) return NULL;
+    }
+
     ChunkInfo& info = chunks_[current_chunk_idx_];
     uint8_t* result = info.data + info.allocated_bytes;
-    DCHECK_LE(info.allocated_bytes + num_bytes, info.size);
-    info.allocated_bytes += num_bytes;
-    total_allocated_bytes_ += num_bytes;
+    DCHECK_LE(info.allocated_bytes + size, info.size);
+    info.allocated_bytes += size;
+    total_allocated_bytes_ += size;
     DCHECK_LE(current_chunk_idx_, chunks_.size() - 1);
     peak_allocated_bytes_ = std::max(total_allocated_bytes_, peak_allocated_bytes_);
     return result;
   }
 };
 
+// Stamp out templated implementations here so they're included in IR module
+template uint8_t* MemPool::Allocate<false>(int64_t size, int alignment) noexcept;
+template uint8_t* MemPool::Allocate<true>(int64_t size, int alignment) noexcept;
 }
 
 #endif

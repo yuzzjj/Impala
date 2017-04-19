@@ -1,28 +1,31 @@
 #!/bin/bash
 
-# Copyright 2014 Cloudera Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
-# This will create/control/destroy a local hdfs+yarn+llama cluster.
+# This will create/control/destroy a local hdfs+yarn cluster.
 #
-# The original idea was to run each node on a different loopback address but
-# https://jira.cloudera.com/browse/CDH-16602 makes that impossible for now. So all roles
-# run on 127.0.0.1, just like the standard mini cluster included with hadoop. The
-# difference is with this cluster, each role runs in its own process and has its own
+# All roles run on 127.0.0.1, just like the standard mini cluster included with hadoop.
+# The difference is with this cluster, each role runs in its own process and has its own
 # configs. For each node, the layout of the configs, logs, start/stop scripts, etc, is
 # kept as close as possible to a real cluster. For example, the first node will live in
 # the dir "cdh-<version>/node-1" and its logs would be at "cdh-<version>/node-1/var/log".
+# TODO: Run each node on its own IP address, e.g. 127.0.0.1, 127.0.0.2, and so on.
 
 set -euo pipefail
 trap 'echo Error in $0 at line $LINENO: $(awk "NR == $LINENO" $0)' ERR
@@ -49,40 +52,54 @@ TEMPLATE_SUFFIX=".tmpl"
 # Each process should be marked with this so a "pkill -f" can be done to nuke everything.
 export KILL_CLUSTER_MARKER=IBelongToTheMiniCluster
 
-SUPPORTED_SERVICES=(hdfs yarn)
-if [[ "$CDH_MAJOR_VERSION" -ge 5 ]]; then
-  SUPPORTED_SERVICES+=(llama kms)
+if [[ "$TARGET_FILESYSTEM" == "hdfs" ]]; then
+  # The check above indicates that the regular mini-cluster is in use.
+  SUPPORTED_SERVICES=(hdfs yarn kms)
+else
+  # Either a remote distributed file system or a local non-distributed file system is
+  # in use. Currently the only service that is expected to work is Kudu, though in theory
+  # the other services could work after the proper configuration changes.
+  SUPPORTED_SERVICES=()
+fi
+if $KUDU_IS_SUPPORTED; then
+  SUPPORTED_SERVICES+=(kudu)
 fi
 
 # All DataNodes and NodeManagers need a unique but fixed address. The IP is fixed at
 # 127.0.0.1, so the only difference is the port. The address must be fixed because it is
 # used as an identifier. If a node were restarted with a different address it would be
 # considered a new node. The values below are arbitrary and may conflict with existing
-# sevices. Fixed ports were preferred to dynamically chosen free ports for consistency.
+# services. Fixed ports were preferred to dynamically chosen free ports for consistency.
 DATANODE_FREE_PORT_START=31000
+DATANODE_FREE_HTTP_PORT_START=31010
+DATANODE_FREE_IPC_PORT_START=31020
+DATANODE_FREE_HTTPS_PORT_START=31030
 NODEMANAGER_FREE_PORT_START=31100
+NODEMANAGER_FREE_LOCALIZER_PORT_START=31120
+NODEMANAGER_FREE_WEBUI_PORT_START=31140
+KUDU_TS_RPC_FREE_PORT_START=31200
+KUDU_TS_WEBUI_FREE_PORT_START=31300
 
 # Used to populate config templates later. Any changes made here have no effect on an
 # existing cluster.
 export HDFS_WEBUI_PORT=5070   # changed from 50070 so it is not ephemeral
 export YARN_WEBUI_PORT=8088   # same as default
-export LLAMA_WEBUI_PORT=1501  # same as default
-export KMS_WEBUI_PORT=16000   # same as default
+export KMS_WEBUI_PORT=9600    # changed to make room for non-ephemeral HBase ports
+                              # (HADOOP-12811)
+export KUDU_WEBUI_PORT=8051   # same as default
 
 # Empty dirs that should be included in the templates. Since git ignores empty dirs it is
 # easier to maintain them here.
-EMPTY_NODE_DIRS=$(echo data/dfs/{dn,nn} var/{run,lib/hadoop-hdfs,log})
-if [[ "$CDH_MAJOR_VERSION" -ge 5 ]]; then
-  EMPTY_NODE_DIRS+=" /var/log/llama"
-fi
+EMPTY_NODE_DIRS=$(echo data/dfs/{dn,nn} var/{run,lib/hadoop-hdfs,log} \
+    var/{log,run}/kudu/{master,ts} var/lib/kudu/{master,ts}/{wal,data})
 
-EASY_ACCESS_LOG_DIR="$IMPALA_HOME/cluster_logs"
+EASY_ACCESS_LOG_DIR="$IMPALA_CLUSTER_LOGS_DIR"
 MINIKDC_INIT=${IMPALA_HOME}/testdata/bin/minikdc.sh
 
-if $IS_OSX; then
+FIND_EXECUTABLE_FILTER="-executable"
+if ! find /dev/null "${FIND_EXECUTABLE_FILTER}" 2> /dev/null; then
+  # OSX and RHEL5, among others, don't have -executable
   FIND_EXECUTABLE_FILTER="-perm +0111"
-else
-  FIND_EXECUTABLE_FILTER="-executable"
 fi
 
 #
@@ -193,28 +210,7 @@ function create_cluster {
     ${MINIKDC_INIT} stop
   fi
 
-  # Llama needs a mapping of DataNodes to NodeManagers and for that we'll need to know
-  # the hostname hadoop has chosen. It should be the first entry in /etc/hosts for
-  # 127.0.0.1.
-  #
-  # It is possible this hostname must also mactch the impala hostname, which will
-  # never be "localhost".
-  if $IS_OSX; then
-    HADOOP_HOSTNAME=$(dscacheutil -q host -a ip_address 127.0.0.1 | head -n 1 \
-        | awk '{print $2}')
-  else
-    if getent hosts 127.0.0.1 1>/dev/null; then
-      HADOOP_HOSTNAME=$(getent hosts 127.0.0.1 | awk '{print $2}')
-    else
-      # This may be an error case...
-      HADOOP_HOSTNAME=127.0.0.1
-    fi
-  fi
-
-  # For consistency, the first node will host all the master roles, including llama. Llama
-  # needs to know the ports of the datanodes and nodemanagers. The ports are generated
-  # below as part of setting up each node. The slave nodes are created first so the ports
-  # will be known when it is time to configure llama.
+  # For consistency, the first node will host all the master roles.
   for ((NODE_IDX=$NODE_COUNT; NODE_IDX >= 1; NODE_IDX--)); do
     NODE=${NODE_PREFIX}$NODE_IDX
     NODE_DIR=$(get_node_dir $NODE)
@@ -228,7 +224,8 @@ function create_cluster {
     fi
     if [[ $NODE_IDX -gt 1 ]]; then
       # Remove master role scripts from slave nodes
-      rm -f "$NODE_DIR/etc/init.d/"{hdfs-namenode,yarn-resourcemanager,llama-application,kms}
+      rm -f "$NODE_DIR/etc/init.d/"{hdfs-namenode,yarn-resourcemanager} \
+            "$NODE_DIR/etc/init.d/"{kms,kudu-master}
     fi
     for EMPTY_NODE_DIR in $EMPTY_NODE_DIRS; do
       mkdir -p "$NODE_DIR/$EMPTY_NODE_DIR"
@@ -239,20 +236,33 @@ function create_cluster {
     if [[ ! -e "$EASY_ACCESS_LOG_LINK" ]]; then
       mkdir -p "$EASY_ACCESS_LOG_DIR"
       ln -s "$NODE_DIR/var/log" "$EASY_ACCESS_LOG_DIR"
-      mv "$IMPALA_HOME/cluster_logs/log" "$EASY_ACCESS_LOG_LINK"
+      mv "$IMPALA_CLUSTER_LOGS_DIR/log" "$EASY_ACCESS_LOG_LINK"
     fi
 
     # Template population
     DATANODE_PORT=$((DATANODE_FREE_PORT_START++))
+    DATANODE_HTTP_PORT=$((DATANODE_FREE_HTTP_PORT_START++))
+    DATANODE_IPC_PORT=$((DATANODE_FREE_IPC_PORT_START++))
+    DATANODE_HTTPS_PORT=$((DATANODE_FREE_HTTPS_PORT_START++))
     NODEMANAGER_PORT=$((NODEMANAGER_FREE_PORT_START++))
-    echo "$NODE will use ports DATANODE_PORT=$DATANODE_PORT and" \
-        "NODEMANAGER_PORT=$NODEMANAGER_PORT"
+    NODEMANAGER_LOCALIZER_PORT=$((NODEMANAGER_FREE_LOCALIZER_PORT_START++))
+    NODEMANAGER_WEBUI_PORT=$((NODEMANAGER_FREE_WEBUI_PORT_START++))
+    KUDU_TS_RPC_PORT=$((KUDU_TS_RPC_FREE_PORT_START++))
+    KUDU_TS_WEBUI_PORT=$((KUDU_TS_WEBUI_FREE_PORT_START++))
+    echo "$NODE will use ports DATANODE_PORT=$DATANODE_PORT," \
+        "DATANODE_HTTP_PORT=$DATANODE_HTTP_PORT," \
+        "DATANODE_IPC_PORT=$DATANODE_IPC_PORT," \
+        "DATANODE_HTTPS_PORT=$DATANODE_HTTPS_PORT," \
+        "NODEMANAGER_PORT=$NODEMANAGER_PORT," \
+        "NODEMANAGER_LOCALIZER_PORT=$NODEMANAGER_LOCALIZER_PORT," \
+        "NODEMANAGER_WEBUI_PORT=$NODEMANAGER_WEBUI_PORT," \
+        "KUDU_TS_RPC_PORT=$KUDU_TS_RPC_PORT," \
+        "and KUDU_TS_WEBUI_PORT=$KUDU_TS_WEBUI_PORT"
 
-    # Escape the first : to workaround https://jira.cloudera.com/browse/CDH-16840
-    LLAMA_PORT_MAPPINGS+="$HADOOP_HOSTNAME\\:$DATANODE_PORT="
-    LLAMA_PORT_MAPPINGS+="$HADOOP_HOSTNAME:$NODEMANAGER_PORT
-"
-    export NODE NODE_DIR DATANODE_PORT NODEMANAGER_PORT LLAMA_PORT_MAPPINGS
+    export NODE NODE_DIR
+    export DATANODE_PORT DATANODE_HTTP_PORT DATANODE_IPC_PORT DATANODE_HTTPS_PORT
+    export NODEMANAGER_PORT NODEMANAGER_LOCALIZER_PORT NODEMANAGER_WEBUI_PORT
+    export KUDU_TS_RPC_PORT KUDU_TS_WEBUI_PORT
     for TEMPLATE_PATH in $(find "$NODE_DIR" -name "*$TEMPLATE_SUFFIX"); do
       ACTUAL_PATH="${TEMPLATE_PATH%$TEMPLATE_SUFFIX}"
 
@@ -303,19 +313,45 @@ function start_cluster {
     echo "Starting Kerberized cluster."
   fi
 
-  for SERVICE in ${SUPPORTED_SERVICES[@]}; do
-    WEBUI_PORT_VAR="$(echo "$SERVICE" | awk '{print toupper($0)}')_WEBUI_PORT"
-    echo "Starting ${SERVICE} (Web UI - http://localhost:${!WEBUI_PORT_VAR})"
-    exec_init_script "$SERVICE*" start
-    if [ "${SERVICE}" = "hdfs" ]; then
-        chmod_hdfs_root
-    fi
-  done
+  if [ ${#SUPPORTED_SERVICES[@]} -gt 0 ]; then
+    for SERVICE in ${SUPPORTED_SERVICES[@]-}; do
+      # If all of the following are true, we wait for ntp to sync before proceeding:
+      #
+      # 1. Kudu is being started
+      # 2. An internet connection is available (checked by pinging $NTP_CANARY)
+      # 3. ntp-wait is installed (checked by calling ntp-wait with the "--help" flag)
+      if [[ "${SERVICE}" == "kudu" ]]; then
+        NTP_CANARY=pool.ntp.org
+        if ! ping -c 1 -w 5 "${NTP_CANARY}" >/dev/null 2>/dev/null; then
+          echo "WARNING: cannot reach ${NTP_CANARY}; ntp sync recommended for Kudu"
+        elif ntp-wait --help >/dev/null 2>/dev/null && ! ntp-wait -v; then
+          echo "ntp-wait failed; cannot start kudu"
+          return 1
+        fi
+      fi
+      start $SERVICE
+    done
 
-  # Check if the cluster is still alive...
-  sleep 10
-  check_cluster_status
+    # If there any services to start, check that the cluster is still alive...
+    sleep 10
+    check_cluster_status
+  fi
   return $?
+}
+
+function start {
+  if [[ $# -ne 1 ]]; then
+    echo start must be called with a single argument -- the service to start. 1>&2
+    exit 1
+  fi
+  local SERVICE=$1
+
+  WEBUI_PORT_VAR="$(echo "$SERVICE" | awk '{print toupper($0)}')_WEBUI_PORT"
+  echo "Starting ${SERVICE} (Web UI - http://localhost:${!WEBUI_PORT_VAR})"
+  exec_init_script "$SERVICE*" start
+  if [ "${SERVICE}" = "hdfs" ]; then
+      chmod_hdfs_root
+  fi
 }
 
 function chmod_hdfs_root {
@@ -343,9 +379,11 @@ function chmod_hdfs_root {
 }
 
 function exec_init_script {
-  SCRIPT_NAME="$1"
+  local SCRIPT_NAME="$1"
   shift
+  local CMD="$1"
 
+  local PIDS=()
   for SCRIPT in $(find "$NODES_DIR" -path "*/$NODE_PREFIX*/etc/init.d/$SCRIPT_NAME" \
       $FIND_EXECUTABLE_FILTER -type f); do
     if "$SCRIPT" status &>/dev/null; then
@@ -353,13 +391,24 @@ function exec_init_script {
     else
       RUNNING=false
     fi
-    case $1 in
+    case "$CMD" in
       start) if ! $RUNNING; then "$SCRIPT" start; fi;;
       stop) if $RUNNING; then "$SCRIPT" stop; fi;;
       *) "$SCRIPT" "$@";;
     esac &
+    PIDS+=($!)
   done
-  wait
+
+  # Always wait for all the pids, otherwise the output gets messed up. If this function
+  # were to return while the background processes are still running, they may print
+  # output that makes it appear as though this process is still running.
+  local RET=0
+  for PID in ${PIDS[@]}; do
+    if ! wait $PID; then
+      RET=1
+    fi
+  done
+  return $RET
 }
 
 function check_cluster_status {
@@ -371,12 +420,14 @@ function check_cluster_status {
   ROLE_COUNT=0
   NOT_RUNNING=()
   for NODE_DIR in "$NODES_DIR/$NODE_PREFIX"*; do
-    for SCRIPT in $(find "$NODE_DIR" -path "*/etc/init.d/*" $FIND_EXECUTABLE_FILTER \
-        -type f); do
-      ROLE_COUNT=$((ROLE_COUNT + 1))
-      if ! "$SCRIPT" status &>/dev/null; then
-        NOT_RUNNING+=("\n$(basename $SCRIPT) is not running on $(basename $NODE_DIR)")
-      fi
+    for SERVICE in ${SUPPORTED_SERVICES[@]-}; do
+      for SCRIPT in $(find "$NODE_DIR" -path "*/etc/init.d/$SERVICE*" $FIND_EXECUTABLE_FILTER \
+          -type f); do
+        ROLE_COUNT=$((ROLE_COUNT + 1))
+        if ! "$SCRIPT" status &>/dev/null; then
+          NOT_RUNNING+=("\n$(basename $SCRIPT) is not running on $(basename $NODE_DIR)")
+        fi
+      done
     done
   done
 
@@ -391,17 +442,41 @@ function stop_cluster {
   if cluster_exists; then
     # Stop services in reverse order to give them a chance to shutdown cleanly
     for ((SERVICE_IDX=${#SUPPORTED_SERVICES[@]} - 1; SERVICE_IDX >= 0; SERVICE_IDX--)); do
-      SERVICE="${SUPPORTED_SERVICES[$SERVICE_IDX]}"
-      echo "Stopping ${SERVICE}"
-      exec_init_script "$SERVICE*" stop
+      stop "${SUPPORTED_SERVICES[$SERVICE_IDX]}"
     done
   fi
   # Kill everything anyways just in case a git clean -xdf was done
   pkill -u $USER -f $KILL_CLUSTER_MARKER || true
 }
 
+function stop {
+  if [[ $# -ne 1 ]]; then
+    echo stop must be called with a single argument -- the service to stop. 1>&2
+    exit 1
+  fi
+  local SERVICE=$1
+
+  echo "Stopping ${SERVICE}"
+  exec_init_script "$SERVICE*" stop
+}
+
+function restart {
+  if [[ $# -ne 1 ]]; then
+    echo restart must be called with a single argument -- the service to restart. 1>&2
+    exit 1
+  fi
+  local SERVICE=$1
+  stop $SERVICE
+  start $SERVICE
+}
+
 function delete_data {
   rm -rf "$NODES_DIR/$NODE_PREFIX"*/data/dfs/{nn,dn}/*
+  delete_kudu_data
+}
+
+function delete_kudu_data {
+  rm -rf "$NODES_DIR/$NODE_PREFIX"*/var/lib/kudu/{master,ts}/*
 }
 
 function delete_cluster {
@@ -423,7 +498,11 @@ function get_hadoop_client_conf_dir {
 
 COMMAND=$1
 shift
-# Use an "if" to avoid triggering the ERR trap.
-if ! $COMMAND "$@"; then
-  exit 1
-fi
+case $COMMAND in
+  check_cluster_status | cluster_exists | is_kerberized)
+    # Use an "if" to avoid triggering the ERR trap.
+    if ! $COMMAND "$@"; then
+      exit 1
+    fi;;
+  *) $COMMAND "$@";;
+esac

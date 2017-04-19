@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_RPC_THRIFT_CLIENT_H
@@ -49,6 +52,7 @@ class ThriftClientImpl {
 
   /// Open the connection to the remote server. May be called repeatedly, is idempotent
   /// unless there is a failure to connect.
+  /// If Open() fails, the connection remains closed.
   Status Open();
 
   /// Retry the Open num_retries time waiting wait_ms milliseconds between retries.
@@ -63,6 +67,8 @@ class ThriftClientImpl {
 
   /// Set send timeout on the underlying TSocket.
   void setSendTimeout(int32_t ms) { socket_->setSendTimeout(ms); }
+
+  Status socket_create_status() { return socket_create_status_; }
 
  protected:
   ThriftClientImpl(const std::string& ipaddress, int port, bool ssl)
@@ -127,26 +133,33 @@ class ThriftClient : public ThriftClientImpl {
 
 template <class InterfaceType>
 ThriftClient<InterfaceType>::ThriftClient(const std::string& ipaddress, int port,
-    const std::string& service_name,
-    AuthProvider* auth_provider, bool ssl)
+    const std::string& service_name, AuthProvider* auth_provider, bool ssl)
     : ThriftClientImpl(ipaddress, port, ssl),
       iface_(new InterfaceType(protocol_)),
       auth_provider_(auth_provider) {
-  // Below is one line of code in ThriftClientImpl::Close(),
-  // if (transport_.get != NULL && transport_->isOpen()) transport_->close();
-  // Here transport_->isOpen() will call socker_->isOpen(), when socket_ is NULL,
-  // it will crash
-  if (socket_ != NULL) {
-    ThriftServer::BufferedTransportFactory factory;
-    transport_ = factory.getTransport(socket_);
-  }
 
   if (auth_provider_ == NULL) {
     auth_provider_ = AuthManager::GetInstance()->GetInternalAuthProvider();
+    DCHECK(auth_provider_ != NULL);
   }
 
+  // If socket_ is NULL (because ThriftClientImpl::CreateSocket() failed in the base
+  // class constructor, nothing else should be constructed. Open()/Reopen() will return
+  // the error that the socket couldn't be created and the caller should be careful to
+  // not use the client after that.
+  // TODO: Move initialization code that can fail into a separate Init() method.
+  if (socket_ == NULL) {
+    DCHECK(!socket_create_status_.ok());
+    return;
+  }
+
+  // transport_ is created by wrapping the socket_ in the TTransport provided by the
+  // auth_provider_ and then a TBufferedTransport (IMPALA-1928).
+  transport_ = socket_;
   auth_provider_->WrapClientTransport(address_.hostname, transport_, service_name,
       &transport_);
+  ThriftServer::BufferedTransportFactory factory;
+  transport_ = factory.getTransport(transport_);
 
   protocol_.reset(new apache::thrift::protocol::TBinaryProtocol(transport_));
   iface_.reset(new InterfaceType(protocol_));

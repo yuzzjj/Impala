@@ -1,16 +1,19 @@
-// Copyright 2013 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #include <boost/thread.hpp>
@@ -19,6 +22,8 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include "common/init.h"
+#include "common/atomic.h"
 #include "util/internal-queue.h"
 
 #include "common/names.h"
@@ -149,10 +154,10 @@ const int VALIDATE_INTERVAL = 10000;
 
 // CHECK() is not thread safe so return the result in *failed.
 void ProducerThread(InternalQueue<IntNode>* queue, int num_inserts,
-    vector<IntNode>* nodes, AtomicInt<int32_t>* counter, bool* failed) {
+    vector<IntNode>* nodes, AtomicInt32* counter, bool* failed) {
   for (int i = 0; i < num_inserts && !*failed; ++i) {
     // Get the next index to queue.
-    AtomicInt<int32_t> value = (*counter)++;
+    int32_t value = counter->Add(1) - 1;
     nodes->at(value).value = value;
     queue->Enqueue(&nodes->at(value));
     if (i % VALIDATE_INTERVAL == 0) {
@@ -203,7 +208,7 @@ TEST(InternalQueue, TestClear) {
 
 TEST(InternalQueue, TestSingleProducerSingleConsumer) {
   vector<IntNode> nodes;
-  AtomicInt<int32_t> counter;
+  AtomicInt32 counter;
   nodes.resize(1000000);
   vector<int> results;
 
@@ -215,7 +220,7 @@ TEST(InternalQueue, TestSingleProducerSingleConsumer) {
   ASSERT_TRUE(queue.empty());
   ASSERT_EQ(results.size(), nodes.size());
 
-  counter = 0;
+  counter.Store(0);
   results.clear();
   thread producer_thread(ProducerThread, &queue, nodes.size(), &nodes, &counter, &failed);
   thread consumer_thread(ConsumerThread, &queue, nodes.size(), 1, &results, &failed);
@@ -232,14 +237,14 @@ TEST(InternalQueue, TestMultiProducerMultiConsumer) {
 
   bool failed = false;
   for (int num_producers = 1; num_producers < 5; num_producers += 3) {
-    AtomicInt<int32_t> counter;
+    AtomicInt32 counter;
     const int NUM_CONSUMERS = 4;
     ASSERT_EQ(nodes.size() % NUM_CONSUMERS, 0);
     ASSERT_EQ(nodes.size() % num_producers, 0);
     const int num_per_consumer = nodes.size() / NUM_CONSUMERS;
     const int num_per_producer = nodes.size() / num_producers;
 
-    vector<vector<int> > results;
+    vector<vector<int>> results;
     results.resize(NUM_CONSUMERS);
 
     int expected_delta = -1;
@@ -298,7 +303,7 @@ int main(int argc, char **argv) {
   cerr << "Internal Queue Test Skipped" << endl;
   return 0;
 #endif
-  google::InitGoogleLogging(argv[0]);
   ::testing::InitGoogleTest(&argc, argv);
+  impala::InitCommonRuntime(argc, argv, false, impala::TestInfo::BE_TEST);
   return RUN_ALL_TESTS();
 }

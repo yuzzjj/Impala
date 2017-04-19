@@ -1,16 +1,19 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_COMMON_COMPILER_UTIL_H
@@ -21,11 +24,11 @@
 /// about memory" paper.
 /// example: if (LIKELY(size > 0)) { ... }
 /// example: if (UNLIKELY(!status.ok())) { ... }
-#ifdef LIKELY 
+#ifdef LIKELY
 #undef LIKELY
 #endif
 
-#ifdef UNLIKELY 
+#ifdef UNLIKELY
 #undef UNLIKELY
 #endif
 
@@ -34,5 +37,16 @@
 
 #define PREFETCH(addr) __builtin_prefetch(addr)
 
-#endif
+/// Force inlining. The 'inline' keyword is treated by most compilers as a hint,
+/// not a command. This should be used sparingly for cases when either the function
+/// needs to be inlined for a specific reason or the compiler's heuristics make a bad
+/// decision, e.g. not inlining a small function on a hot path.
+#define ALWAYS_INLINE __attribute__((always_inline))
 
+namespace impala {
+
+/// The size of an L1 cache line in bytes on x86-64.
+constexpr int CACHE_LINE_SIZE = 64;
+
+}
+#endif

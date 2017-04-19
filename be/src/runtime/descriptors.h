@@ -1,23 +1,25 @@
-// Copyright 2012 Cloudera Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 
 #ifndef IMPALA_RUNTIME_DESCRIPTORS_H
 #define IMPALA_RUNTIME_DESCRIPTORS_H
 
-#include <vector>
-#include <tr1/unordered_map>
+#include <unordered_map>
 #include <vector>
 #include <boost/scoped_ptr.hpp>
 #include <ostream>
@@ -33,19 +35,21 @@ namespace llvm {
   class Function;
   class PointerType;
   class StructType;
+  class Value;
 };
 
 namespace impala {
 
+class Expr;
+class ExprContext;
+class LlvmBuilder;
 class LlvmCodeGen;
 class ObjectPool;
+class RuntimeState;
 class TDescriptorTable;
 class TSlotDescriptor;
 class TTable;
 class TTupleDescriptor;
-class Expr;
-class ExprContext;
-class RuntimeState;
 
 /// A path into a table schema (e.g. a vector of ColumnTypes) pointing to a particular
 /// column/field. The i-th element of the path is the ordinal position of the column/field
@@ -91,6 +95,10 @@ struct NullIndicatorOffset {
       bit_mask(bit_offset == -1 ? 0 : 1 << bit_offset) {
   }
 
+  bool Equals(const NullIndicatorOffset& o) const {
+    return this->byte_offset == o.byte_offset && this->bit_mask == o.bit_mask;
+  }
+
   std::string DebugString() const;
 };
 
@@ -113,7 +121,7 @@ class SlotDescriptor {
   int col_pos() const { return col_path_[0]; }
   const SchemaPath& col_path() const { return col_path_; }
   /// Returns the field index in the generated llvm struct for this slot's tuple
-  int field_idx() const { return field_idx_; }
+  int llvm_field_idx() const { return llvm_field_idx_; }
   int tuple_offset() const { return tuple_offset_; }
   const NullIndicatorOffset& null_indicator_offset() const {
     return null_indicator_offset_;
@@ -131,13 +139,26 @@ class SlotDescriptor {
 
   std::string DebugString() const;
 
-  /// Codegen for: bool IsNull(Tuple* tuple)
-  /// The codegen'd IR function is cached.
-  llvm::Function* GetIsNullFn(LlvmCodeGen*) const;
+  /// Return true if the physical layout of this descriptor matches the physical layout
+  /// of other_desc, but not necessarily ids.
+  bool LayoutEquals(const SlotDescriptor& other_desc) const;
 
-  /// Codegen for: void SetNull(Tuple* tuple) / void SetNotNull(Tuple* tuple)
-  /// The codegen'd IR function is cached.
-  llvm::Function* GetUpdateNullFn(LlvmCodeGen*, bool set_null) const;
+  /// Generate LLVM code at the insert position of 'builder' that returns a boolean value
+  /// represented as a LLVM i1 indicating whether this slot is null in 'tuple'.
+  llvm::Value* CodegenIsNull(
+      LlvmCodeGen* codegen, LlvmBuilder* builder, llvm::Value* tuple) const;
+
+  /// Generate LLVM code at the insert position of 'builder' that returns a boolean value
+  /// represented as a LLVM i1 with value of the NULL bit at 'null_indicator_offset' in
+  /// 'tuple'.
+  static llvm::Value* CodegenIsNull(LlvmCodeGen* codegen, LlvmBuilder* builder,
+      const NullIndicatorOffset& null_indicator_offset, llvm::Value* tuple);
+
+  /// Generate LLVM code at the insert position of 'builder' to set this slot's
+  /// NULL bit in the given 'tuple' to the value 'is_null'. 'tuple' is a pointer
+  /// to the tuple, and 'is_null' is an boolean value represented as a LLVM i1.
+  void CodegenSetNullIndicator(LlvmCodeGen* codegen, LlvmBuilder* builder,
+      llvm::Value* tuple, llvm::Value* is_null) const;
 
  private:
   friend class DescriptorTbl;
@@ -160,19 +181,21 @@ class SlotDescriptor {
   /// the byte size of this slot.
   const int slot_size_;
 
-  /// the idx of the slot in the llvm codegen'd tuple struct
-  /// this is set by TupleDescriptor during codegen and takes into account
-  /// leading null bytes.
-  int field_idx_;
-
-  /// Cached codegen'd functions
-  mutable llvm::Function* is_null_fn_;
-  mutable llvm::Function* set_not_null_fn_;
-  mutable llvm::Function* set_null_fn_;
+  /// The idx of the slot in the llvm codegen'd tuple struct
+  /// This is set by TupleDescriptor during codegen and takes into account
+  /// any padding bytes.
+  int llvm_field_idx_;
 
   /// collection_item_descriptor should be non-NULL iff this is a collection slot
   SlotDescriptor(const TSlotDescriptor& tdesc, const TupleDescriptor* parent,
-                 const TupleDescriptor* collection_item_descriptor);
+      const TupleDescriptor* collection_item_descriptor);
+
+  /// Generate LLVM code at the insert position of 'builder' to get the i8 value of the
+  /// the byte containing 'null_indicator_offset' in 'tuple'. If 'null_byte_ptr' is
+  /// non-NULL, sets that to a pointer to the null byte.
+  static llvm::Value* CodegenGetNullByte(LlvmCodeGen* codegen, LlvmBuilder* builder,
+      const NullIndicatorOffset& null_indicator_offset, llvm::Value* tuple,
+      llvm::Value** null_byte_ptr);
 };
 
 class ColumnDescriptor {
@@ -206,6 +229,7 @@ class TableDescriptor {
   const std::string& name() const { return name_; }
   const std::string& database() const { return database_; }
   int id() const { return id_; }
+  TTableType::type type() const { return type_; }
   const std::vector<ColumnDescriptor>& col_descs() const { return col_descs_; }
 
   /// Returns "<database>.<name>"
@@ -215,6 +239,7 @@ class TableDescriptor {
   std::string name_;
   std::string database_;
   TableId id_;
+  TTableType::type type_;
   int num_clustering_cols_;
   std::vector<ColumnDescriptor> col_descs_;
 };
@@ -222,26 +247,25 @@ class TableDescriptor {
 /// Metadata for a single partition inside an Hdfs table.
 class HdfsPartitionDescriptor {
  public:
-  HdfsPartitionDescriptor(const THdfsPartition& thrift_partition, ObjectPool* pool);
+  HdfsPartitionDescriptor(const THdfsTable& thrift_table,
+      const THdfsPartition& thrift_partition, ObjectPool* pool);
+
   char line_delim() const { return line_delim_; }
   char field_delim() const { return field_delim_; }
   char collection_delim() const { return collection_delim_; }
   char escape_char() const { return escape_char_; }
   THdfsFileFormat::type file_format() const { return file_format_; }
-  const std::vector<ExprContext*>& partition_key_value_ctxs() const {
-    return partition_key_value_ctxs_;
-  }
   int block_size() const { return block_size_; }
   const std::string& location() const { return location_; }
   int64_t id() const { return id_; }
-
-  /// Calls Prepare()/Open()/Close() on all partition key exprs. Idempotent (this is
-  /// because both HdfsScanNode and HdfsTableSink may both use the same partition desc).
-  Status PrepareExprs(RuntimeState* state);
-  Status OpenExprs(RuntimeState* state);
-  void CloseExprs(RuntimeState* state);
-
   std::string DebugString() const;
+
+  /// It is safe to evaluate the returned expr contexts concurrently from multiple
+  /// threads because all exprs are literals, after the descriptor table has been
+  /// opened.
+  const std::vector<ExprContext*>& partition_key_value_ctxs() const {
+    return partition_key_value_ctxs_;
+  }
 
  private:
   char line_delim_;
@@ -249,16 +273,17 @@ class HdfsPartitionDescriptor {
   char collection_delim_;
   char escape_char_;
   int block_size_;
+  // TODO: use the same representation as the Catalog does, in which common prefixes are
+  // stripped.
   std::string location_;
   int64_t id_;
 
-  /// True if PrepareExprs has been called, to prevent repeating expensive codegen
-  bool exprs_prepared_;
-  bool exprs_opened_;
-  bool exprs_closed_;
-
   /// List of literal (and therefore constant) expressions for each partition key. Their
   /// order corresponds to the first num_clustering_cols of the parent table.
+  /// The Prepare()/Open()/Close() cycle is controlled by the containing descriptor table
+  /// because the same partition descriptor may be used by multiple exec nodes with
+  /// different lifetimes.
+  /// TODO: Move these into the new query-wide state, indexed by partition id.
   std::vector<ExprContext*> partition_key_value_ctxs_;
 
   /// The format (e.g. text, sequence file etc.) of data in the files in this partition
@@ -341,10 +366,29 @@ class DataSourceTableDescriptor : public TableDescriptor {
   virtual std::string DebugString() const;
 };
 
+// Descriptor for a KuduTable
+class KuduTableDescriptor : public TableDescriptor {
+ public:
+  explicit KuduTableDescriptor(const TTableDescriptor& tdesc);
+  virtual std::string DebugString() const;
+  const std::string table_name() const { return table_name_; }
+  const std::vector<std::string>& key_columns() const { return key_columns_; }
+  const std::vector<std::string>& kudu_master_addresses() const {
+    return master_addresses_;
+  }
+
+ private:
+  // native name of Kudu table
+  std::string table_name_;
+  std::vector<std::string> key_columns_;
+  std::vector<std::string> master_addresses_;
+};
+
 class TupleDescriptor {
  public:
   int byte_size() const { return byte_size_; }
   int num_null_bytes() const { return num_null_bytes_; }
+  int null_bytes_offset() const { return null_bytes_offset_; }
   const std::vector<SlotDescriptor*>& slots() const { return slots_; }
   const std::vector<SlotDescriptor*>& string_slots() const { return string_slots_; }
   const std::vector<SlotDescriptor*>& collection_slots() const {
@@ -361,6 +405,10 @@ class TupleDescriptor {
   /// Returns true if this tuple or any nested collection item tuples have string slots.
   bool ContainsStringData() const;
 
+  /// Return true if the physical layout of this descriptor matches that of other_desc,
+  /// but not necessarily the id.
+  bool LayoutEquals(const TupleDescriptor& other_desc) const;
+
   /// Creates a typed struct description for llvm.  The layout of the struct is computed
   /// by the FE which includes the order of the fields in the resulting struct.
   /// Returns the struct type or NULL if the type could not be created.
@@ -371,8 +419,9 @@ class TupleDescriptor {
   ///   int32_t  min_a;
   ///   int64_t  count_val;
   /// };
-  /// The resulting struct definition is cached.
   llvm::StructType* GetLlvmStruct(LlvmCodeGen* codegen) const;
+
+  static const char* LLVM_CLASS_NAME;
 
  protected:
   friend class DescriptorTbl;
@@ -381,6 +430,7 @@ class TupleDescriptor {
   TableDescriptor* table_desc_;
   const int byte_size_;
   const int num_null_bytes_;
+  const int null_bytes_offset_;
 
   /// Contains all slots.
   std::vector<SlotDescriptor*> slots_;
@@ -400,9 +450,6 @@ class TupleDescriptor {
   /// collection, empty otherwise.
   SchemaPath tuple_path_;
 
-  /// Cached codegen'd struct type for this tuple desc
-  mutable llvm::StructType* llvm_struct_;
-
   TupleDescriptor(const TTupleDescriptor& tdesc);
   void AddSlot(SlotDescriptor* slot);
 };
@@ -414,6 +461,12 @@ class DescriptorTbl {
   static Status Create(ObjectPool* pool, const TDescriptorTable& thrift_tbl,
                        DescriptorTbl** tbl);
 
+  /// Prepares and opens partition exprs of Hdfs tables.
+  Status PrepareAndOpenPartitionExprs(RuntimeState* state) const;
+
+  /// Closes partition exprs of Hdfs tables.
+  void ClosePartitionExprs(RuntimeState* state) const;
+
   TableDescriptor* GetTableDescriptor(TableId id) const;
   TupleDescriptor* GetTupleDescriptor(TupleId id) const;
   SlotDescriptor* GetSlotDescriptor(SlotId id) const;
@@ -424,9 +477,9 @@ class DescriptorTbl {
   std::string DebugString() const;
 
  private:
-  typedef std::tr1::unordered_map<TableId, TableDescriptor*> TableDescriptorMap;
-  typedef std::tr1::unordered_map<TupleId, TupleDescriptor*> TupleDescriptorMap;
-  typedef std::tr1::unordered_map<SlotId, SlotDescriptor*> SlotDescriptorMap;
+  typedef std::unordered_map<TableId, TableDescriptor*> TableDescriptorMap;
+  typedef std::unordered_map<TupleId, TupleDescriptor*> TupleDescriptorMap;
+  typedef std::unordered_map<SlotId, SlotDescriptor*> SlotDescriptorMap;
 
   TableDescriptorMap tbl_desc_map_;
   TupleDescriptorMap tuple_desc_map_;
@@ -456,9 +509,6 @@ class RowDescriptor {
 
   /// c'tor for a row assembled from two rows
   RowDescriptor(const RowDescriptor& lhs_row_desc, const RowDescriptor& rhs_row_desc);
-
-  RowDescriptor(const std::vector<TupleDescriptor*>& tuple_descs,
-      const std::vector<bool>& nullable_tuples);
 
   RowDescriptor(TupleDescriptor* tuple_desc, bool is_nullable);
 
@@ -498,6 +548,14 @@ class RowDescriptor {
 
   /// Return true if the tuple ids of this descriptor match tuple ids of other desc.
   bool Equals(const RowDescriptor& other_desc) const;
+
+  /// Return true if the tuples of this descriptor are a prefix of the tuples of
+  /// other_desc. Tuples are compared by their physical layout and not by ids.
+  bool LayoutIsPrefixOf(const RowDescriptor& other_desc) const;
+
+  /// Return true if the physical layout of this descriptor matches the physical layout
+  /// of other_desc, but not necessarily the ids.
+  bool LayoutEquals(const RowDescriptor& other_desc) const;
 
   std::string DebugString() const;
 

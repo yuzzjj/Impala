@@ -22,14 +22,15 @@ NULL,NULL,NULL,NULL
 double, double, double, double
 ====
 ---- QUERY
-# exactly 1 tuple processed (variance & stddev are 0)
-SELECT variance(tinyint_col), stddev(smallint_col), variance_pop(int_col),
-stddev_pop(bigint_col)
+# exactly 1 tuple processed (variance_pop & stddev_pop are 0, stddev and variance
+# are NULL)
+SELECT variance(tinyint_col), variance_samp(smallint_col), variance_pop(int_col),
+stddev(smallint_col), stddev_samp(smallint_col), stddev_pop(bigint_col)
 from alltypesagg WHERE id = 1006
 ---- RESULTS
-0,0,0,0
+NULL,NULL,0,NULL,NULL,0
 ---- TYPES
-double, double, double, double
+double, double, double, double, double, double
 ====
 ---- QUERY
 # Includes one row which is null, and test the aliases for variance() as well
@@ -154,13 +155,31 @@ from alltypesagg where day is not null
 bigint, string, string, string, string
 ====
 ---- QUERY
-# Test for IMPALA-3018. Verify update() function of min() handles
+# Test for IMPALA-3018. Verify update() functions of min() and max() handle
 # zero-length string correctly.
-select min(str) from (values ('aaa' as str), ('')) as tmp
+select max(str), min(str) from (values ('aaa' as str), (''), ('123')) as tmp
+---- RESULTS
+'aaa',''
+---- TYPES
+string,string
+====
+---- QUERY
+# Test for IMPALA-3018. Verify update() function of last_value() handles
+# zero-length string correctly.
+select last_value(b) over (partition by a order by d) from functional.nulltable;
 ---- RESULTS
 ''
 ---- TYPES
-String
+string
+====
+---- QUERY
+# Test for IMPALA-3018. Verify update() function of first_value() handles
+# zero-length string correctly.
+select first_value(b) over (partition by a order by d) from functional.nulltable;
+---- RESULTS
+''
+---- TYPES
+string
 ====
 ---- QUERY
 # grouping by different data types, with NULLs
@@ -815,8 +834,7 @@ bigint, boolean, boolean, bigint, double
 ====
 ---- QUERY
 # Test ignored distinct in MIN and MAX with NULLs
-select min(distinct NULL), max(distinct NULL) from alltypesagg
-where day is not null
+select min(distinct NULL), max(distinct NULL) from alltypes
 ---- RESULTS
 NULL,NULL
 ---- TYPES
@@ -1142,6 +1160,8 @@ select histogram(timestamp_col) from functional.alltypestiny;
 STRING
 ====
 ---- QUERY
+# IMPALA-4787: appx_median() on a medium sized dataset. This should excercise merge() with
+# differently sized inputs in the Reservoir Sampling algorithm.
 select
 appx_median(bool_col),
 appx_median(tinyint_col),
@@ -1151,11 +1171,22 @@ appx_median(float_col),
 appx_median(double_col),
 appx_median(string_col),
 appx_median(timestamp_col)
-from alltypestiny
+from alltypes
 ---- RESULTS
-true,1,1,1,1.100000023841858,10.1,'1',2009-03-01 00:00:00
+true,5,5,5,5.5,50.5,'5',2010-01-01 00:00:00
 ---- TYPES
 BOOLEAN, TINYINT, SMALLINT, INT, FLOAT, DOUBLE, STRING, TIMESTAMP
+====
+---- QUERY
+# IMPALA-4787: appx_median on a large dataset. This requires several buffer resizes in the
+# Reservoir Sampling algorithm.
+select appx_median(l_returnflag)
+from tpch.lineitem
+where l_returnflag = "N"
+---- RESULTS
+'N'
+---- TYPES
+STRING
 ====
 ---- QUERY
 # IMPALA-1419: Agg fn containing arithmetic expr on NULL fails

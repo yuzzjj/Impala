@@ -12,7 +12,7 @@ select
   avg(l_discount) as avg_disc,
   count(*) as count_order
 from
-  tpch.lineitem
+  lineitem
 where
   l_shipdate <= '1998-09-02'
 group by
@@ -22,6 +22,8 @@ order by
   l_returnflag,
   l_linestatus
 ---- PLAN
+PLAN-ROOT SINK
+|
 02:SORT
 |  order by: l_returnflag ASC, l_linestatus ASC
 |
@@ -33,6 +35,30 @@ order by
    partitions=1/1 files=1 size=718.94MB
    predicates: l_shipdate <= '1998-09-02'
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
+05:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: l_returnflag ASC, l_linestatus ASC
+|
+02:SORT
+|  order by: l_returnflag ASC, l_linestatus ASC
+|
+04:AGGREGATE [FINALIZE]
+|  output: sum:merge(l_quantity), sum:merge(l_extendedprice), sum:merge(l_extendedprice * (1 - l_discount)), sum:merge(l_extendedprice * (1 - l_discount) * (1 + l_tax)), avg:merge(l_quantity), avg:merge(l_extendedprice), avg:merge(l_discount), count:merge(*)
+|  group by: l_returnflag, l_linestatus
+|
+03:EXCHANGE [HASH(l_returnflag,l_linestatus)]
+|
+01:AGGREGATE [STREAMING]
+|  output: sum(l_quantity), sum(l_extendedprice), sum(l_extendedprice * (1 - l_discount)), sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)), avg(l_quantity), avg(l_extendedprice), avg(l_discount), count(*)
+|  group by: l_returnflag, l_linestatus
+|
+00:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   predicates: l_shipdate <= '1998-09-02'
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
 05:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: l_returnflag ASC, l_linestatus ASC
 |
@@ -65,11 +91,11 @@ select
   s_phone,
   s_comment
 from
-  tpch.part,
-  tpch.supplier,
-  tpch.partsupp,
-  tpch.nation,
-  tpch.region
+  part,
+  supplier,
+  partsupp,
+  nation,
+  region
 where
   p_partkey = ps_partkey
   and s_suppkey = ps_suppkey
@@ -100,12 +126,14 @@ order by
   p_partkey
 limit 100
 ---- PLAN
+PLAN-ROOT SINK
+|
 18:TOP-N [LIMIT=100]
 |  order by: s_acctbal DESC, n_name ASC, s_name ASC, p_partkey ASC
 |
 17:HASH JOIN [RIGHT SEMI JOIN]
-|  hash predicates: min(ps_supplycost) = ps_supplycost, ps_partkey = p_partkey
-|  runtime filters: RF001 <- p_partkey
+|  hash predicates: ps_partkey = p_partkey, min(ps_supplycost) = ps_supplycost
+|  runtime filters: RF000 <- p_partkey
 |
 |--16:HASH JOIN [INNER JOIN]
 |  |  hash predicates: n_regionkey = r_regionkey
@@ -124,24 +152,24 @@ limit 100
 |  |     runtime filters: RF005 -> n_regionkey
 |  |
 |  14:HASH JOIN [INNER JOIN]
-|  |  hash predicates: ps_suppkey = s_suppkey
-|  |  runtime filters: RF007 <- s_suppkey
+|  |  hash predicates: s_suppkey = ps_suppkey
+|  |  runtime filters: RF007 <- ps_suppkey
 |  |
-|  |--01:SCAN HDFS [tpch.supplier]
-|  |     partitions=1/1 files=1 size=1.33MB
-|  |     runtime filters: RF006 -> s_nationkey
+|  |--13:HASH JOIN [INNER JOIN]
+|  |  |  hash predicates: ps_partkey = p_partkey
+|  |  |  runtime filters: RF008 <- p_partkey
+|  |  |
+|  |  |--00:SCAN HDFS [tpch.part]
+|  |  |     partitions=1/1 files=1 size=22.83MB
+|  |  |     predicates: p_size = 15, p_type LIKE '%BRASS'
+|  |  |
+|  |  02:SCAN HDFS [tpch.partsupp]
+|  |     partitions=1/1 files=1 size=112.71MB
+|  |     runtime filters: RF008 -> ps_partkey
 |  |
-|  13:HASH JOIN [INNER JOIN]
-|  |  hash predicates: ps_partkey = p_partkey
-|  |  runtime filters: RF008 <- p_partkey
-|  |
-|  |--00:SCAN HDFS [tpch.part]
-|  |     partitions=1/1 files=1 size=22.83MB
-|  |     predicates: p_size = 15, p_type LIKE '%BRASS'
-|  |
-|  02:SCAN HDFS [tpch.partsupp]
-|     partitions=1/1 files=1 size=112.71MB
-|     runtime filters: RF007 -> ps_suppkey, RF008 -> ps_partkey
+|  01:SCAN HDFS [tpch.supplier]
+|     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF006 -> s_nationkey, RF007 -> s_suppkey
 |
 12:AGGREGATE [FINALIZE]
 |  output: min(ps_supplycost)
@@ -173,8 +201,10 @@ limit 100
 |
 05:SCAN HDFS [tpch.partsupp]
    partitions=1/1 files=1 size=112.71MB
-   runtime filters: RF001 -> tpch.partsupp.ps_partkey, RF004 -> ps_suppkey
+   runtime filters: RF000 -> tpch.partsupp.ps_partkey, RF004 -> ps_suppkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 30:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: s_acctbal DESC, n_name ASC, s_name ASC, p_partkey ASC
 |  limit: 100
@@ -183,10 +213,10 @@ limit 100
 |  order by: s_acctbal DESC, n_name ASC, s_name ASC, p_partkey ASC
 |
 17:HASH JOIN [RIGHT SEMI JOIN, PARTITIONED]
-|  hash predicates: min(ps_supplycost) = ps_supplycost, ps_partkey = p_partkey
-|  runtime filters: RF001 <- p_partkey
+|  hash predicates: ps_partkey = p_partkey, min(ps_supplycost) = ps_supplycost
+|  runtime filters: RF000 <- p_partkey
 |
-|--29:EXCHANGE [HASH(ps_supplycost,p_partkey)]
+|--29:EXCHANGE [HASH(p_partkey,ps_supplycost)]
 |  |
 |  16:HASH JOIN [INNER JOIN, BROADCAST]
 |  |  hash predicates: n_regionkey = r_regionkey
@@ -209,30 +239,30 @@ limit 100
 |  |     runtime filters: RF005 -> n_regionkey
 |  |
 |  14:HASH JOIN [INNER JOIN, BROADCAST]
-|  |  hash predicates: ps_suppkey = s_suppkey
-|  |  runtime filters: RF007 <- s_suppkey
+|  |  hash predicates: s_suppkey = ps_suppkey
+|  |  runtime filters: RF007 <- ps_suppkey
 |  |
 |  |--25:EXCHANGE [BROADCAST]
 |  |  |
-|  |  01:SCAN HDFS [tpch.supplier]
-|  |     partitions=1/1 files=1 size=1.33MB
-|  |     runtime filters: RF006 -> s_nationkey
-|  |
-|  13:HASH JOIN [INNER JOIN, BROADCAST]
-|  |  hash predicates: ps_partkey = p_partkey
-|  |  runtime filters: RF008 <- p_partkey
-|  |
-|  |--24:EXCHANGE [BROADCAST]
+|  |  13:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  |  hash predicates: ps_partkey = p_partkey
+|  |  |  runtime filters: RF008 <- p_partkey
 |  |  |
-|  |  00:SCAN HDFS [tpch.part]
-|  |     partitions=1/1 files=1 size=22.83MB
-|  |     predicates: p_size = 15, p_type LIKE '%BRASS'
+|  |  |--24:EXCHANGE [BROADCAST]
+|  |  |  |
+|  |  |  00:SCAN HDFS [tpch.part]
+|  |  |     partitions=1/1 files=1 size=22.83MB
+|  |  |     predicates: p_size = 15, p_type LIKE '%BRASS'
+|  |  |
+|  |  02:SCAN HDFS [tpch.partsupp]
+|  |     partitions=1/1 files=1 size=112.71MB
+|  |     runtime filters: RF008 -> ps_partkey
 |  |
-|  02:SCAN HDFS [tpch.partsupp]
-|     partitions=1/1 files=1 size=112.71MB
-|     runtime filters: RF007 -> ps_suppkey, RF008 -> ps_partkey
+|  01:SCAN HDFS [tpch.supplier]
+|     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF006 -> s_nationkey, RF007 -> s_suppkey
 |
-28:EXCHANGE [HASH(min(ps_supplycost),ps_partkey)]
+28:EXCHANGE [HASH(ps_partkey,min(ps_supplycost))]
 |
 23:AGGREGATE [FINALIZE]
 |  output: min:merge(ps_supplycost)
@@ -276,7 +306,144 @@ limit 100
 |
 05:SCAN HDFS [tpch.partsupp]
    partitions=1/1 files=1 size=112.71MB
-   runtime filters: RF001 -> tpch.partsupp.ps_partkey, RF004 -> ps_suppkey
+   runtime filters: RF000 -> tpch.partsupp.ps_partkey, RF004 -> ps_suppkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+30:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: s_acctbal DESC, n_name ASC, s_name ASC, p_partkey ASC
+|  limit: 100
+|
+18:TOP-N [LIMIT=100]
+|  order by: s_acctbal DESC, n_name ASC, s_name ASC, p_partkey ASC
+|
+17:HASH JOIN [RIGHT SEMI JOIN, PARTITIONED]
+|  hash predicates: ps_partkey = p_partkey, min(ps_supplycost) = ps_supplycost
+|  runtime filters: RF000 <- p_partkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: p_partkey, ps_supplycost
+|  |
+|  29:EXCHANGE [HASH(p_partkey,ps_supplycost)]
+|  |
+|  16:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  hash predicates: n_regionkey = r_regionkey
+|  |  runtime filters: RF005 <- r_regionkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=01 plan-id=02 cohort-id=02
+|  |  |  build expressions: r_regionkey
+|  |  |
+|  |  27:EXCHANGE [BROADCAST]
+|  |  |
+|  |  04:SCAN HDFS [tpch.region]
+|  |     partitions=1/1 files=1 size=384B
+|  |     predicates: r_name = 'EUROPE'
+|  |
+|  15:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  hash predicates: s_nationkey = n_nationkey
+|  |  runtime filters: RF006 <- n_nationkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=02 plan-id=03 cohort-id=02
+|  |  |  build expressions: n_nationkey
+|  |  |
+|  |  26:EXCHANGE [BROADCAST]
+|  |  |
+|  |  03:SCAN HDFS [tpch.nation]
+|  |     partitions=1/1 files=1 size=2.15KB
+|  |     runtime filters: RF005 -> n_regionkey
+|  |
+|  14:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  hash predicates: s_suppkey = ps_suppkey
+|  |  runtime filters: RF007 <- ps_suppkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=03 plan-id=04 cohort-id=02
+|  |  |  build expressions: ps_suppkey
+|  |  |
+|  |  25:EXCHANGE [BROADCAST]
+|  |  |
+|  |  13:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  |  hash predicates: ps_partkey = p_partkey
+|  |  |  runtime filters: RF008 <- p_partkey
+|  |  |
+|  |  |--JOIN BUILD
+|  |  |  |  join-table-id=04 plan-id=05 cohort-id=03
+|  |  |  |  build expressions: p_partkey
+|  |  |  |
+|  |  |  24:EXCHANGE [BROADCAST]
+|  |  |  |
+|  |  |  00:SCAN HDFS [tpch.part]
+|  |  |     partitions=1/1 files=1 size=22.83MB
+|  |  |     predicates: p_size = 15, p_type LIKE '%BRASS'
+|  |  |
+|  |  02:SCAN HDFS [tpch.partsupp]
+|  |     partitions=1/1 files=1 size=112.71MB
+|  |     runtime filters: RF008 -> ps_partkey
+|  |
+|  01:SCAN HDFS [tpch.supplier]
+|     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF006 -> s_nationkey, RF007 -> s_suppkey
+|
+28:EXCHANGE [HASH(ps_partkey,min(ps_supplycost))]
+|
+23:AGGREGATE [FINALIZE]
+|  output: min:merge(ps_supplycost)
+|  group by: ps_partkey
+|
+22:EXCHANGE [HASH(ps_partkey)]
+|
+12:AGGREGATE [STREAMING]
+|  output: min(ps_supplycost)
+|  group by: ps_partkey
+|
+11:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: n_regionkey = r_regionkey
+|  runtime filters: RF002 <- r_regionkey
+|
+|--JOIN BUILD
+|  |  join-table-id=05 plan-id=06 cohort-id=01
+|  |  build expressions: r_regionkey
+|  |
+|  21:EXCHANGE [BROADCAST]
+|  |
+|  08:SCAN HDFS [tpch.region]
+|     partitions=1/1 files=1 size=384B
+|     predicates: r_name = 'EUROPE'
+|
+10:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: s_nationkey = n_nationkey
+|  runtime filters: RF003 <- n_nationkey
+|
+|--JOIN BUILD
+|  |  join-table-id=06 plan-id=07 cohort-id=01
+|  |  build expressions: n_nationkey
+|  |
+|  20:EXCHANGE [BROADCAST]
+|  |
+|  07:SCAN HDFS [tpch.nation]
+|     partitions=1/1 files=1 size=2.15KB
+|     runtime filters: RF002 -> n_regionkey
+|
+09:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: ps_suppkey = s_suppkey
+|  runtime filters: RF004 <- s_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=07 plan-id=08 cohort-id=01
+|  |  build expressions: s_suppkey
+|  |
+|  19:EXCHANGE [BROADCAST]
+|  |
+|  06:SCAN HDFS [tpch.supplier]
+|     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF003 -> s_nationkey
+|
+05:SCAN HDFS [tpch.partsupp]
+   partitions=1/1 files=1 size=112.71MB
+   runtime filters: RF000 -> tpch.partsupp.ps_partkey, RF004 -> ps_suppkey
 ====
 # TPCH-Q3
 # Q3 - Shipping Priority Query
@@ -286,9 +453,9 @@ select
   o_orderdate,
   o_shippriority
 from
-  tpch.customer,
-  tpch.orders,
-  tpch.lineitem
+  customer,
+  orders,
+  lineitem
 where
   c_mktsegment = 'BUILDING'
   and c_custkey = o_custkey
@@ -304,6 +471,8 @@ order by
   o_orderdate
 limit 10
 ---- PLAN
+PLAN-ROOT SINK
+|
 06:TOP-N [LIMIT=10]
 |  order by: sum(l_extendedprice * (1 - l_discount)) DESC, o_orderdate ASC
 |
@@ -333,6 +502,8 @@ limit 10
    predicates: l_shipdate > '1995-03-15'
    runtime filters: RF001 -> l_orderkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 11:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: sum(l_extendedprice * (1 - l_discount)) DESC, o_orderdate ASC
 |  limit: 10
@@ -375,6 +546,59 @@ limit 10
    partitions=1/1 files=1 size=718.94MB
    predicates: l_shipdate > '1995-03-15'
    runtime filters: RF001 -> l_orderkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+11:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: sum(l_extendedprice * (1 - l_discount)) DESC, o_orderdate ASC
+|  limit: 10
+|
+06:TOP-N [LIMIT=10]
+|  order by: sum(l_extendedprice * (1 - l_discount)) DESC, o_orderdate ASC
+|
+10:AGGREGATE [FINALIZE]
+|  output: sum:merge(l_extendedprice * (1 - l_discount))
+|  group by: l_orderkey, o_orderdate, o_shippriority
+|
+09:EXCHANGE [HASH(l_orderkey,o_orderdate,o_shippriority)]
+|
+05:AGGREGATE [STREAMING]
+|  output: sum(l_extendedprice * (1 - l_discount))
+|  group by: l_orderkey, o_orderdate, o_shippriority
+|
+04:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: o_custkey = c_custkey
+|  runtime filters: RF000 <- c_custkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: c_custkey
+|  |
+|  08:EXCHANGE [BROADCAST]
+|  |
+|  00:SCAN HDFS [tpch.customer]
+|     partitions=1/1 files=1 size=23.08MB
+|     predicates: c_mktsegment = 'BUILDING'
+|
+03:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: l_orderkey = o_orderkey
+|  runtime filters: RF001 <- o_orderkey
+|
+|--JOIN BUILD
+|  |  join-table-id=01 plan-id=02 cohort-id=01
+|  |  build expressions: o_orderkey
+|  |
+|  07:EXCHANGE [BROADCAST]
+|  |
+|  01:SCAN HDFS [tpch.orders]
+|     partitions=1/1 files=1 size=162.56MB
+|     predicates: o_orderdate < '1995-03-15'
+|     runtime filters: RF000 -> o_custkey
+|
+02:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   predicates: l_shipdate > '1995-03-15'
+   runtime filters: RF001 -> l_orderkey
 ====
 # TPCH-Q4
 # Q4 - Order Priority Checking Query
@@ -382,7 +606,7 @@ select
   o_orderpriority,
   count(*) as order_count
 from
-  tpch.orders
+  orders
 where
   o_orderdate >= '1993-07-01'
   and o_orderdate < '1993-10-01'
@@ -390,7 +614,7 @@ where
     select
       *
     from
-      tpch.lineitem
+      lineitem
     where
       l_orderkey = o_orderkey
       and l_commitdate < l_receiptdate
@@ -400,6 +624,8 @@ group by
 order by
   o_orderpriority
 ---- PLAN
+PLAN-ROOT SINK
+|
 04:SORT
 |  order by: o_orderpriority ASC
 |
@@ -413,13 +639,15 @@ order by
 |
 |--00:SCAN HDFS [tpch.orders]
 |     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1993-07-01', o_orderdate < '1993-10-01'
+|     predicates: o_orderdate < '1993-10-01', o_orderdate >= '1993-07-01'
 |
 01:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
    predicates: l_commitdate < l_receiptdate
    runtime filters: RF000 -> l_orderkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 09:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: o_orderpriority ASC
 |
@@ -444,7 +672,46 @@ order by
 |  |
 |  00:SCAN HDFS [tpch.orders]
 |     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1993-07-01', o_orderdate < '1993-10-01'
+|     predicates: o_orderdate < '1993-10-01', o_orderdate >= '1993-07-01'
+|
+05:EXCHANGE [HASH(l_orderkey)]
+|
+01:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   predicates: l_commitdate < l_receiptdate
+   runtime filters: RF000 -> l_orderkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+09:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: o_orderpriority ASC
+|
+04:SORT
+|  order by: o_orderpriority ASC
+|
+08:AGGREGATE [FINALIZE]
+|  output: count:merge(*)
+|  group by: o_orderpriority
+|
+07:EXCHANGE [HASH(o_orderpriority)]
+|
+03:AGGREGATE [STREAMING]
+|  output: count(*)
+|  group by: o_orderpriority
+|
+02:HASH JOIN [RIGHT SEMI JOIN, PARTITIONED]
+|  hash predicates: l_orderkey = o_orderkey
+|  runtime filters: RF000 <- o_orderkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: o_orderkey
+|  |
+|  06:EXCHANGE [HASH(o_orderkey)]
+|  |
+|  00:SCAN HDFS [tpch.orders]
+|     partitions=1/1 files=1 size=162.56MB
+|     predicates: o_orderdate < '1993-10-01', o_orderdate >= '1993-07-01'
 |
 05:EXCHANGE [HASH(l_orderkey)]
 |
@@ -459,12 +726,12 @@ select
   n_name,
   sum(l_extendedprice * (1 - l_discount)) as revenue
 from
-  tpch.customer,
-  tpch.orders,
-  tpch.lineitem,
-  tpch.supplier,
-  tpch.nation,
-  tpch.region
+  customer,
+  orders,
+  lineitem,
+  supplier,
+  nation,
+  region
 where
   c_custkey = o_custkey
   and l_orderkey = o_orderkey
@@ -480,6 +747,8 @@ group by
 order by
   revenue desc
 ---- PLAN
+PLAN-ROOT SINK
+|
 12:SORT
 |  order by: sum(l_extendedprice * (1 - l_discount)) DESC
 |
@@ -504,11 +773,12 @@ order by
 |     runtime filters: RF000 -> n_regionkey
 |
 08:HASH JOIN [INNER JOIN]
-|  hash predicates: l_suppkey = s_suppkey, c_nationkey = s_nationkey
-|  runtime filters: RF002 <- s_suppkey, RF003 <- s_nationkey
+|  hash predicates: c_nationkey = s_nationkey, l_suppkey = s_suppkey
+|  runtime filters: RF002 <- s_nationkey, RF003 <- s_suppkey
 |
 |--03:SCAN HDFS [tpch.supplier]
 |     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF001 -> s_nationkey
 |
 07:HASH JOIN [INNER JOIN]
 |  hash predicates: o_custkey = c_custkey
@@ -516,7 +786,7 @@ order by
 |
 |--00:SCAN HDFS [tpch.customer]
 |     partitions=1/1 files=1 size=23.08MB
-|     runtime filters: RF001 -> tpch.customer.c_nationkey, RF003 -> c_nationkey
+|     runtime filters: RF001 -> tpch.customer.c_nationkey, RF002 -> c_nationkey
 |
 06:HASH JOIN [INNER JOIN]
 |  hash predicates: l_orderkey = o_orderkey
@@ -524,13 +794,15 @@ order by
 |
 |--01:SCAN HDFS [tpch.orders]
 |     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1994-01-01', o_orderdate < '1995-01-01'
+|     predicates: o_orderdate < '1995-01-01', o_orderdate >= '1994-01-01'
 |     runtime filters: RF004 -> o_custkey
 |
 02:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   runtime filters: RF002 -> l_suppkey, RF005 -> l_orderkey
+   runtime filters: RF003 -> l_suppkey, RF005 -> l_orderkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 20:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: sum(l_extendedprice * (1 - l_discount)) DESC
 |
@@ -568,13 +840,14 @@ order by
 |     runtime filters: RF000 -> n_regionkey
 |
 08:HASH JOIN [INNER JOIN, BROADCAST]
-|  hash predicates: l_suppkey = s_suppkey, c_nationkey = s_nationkey
-|  runtime filters: RF002 <- s_suppkey, RF003 <- s_nationkey
+|  hash predicates: c_nationkey = s_nationkey, l_suppkey = s_suppkey
+|  runtime filters: RF002 <- s_nationkey, RF003 <- s_suppkey
 |
 |--15:EXCHANGE [BROADCAST]
 |  |
 |  03:SCAN HDFS [tpch.supplier]
 |     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF001 -> s_nationkey
 |
 07:HASH JOIN [INNER JOIN, BROADCAST]
 |  hash predicates: o_custkey = c_custkey
@@ -584,7 +857,7 @@ order by
 |  |
 |  00:SCAN HDFS [tpch.customer]
 |     partitions=1/1 files=1 size=23.08MB
-|     runtime filters: RF001 -> tpch.customer.c_nationkey, RF003 -> c_nationkey
+|     runtime filters: RF001 -> tpch.customer.c_nationkey, RF002 -> c_nationkey
 |
 06:HASH JOIN [INNER JOIN, BROADCAST]
 |  hash predicates: l_orderkey = o_orderkey
@@ -594,32 +867,129 @@ order by
 |  |
 |  01:SCAN HDFS [tpch.orders]
 |     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1994-01-01', o_orderdate < '1995-01-01'
+|     predicates: o_orderdate < '1995-01-01', o_orderdate >= '1994-01-01'
 |     runtime filters: RF004 -> o_custkey
 |
 02:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   runtime filters: RF002 -> l_suppkey, RF005 -> l_orderkey
+   runtime filters: RF003 -> l_suppkey, RF005 -> l_orderkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+20:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: sum(l_extendedprice * (1 - l_discount)) DESC
+|
+12:SORT
+|  order by: sum(l_extendedprice * (1 - l_discount)) DESC
+|
+19:AGGREGATE [FINALIZE]
+|  output: sum:merge(l_extendedprice * (1 - l_discount))
+|  group by: n_name
+|
+18:EXCHANGE [HASH(n_name)]
+|
+11:AGGREGATE [STREAMING]
+|  output: sum(l_extendedprice * (1 - l_discount))
+|  group by: n_name
+|
+10:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: n_regionkey = r_regionkey
+|  runtime filters: RF000 <- r_regionkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: r_regionkey
+|  |
+|  17:EXCHANGE [BROADCAST]
+|  |
+|  05:SCAN HDFS [tpch.region]
+|     partitions=1/1 files=1 size=384B
+|     predicates: r_name = 'ASIA'
+|
+09:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: s_nationkey = n_nationkey
+|  runtime filters: RF001 <- n_nationkey
+|
+|--JOIN BUILD
+|  |  join-table-id=01 plan-id=02 cohort-id=01
+|  |  build expressions: n_nationkey
+|  |
+|  16:EXCHANGE [BROADCAST]
+|  |
+|  04:SCAN HDFS [tpch.nation]
+|     partitions=1/1 files=1 size=2.15KB
+|     runtime filters: RF000 -> n_regionkey
+|
+08:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: c_nationkey = s_nationkey, l_suppkey = s_suppkey
+|  runtime filters: RF002 <- s_nationkey, RF003 <- s_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=02 plan-id=03 cohort-id=01
+|  |  build expressions: s_nationkey, s_suppkey
+|  |
+|  15:EXCHANGE [BROADCAST]
+|  |
+|  03:SCAN HDFS [tpch.supplier]
+|     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF001 -> s_nationkey
+|
+07:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: o_custkey = c_custkey
+|  runtime filters: RF004 <- c_custkey
+|
+|--JOIN BUILD
+|  |  join-table-id=03 plan-id=04 cohort-id=01
+|  |  build expressions: c_custkey
+|  |
+|  14:EXCHANGE [BROADCAST]
+|  |
+|  00:SCAN HDFS [tpch.customer]
+|     partitions=1/1 files=1 size=23.08MB
+|     runtime filters: RF001 -> tpch.customer.c_nationkey, RF002 -> c_nationkey
+|
+06:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: l_orderkey = o_orderkey
+|  runtime filters: RF005 <- o_orderkey
+|
+|--JOIN BUILD
+|  |  join-table-id=04 plan-id=05 cohort-id=01
+|  |  build expressions: o_orderkey
+|  |
+|  13:EXCHANGE [BROADCAST]
+|  |
+|  01:SCAN HDFS [tpch.orders]
+|     partitions=1/1 files=1 size=162.56MB
+|     predicates: o_orderdate < '1995-01-01', o_orderdate >= '1994-01-01'
+|     runtime filters: RF004 -> o_custkey
+|
+02:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   runtime filters: RF003 -> l_suppkey, RF005 -> l_orderkey
 ====
 # TPCH-Q6
 # Q6 - Forecasting Revenue Change Query
 select
   sum(l_extendedprice * l_discount) as revenue
 from
-  tpch.lineitem
+  lineitem
 where
   l_shipdate >= '1994-01-01'
   and l_shipdate < '1995-01-01'
   and l_discount between 0.05 and 0.07
   and l_quantity < 24
 ---- PLAN
+PLAN-ROOT SINK
+|
 01:AGGREGATE [FINALIZE]
 |  output: sum(l_extendedprice * l_discount)
 |
 00:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   predicates: l_shipdate >= '1994-01-01', l_shipdate < '1995-01-01', l_discount >= 0.05, l_discount <= 0.07, l_quantity < 24
+   predicates: l_discount <= 0.07, l_discount >= 0.05, l_quantity < 24, l_shipdate < '1995-01-01', l_shipdate >= '1994-01-01'
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 03:AGGREGATE [FINALIZE]
 |  output: sum:merge(l_extendedprice * l_discount)
 |
@@ -630,7 +1000,21 @@ where
 |
 00:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   predicates: l_shipdate >= '1994-01-01', l_shipdate < '1995-01-01', l_discount >= 0.05, l_discount <= 0.07, l_quantity < 24
+   predicates: l_discount <= 0.07, l_discount >= 0.05, l_quantity < 24, l_shipdate < '1995-01-01', l_shipdate >= '1994-01-01'
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+03:AGGREGATE [FINALIZE]
+|  output: sum:merge(l_extendedprice * l_discount)
+|
+02:EXCHANGE [UNPARTITIONED]
+|
+01:AGGREGATE
+|  output: sum(l_extendedprice * l_discount)
+|
+00:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   predicates: l_discount <= 0.07, l_discount >= 0.05, l_quantity < 24, l_shipdate < '1995-01-01', l_shipdate >= '1994-01-01'
 ====
 # TPCH-Q7
 # Q7 - Volume Shipping Query
@@ -646,12 +1030,12 @@ from (
     year(l_shipdate) as l_year,
     l_extendedprice * (1 - l_discount) as volume
   from
-    tpch.supplier,
-    tpch.lineitem,
-    tpch.orders,
-    tpch.customer,
-    tpch.nation n1,
-    tpch.nation n2
+    supplier,
+    lineitem,
+    orders,
+    customer,
+    nation n1,
+    nation n2
   where
     s_suppkey = l_suppkey
     and o_orderkey = l_orderkey
@@ -673,6 +1057,8 @@ order by
   cust_nation,
   l_year
 ---- PLAN
+PLAN-ROOT SINK
+|
 12:SORT
 |  order by: supp_nation ASC, cust_nation ASC, l_year ASC
 |
@@ -721,9 +1107,11 @@ order by
 |
 01:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   predicates: l_shipdate >= '1995-01-01', l_shipdate <= '1996-12-31'
+   predicates: l_shipdate <= '1996-12-31', l_shipdate >= '1995-01-01'
    runtime filters: RF003 -> l_suppkey, RF004 -> l_orderkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 21:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: supp_nation ASC, cust_nation ASC, l_year ASC
 |
@@ -793,7 +1181,101 @@ order by
 |
 01:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   predicates: l_shipdate >= '1995-01-01', l_shipdate <= '1996-12-31'
+   predicates: l_shipdate <= '1996-12-31', l_shipdate >= '1995-01-01'
+   runtime filters: RF003 -> l_suppkey, RF004 -> l_orderkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+21:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: supp_nation ASC, cust_nation ASC, l_year ASC
+|
+12:SORT
+|  order by: supp_nation ASC, cust_nation ASC, l_year ASC
+|
+20:AGGREGATE [FINALIZE]
+|  output: sum:merge(volume)
+|  group by: supp_nation, cust_nation, l_year
+|
+19:EXCHANGE [HASH(supp_nation,cust_nation,l_year)]
+|
+11:AGGREGATE [STREAMING]
+|  output: sum(l_extendedprice * (1 - l_discount))
+|  group by: n1.n_name, n2.n_name, year(l_shipdate)
+|
+10:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: c_nationkey = n2.n_nationkey
+|  other predicates: ((n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY') OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE'))
+|  runtime filters: RF000 <- n2.n_nationkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: n2.n_nationkey
+|  |
+|  18:EXCHANGE [BROADCAST]
+|  |
+|  05:SCAN HDFS [tpch.nation n2]
+|     partitions=1/1 files=1 size=2.15KB
+|
+09:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: s_nationkey = n1.n_nationkey
+|  runtime filters: RF001 <- n1.n_nationkey
+|
+|--JOIN BUILD
+|  |  join-table-id=01 plan-id=02 cohort-id=01
+|  |  build expressions: n1.n_nationkey
+|  |
+|  17:EXCHANGE [BROADCAST]
+|  |
+|  04:SCAN HDFS [tpch.nation n1]
+|     partitions=1/1 files=1 size=2.15KB
+|
+08:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: o_custkey = c_custkey
+|  runtime filters: RF002 <- c_custkey
+|
+|--JOIN BUILD
+|  |  join-table-id=02 plan-id=03 cohort-id=01
+|  |  build expressions: c_custkey
+|  |
+|  16:EXCHANGE [BROADCAST]
+|  |
+|  03:SCAN HDFS [tpch.customer]
+|     partitions=1/1 files=1 size=23.08MB
+|     runtime filters: RF000 -> c_nationkey
+|
+07:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: l_suppkey = s_suppkey
+|  runtime filters: RF003 <- s_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=03 plan-id=04 cohort-id=01
+|  |  build expressions: s_suppkey
+|  |
+|  15:EXCHANGE [BROADCAST]
+|  |
+|  00:SCAN HDFS [tpch.supplier]
+|     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF001 -> s_nationkey
+|
+06:HASH JOIN [INNER JOIN, PARTITIONED]
+|  hash predicates: l_orderkey = o_orderkey
+|  runtime filters: RF004 <- o_orderkey
+|
+|--JOIN BUILD
+|  |  join-table-id=04 plan-id=05 cohort-id=01
+|  |  build expressions: o_orderkey
+|  |
+|  14:EXCHANGE [HASH(o_orderkey)]
+|  |
+|  02:SCAN HDFS [tpch.orders]
+|     partitions=1/1 files=1 size=162.56MB
+|     runtime filters: RF002 -> o_custkey
+|
+13:EXCHANGE [HASH(l_orderkey)]
+|
+01:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   predicates: l_shipdate <= '1996-12-31', l_shipdate >= '1995-01-01'
    runtime filters: RF003 -> l_suppkey, RF004 -> l_orderkey
 ====
 # TPCH-Q8
@@ -811,14 +1293,14 @@ from (
     l_extendedprice * (1 - l_discount) as volume,
     n2.n_name as nation
   from
-    tpch.part,
-    tpch.supplier,
-    tpch.lineitem,
-    tpch.orders,
-    tpch.customer,
-    tpch.nation n1,
-    tpch.nation n2,
-    tpch.region
+    part,
+    supplier,
+    lineitem,
+    orders,
+    customer,
+    nation n1,
+    nation n2,
+    region
   where
     p_partkey = l_partkey
     and s_suppkey = l_suppkey
@@ -836,6 +1318,8 @@ group by
 order by
   o_year
 ---- PLAN
+PLAN-ROOT SINK
+|
 16:SORT
 |  order by: o_year ASC
 |
@@ -867,42 +1351,44 @@ order by
 |     runtime filters: RF001 -> n1.n_regionkey
 |
 11:HASH JOIN [INNER JOIN]
-|  hash predicates: o_custkey = c_custkey
-|  runtime filters: RF003 <- c_custkey
+|  hash predicates: c_custkey = o_custkey
+|  runtime filters: RF003 <- o_custkey
 |
-|--04:SCAN HDFS [tpch.customer]
-|     partitions=1/1 files=1 size=23.08MB
-|     runtime filters: RF002 -> c_nationkey
-|
-10:HASH JOIN [INNER JOIN]
-|  hash predicates: l_suppkey = s_suppkey
-|  runtime filters: RF004 <- s_suppkey
-|
-|--01:SCAN HDFS [tpch.supplier]
-|     partitions=1/1 files=1 size=1.33MB
-|     runtime filters: RF000 -> s_nationkey
-|
-09:HASH JOIN [INNER JOIN]
-|  hash predicates: l_orderkey = o_orderkey
-|  runtime filters: RF005 <- o_orderkey
-|
-|--03:SCAN HDFS [tpch.orders]
+|--10:HASH JOIN [INNER JOIN]
+|  |  hash predicates: l_suppkey = s_suppkey
+|  |  runtime filters: RF004 <- s_suppkey
+|  |
+|  |--01:SCAN HDFS [tpch.supplier]
+|  |     partitions=1/1 files=1 size=1.33MB
+|  |     runtime filters: RF000 -> s_nationkey
+|  |
+|  09:HASH JOIN [INNER JOIN]
+|  |  hash predicates: o_orderkey = l_orderkey
+|  |  runtime filters: RF005 <- l_orderkey
+|  |
+|  |--08:HASH JOIN [INNER JOIN]
+|  |  |  hash predicates: l_partkey = p_partkey
+|  |  |  runtime filters: RF006 <- p_partkey
+|  |  |
+|  |  |--00:SCAN HDFS [tpch.part]
+|  |  |     partitions=1/1 files=1 size=22.83MB
+|  |  |     predicates: p_type = 'ECONOMY ANODIZED STEEL'
+|  |  |
+|  |  02:SCAN HDFS [tpch.lineitem]
+|  |     partitions=1/1 files=1 size=718.94MB
+|  |     runtime filters: RF004 -> l_suppkey, RF006 -> l_partkey
+|  |
+|  03:SCAN HDFS [tpch.orders]
 |     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1995-01-01', o_orderdate <= '1996-12-31'
-|     runtime filters: RF003 -> o_custkey
+|     predicates: o_orderdate <= '1996-12-31', o_orderdate >= '1995-01-01'
+|     runtime filters: RF005 -> o_orderkey
 |
-08:HASH JOIN [INNER JOIN]
-|  hash predicates: l_partkey = p_partkey
-|  runtime filters: RF006 <- p_partkey
-|
-|--00:SCAN HDFS [tpch.part]
-|     partitions=1/1 files=1 size=22.83MB
-|     predicates: p_type = 'ECONOMY ANODIZED STEEL'
-|
-02:SCAN HDFS [tpch.lineitem]
-   partitions=1/1 files=1 size=718.94MB
-   runtime filters: RF004 -> l_suppkey, RF005 -> l_orderkey, RF006 -> l_partkey
+04:SCAN HDFS [tpch.customer]
+   partitions=1/1 files=1 size=23.08MB
+   runtime filters: RF002 -> c_nationkey, RF003 -> c_custkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 28:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: o_year ASC
 |
@@ -948,54 +1434,178 @@ order by
 |     partitions=1/1 files=1 size=2.15KB
 |     runtime filters: RF001 -> n1.n_regionkey
 |
-11:HASH JOIN [INNER JOIN, PARTITIONED]
-|  hash predicates: o_custkey = c_custkey
-|  runtime filters: RF003 <- c_custkey
+11:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: c_custkey = o_custkey
+|  runtime filters: RF003 <- o_custkey
 |
-|--22:EXCHANGE [HASH(c_custkey)]
+|--22:EXCHANGE [BROADCAST]
 |  |
-|  04:SCAN HDFS [tpch.customer]
-|     partitions=1/1 files=1 size=23.08MB
-|     runtime filters: RF002 -> c_nationkey
-|
-21:EXCHANGE [HASH(o_custkey)]
-|
-10:HASH JOIN [INNER JOIN, BROADCAST]
-|  hash predicates: l_suppkey = s_suppkey
-|  runtime filters: RF004 <- s_suppkey
-|
-|--20:EXCHANGE [BROADCAST]
+|  10:HASH JOIN [INNER JOIN, PARTITIONED]
+|  |  hash predicates: l_suppkey = s_suppkey
+|  |  runtime filters: RF004 <- s_suppkey
 |  |
-|  01:SCAN HDFS [tpch.supplier]
-|     partitions=1/1 files=1 size=1.33MB
-|     runtime filters: RF000 -> s_nationkey
-|
-09:HASH JOIN [INNER JOIN, PARTITIONED]
-|  hash predicates: l_orderkey = o_orderkey
-|  runtime filters: RF005 <- o_orderkey
-|
-|--19:EXCHANGE [HASH(o_orderkey)]
+|  |--21:EXCHANGE [HASH(s_suppkey)]
+|  |  |
+|  |  01:SCAN HDFS [tpch.supplier]
+|  |     partitions=1/1 files=1 size=1.33MB
+|  |     runtime filters: RF000 -> s_nationkey
+|  |
+|  20:EXCHANGE [HASH(l_suppkey)]
+|  |
+|  09:HASH JOIN [INNER JOIN, PARTITIONED]
+|  |  hash predicates: o_orderkey = l_orderkey
+|  |  runtime filters: RF005 <- l_orderkey
+|  |
+|  |--19:EXCHANGE [HASH(l_orderkey)]
+|  |  |
+|  |  08:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  |  hash predicates: l_partkey = p_partkey
+|  |  |  runtime filters: RF006 <- p_partkey
+|  |  |
+|  |  |--17:EXCHANGE [BROADCAST]
+|  |  |  |
+|  |  |  00:SCAN HDFS [tpch.part]
+|  |  |     partitions=1/1 files=1 size=22.83MB
+|  |  |     predicates: p_type = 'ECONOMY ANODIZED STEEL'
+|  |  |
+|  |  02:SCAN HDFS [tpch.lineitem]
+|  |     partitions=1/1 files=1 size=718.94MB
+|  |     runtime filters: RF004 -> l_suppkey, RF006 -> l_partkey
+|  |
+|  18:EXCHANGE [HASH(o_orderkey)]
 |  |
 |  03:SCAN HDFS [tpch.orders]
 |     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1995-01-01', o_orderdate <= '1996-12-31'
-|     runtime filters: RF003 -> o_custkey
+|     predicates: o_orderdate <= '1996-12-31', o_orderdate >= '1995-01-01'
+|     runtime filters: RF005 -> o_orderkey
 |
-18:EXCHANGE [HASH(l_orderkey)]
+04:SCAN HDFS [tpch.customer]
+   partitions=1/1 files=1 size=23.08MB
+   runtime filters: RF002 -> c_nationkey, RF003 -> c_custkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
 |
-08:HASH JOIN [INNER JOIN, BROADCAST]
-|  hash predicates: l_partkey = p_partkey
-|  runtime filters: RF006 <- p_partkey
+28:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: o_year ASC
 |
-|--17:EXCHANGE [BROADCAST]
+16:SORT
+|  order by: o_year ASC
+|
+27:AGGREGATE [FINALIZE]
+|  output: sum:merge(CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0 END), sum:merge(volume)
+|  group by: o_year
+|
+26:EXCHANGE [HASH(o_year)]
+|
+15:AGGREGATE [STREAMING]
+|  output: sum(CASE WHEN n2.n_name = 'BRAZIL' THEN l_extendedprice * (1 - l_discount) ELSE 0 END), sum(l_extendedprice * (1 - l_discount))
+|  group by: year(o_orderdate)
+|
+14:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: s_nationkey = n2.n_nationkey
+|  runtime filters: RF000 <- n2.n_nationkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: n2.n_nationkey
 |  |
-|  00:SCAN HDFS [tpch.part]
-|     partitions=1/1 files=1 size=22.83MB
-|     predicates: p_type = 'ECONOMY ANODIZED STEEL'
+|  25:EXCHANGE [BROADCAST]
+|  |
+|  06:SCAN HDFS [tpch.nation n2]
+|     partitions=1/1 files=1 size=2.15KB
 |
-02:SCAN HDFS [tpch.lineitem]
-   partitions=1/1 files=1 size=718.94MB
-   runtime filters: RF004 -> l_suppkey, RF005 -> l_orderkey, RF006 -> l_partkey
+13:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: n1.n_regionkey = r_regionkey
+|  runtime filters: RF001 <- r_regionkey
+|
+|--JOIN BUILD
+|  |  join-table-id=01 plan-id=02 cohort-id=01
+|  |  build expressions: r_regionkey
+|  |
+|  24:EXCHANGE [BROADCAST]
+|  |
+|  07:SCAN HDFS [tpch.region]
+|     partitions=1/1 files=1 size=384B
+|     predicates: r_name = 'AMERICA'
+|
+12:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: c_nationkey = n1.n_nationkey
+|  runtime filters: RF002 <- n1.n_nationkey
+|
+|--JOIN BUILD
+|  |  join-table-id=02 plan-id=03 cohort-id=01
+|  |  build expressions: n1.n_nationkey
+|  |
+|  23:EXCHANGE [BROADCAST]
+|  |
+|  05:SCAN HDFS [tpch.nation n1]
+|     partitions=1/1 files=1 size=2.15KB
+|     runtime filters: RF001 -> n1.n_regionkey
+|
+11:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: c_custkey = o_custkey
+|  runtime filters: RF003 <- o_custkey
+|
+|--JOIN BUILD
+|  |  join-table-id=03 plan-id=04 cohort-id=01
+|  |  build expressions: o_custkey
+|  |
+|  22:EXCHANGE [BROADCAST]
+|  |
+|  10:HASH JOIN [INNER JOIN, PARTITIONED]
+|  |  hash predicates: l_suppkey = s_suppkey
+|  |  runtime filters: RF004 <- s_suppkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=04 plan-id=05 cohort-id=02
+|  |  |  build expressions: s_suppkey
+|  |  |
+|  |  21:EXCHANGE [HASH(s_suppkey)]
+|  |  |
+|  |  01:SCAN HDFS [tpch.supplier]
+|  |     partitions=1/1 files=1 size=1.33MB
+|  |     runtime filters: RF000 -> s_nationkey
+|  |
+|  20:EXCHANGE [HASH(l_suppkey)]
+|  |
+|  09:HASH JOIN [INNER JOIN, PARTITIONED]
+|  |  hash predicates: o_orderkey = l_orderkey
+|  |  runtime filters: RF005 <- l_orderkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=05 plan-id=06 cohort-id=02
+|  |  |  build expressions: l_orderkey
+|  |  |
+|  |  19:EXCHANGE [HASH(l_orderkey)]
+|  |  |
+|  |  08:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  |  hash predicates: l_partkey = p_partkey
+|  |  |  runtime filters: RF006 <- p_partkey
+|  |  |
+|  |  |--JOIN BUILD
+|  |  |  |  join-table-id=06 plan-id=07 cohort-id=03
+|  |  |  |  build expressions: p_partkey
+|  |  |  |
+|  |  |  17:EXCHANGE [BROADCAST]
+|  |  |  |
+|  |  |  00:SCAN HDFS [tpch.part]
+|  |  |     partitions=1/1 files=1 size=22.83MB
+|  |  |     predicates: p_type = 'ECONOMY ANODIZED STEEL'
+|  |  |
+|  |  02:SCAN HDFS [tpch.lineitem]
+|  |     partitions=1/1 files=1 size=718.94MB
+|  |     runtime filters: RF004 -> l_suppkey, RF006 -> l_partkey
+|  |
+|  18:EXCHANGE [HASH(o_orderkey)]
+|  |
+|  03:SCAN HDFS [tpch.orders]
+|     partitions=1/1 files=1 size=162.56MB
+|     predicates: o_orderdate <= '1996-12-31', o_orderdate >= '1995-01-01'
+|     runtime filters: RF005 -> o_orderkey
+|
+04:SCAN HDFS [tpch.customer]
+   partitions=1/1 files=1 size=23.08MB
+   runtime filters: RF002 -> c_nationkey, RF003 -> c_custkey
 ====
 # TPCH-Q9
 # Q9 - Product Type Measure Query
@@ -1009,12 +1619,12 @@ from(
     year(o_orderdate) as o_year,
     l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity as amount
   from
-    tpch.part,
-    tpch.supplier,
-    tpch.lineitem,
-    tpch.partsupp,
-    tpch.orders,
-    tpch.nation
+    part,
+    supplier,
+    lineitem,
+    partsupp,
+    orders,
+    nation
   where
     s_suppkey = l_suppkey
     and ps_suppkey = l_suppkey
@@ -1031,6 +1641,8 @@ order by
   nation,
   o_year desc
 ---- PLAN
+PLAN-ROOT SINK
+|
 12:SORT
 |  order by: nation ASC, o_year DESC
 |
@@ -1046,8 +1658,8 @@ order by
 |     partitions=1/1 files=1 size=2.15KB
 |
 09:HASH JOIN [INNER JOIN]
-|  hash predicates: l_suppkey = ps_suppkey, l_partkey = ps_partkey
-|  runtime filters: RF001 <- ps_suppkey, RF002 <- ps_partkey
+|  hash predicates: l_partkey = ps_partkey, l_suppkey = ps_suppkey
+|  runtime filters: RF001 <- ps_partkey, RF002 <- ps_suppkey
 |
 |--03:SCAN HDFS [tpch.partsupp]
 |     partitions=1/1 files=1 size=112.71MB
@@ -1058,7 +1670,7 @@ order by
 |
 |--01:SCAN HDFS [tpch.supplier]
 |     partitions=1/1 files=1 size=1.33MB
-|     runtime filters: RF000 -> s_nationkey
+|     runtime filters: RF000 -> s_nationkey, RF002 -> tpch.supplier.s_suppkey
 |
 07:HASH JOIN [INNER JOIN]
 |  hash predicates: l_orderkey = o_orderkey
@@ -1074,11 +1686,14 @@ order by
 |--00:SCAN HDFS [tpch.part]
 |     partitions=1/1 files=1 size=22.83MB
 |     predicates: p_name LIKE '%green%'
+|     runtime filters: RF001 -> tpch.part.p_partkey
 |
 02:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   runtime filters: RF001 -> l_suppkey, RF002 -> l_partkey, RF003 -> l_suppkey, RF004 -> l_orderkey, RF005 -> l_partkey
+   runtime filters: RF001 -> l_partkey, RF002 -> l_suppkey, RF003 -> l_suppkey, RF004 -> l_orderkey, RF005 -> l_partkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 21:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: nation ASC, o_year DESC
 |
@@ -1105,8 +1720,8 @@ order by
 |     partitions=1/1 files=1 size=2.15KB
 |
 09:HASH JOIN [INNER JOIN, BROADCAST]
-|  hash predicates: l_suppkey = ps_suppkey, l_partkey = ps_partkey
-|  runtime filters: RF001 <- ps_suppkey, RF002 <- ps_partkey
+|  hash predicates: l_partkey = ps_partkey, l_suppkey = ps_suppkey
+|  runtime filters: RF001 <- ps_partkey, RF002 <- ps_suppkey
 |
 |--17:EXCHANGE [BROADCAST]
 |  |
@@ -1121,7 +1736,7 @@ order by
 |  |
 |  01:SCAN HDFS [tpch.supplier]
 |     partitions=1/1 files=1 size=1.33MB
-|     runtime filters: RF000 -> s_nationkey
+|     runtime filters: RF000 -> s_nationkey, RF002 -> tpch.supplier.s_suppkey
 |
 07:HASH JOIN [INNER JOIN, PARTITIONED]
 |  hash predicates: l_orderkey = o_orderkey
@@ -1143,10 +1758,103 @@ order by
 |  00:SCAN HDFS [tpch.part]
 |     partitions=1/1 files=1 size=22.83MB
 |     predicates: p_name LIKE '%green%'
+|     runtime filters: RF001 -> tpch.part.p_partkey
 |
 02:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   runtime filters: RF001 -> l_suppkey, RF002 -> l_partkey, RF003 -> l_suppkey, RF004 -> l_orderkey, RF005 -> l_partkey
+   runtime filters: RF001 -> l_partkey, RF002 -> l_suppkey, RF003 -> l_suppkey, RF004 -> l_orderkey, RF005 -> l_partkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+21:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: nation ASC, o_year DESC
+|
+12:SORT
+|  order by: nation ASC, o_year DESC
+|
+20:AGGREGATE [FINALIZE]
+|  output: sum:merge(amount)
+|  group by: nation, o_year
+|
+19:EXCHANGE [HASH(nation,o_year)]
+|
+11:AGGREGATE [STREAMING]
+|  output: sum(l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity)
+|  group by: n_name, year(o_orderdate)
+|
+10:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: s_nationkey = n_nationkey
+|  runtime filters: RF000 <- n_nationkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: n_nationkey
+|  |
+|  18:EXCHANGE [BROADCAST]
+|  |
+|  05:SCAN HDFS [tpch.nation]
+|     partitions=1/1 files=1 size=2.15KB
+|
+09:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: l_partkey = ps_partkey, l_suppkey = ps_suppkey
+|  runtime filters: RF001 <- ps_partkey, RF002 <- ps_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=01 plan-id=02 cohort-id=01
+|  |  build expressions: ps_partkey, ps_suppkey
+|  |
+|  17:EXCHANGE [BROADCAST]
+|  |
+|  03:SCAN HDFS [tpch.partsupp]
+|     partitions=1/1 files=1 size=112.71MB
+|
+08:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: l_suppkey = s_suppkey
+|  runtime filters: RF003 <- s_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=02 plan-id=03 cohort-id=01
+|  |  build expressions: s_suppkey
+|  |
+|  16:EXCHANGE [BROADCAST]
+|  |
+|  01:SCAN HDFS [tpch.supplier]
+|     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF000 -> s_nationkey, RF002 -> tpch.supplier.s_suppkey
+|
+07:HASH JOIN [INNER JOIN, PARTITIONED]
+|  hash predicates: l_orderkey = o_orderkey
+|  runtime filters: RF004 <- o_orderkey
+|
+|--JOIN BUILD
+|  |  join-table-id=03 plan-id=04 cohort-id=01
+|  |  build expressions: o_orderkey
+|  |
+|  15:EXCHANGE [HASH(o_orderkey)]
+|  |
+|  04:SCAN HDFS [tpch.orders]
+|     partitions=1/1 files=1 size=162.56MB
+|
+14:EXCHANGE [HASH(l_orderkey)]
+|
+06:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: l_partkey = p_partkey
+|  runtime filters: RF005 <- p_partkey
+|
+|--JOIN BUILD
+|  |  join-table-id=04 plan-id=05 cohort-id=01
+|  |  build expressions: p_partkey
+|  |
+|  13:EXCHANGE [BROADCAST]
+|  |
+|  00:SCAN HDFS [tpch.part]
+|     partitions=1/1 files=1 size=22.83MB
+|     predicates: p_name LIKE '%green%'
+|     runtime filters: RF001 -> tpch.part.p_partkey
+|
+02:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   runtime filters: RF001 -> l_partkey, RF002 -> l_suppkey, RF003 -> l_suppkey, RF004 -> l_orderkey, RF005 -> l_partkey
 ====
 # TPCH-Q10
 # Q10 - Returned Item Reporting Query
@@ -1161,10 +1869,10 @@ select
   c_phone,
   c_comment
 from
-  tpch.customer,
-  tpch.orders,
-  tpch.lineitem,
-  tpch.nation
+  customer,
+  orders,
+  lineitem,
+  nation
 where
   c_custkey = o_custkey
   and l_orderkey = o_orderkey
@@ -1184,6 +1892,8 @@ order by
   revenue desc
 limit 20
 ---- PLAN
+PLAN-ROOT SINK
+|
 08:TOP-N [LIMIT=20]
 |  order by: sum(l_extendedprice * (1 - l_discount)) DESC
 |
@@ -1199,39 +1909,40 @@ limit 20
 |     partitions=1/1 files=1 size=2.15KB
 |
 05:HASH JOIN [INNER JOIN]
-|  hash predicates: o_custkey = c_custkey
-|  runtime filters: RF001 <- c_custkey
+|  hash predicates: c_custkey = o_custkey
+|  runtime filters: RF001 <- o_custkey
 |
-|--00:SCAN HDFS [tpch.customer]
-|     partitions=1/1 files=1 size=23.08MB
-|     runtime filters: RF000 -> c_nationkey
+|--04:HASH JOIN [INNER JOIN]
+|  |  hash predicates: l_orderkey = o_orderkey
+|  |  runtime filters: RF002 <- o_orderkey
+|  |
+|  |--01:SCAN HDFS [tpch.orders]
+|  |     partitions=1/1 files=1 size=162.56MB
+|  |     predicates: o_orderdate < '1994-01-01', o_orderdate >= '1993-10-01'
+|  |
+|  02:SCAN HDFS [tpch.lineitem]
+|     partitions=1/1 files=1 size=718.94MB
+|     predicates: l_returnflag = 'R'
+|     runtime filters: RF002 -> l_orderkey
 |
-04:HASH JOIN [INNER JOIN]
-|  hash predicates: l_orderkey = o_orderkey
-|  runtime filters: RF002 <- o_orderkey
-|
-|--01:SCAN HDFS [tpch.orders]
-|     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1993-10-01', o_orderdate < '1994-01-01'
-|     runtime filters: RF001 -> o_custkey
-|
-02:SCAN HDFS [tpch.lineitem]
-   partitions=1/1 files=1 size=718.94MB
-   predicates: l_returnflag = 'R'
-   runtime filters: RF002 -> l_orderkey
+00:SCAN HDFS [tpch.customer]
+   partitions=1/1 files=1 size=23.08MB
+   runtime filters: RF000 -> c_nationkey, RF001 -> c_custkey
 ---- DISTRIBUTEDPLAN
-15:MERGING-EXCHANGE [UNPARTITIONED]
+PLAN-ROOT SINK
+|
+14:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: sum(l_extendedprice * (1 - l_discount)) DESC
 |  limit: 20
 |
 08:TOP-N [LIMIT=20]
 |  order by: sum(l_extendedprice * (1 - l_discount)) DESC
 |
-14:AGGREGATE [FINALIZE]
+13:AGGREGATE [FINALIZE]
 |  output: sum:merge(l_extendedprice * (1 - l_discount))
 |  group by: c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
 |
-13:EXCHANGE [HASH(c_custkey,c_name,c_acctbal,c_phone,n_name,c_address,c_comment)]
+12:EXCHANGE [HASH(c_custkey,c_name,c_acctbal,c_phone,n_name,c_address,c_comment)]
 |
 07:AGGREGATE [STREAMING]
 |  output: sum(l_extendedprice * (1 - l_discount))
@@ -1241,38 +1952,100 @@ limit 20
 |  hash predicates: c_nationkey = n_nationkey
 |  runtime filters: RF000 <- n_nationkey
 |
-|--12:EXCHANGE [BROADCAST]
+|--11:EXCHANGE [BROADCAST]
 |  |
 |  03:SCAN HDFS [tpch.nation]
 |     partitions=1/1 files=1 size=2.15KB
 |
-05:HASH JOIN [INNER JOIN, PARTITIONED]
-|  hash predicates: o_custkey = c_custkey
-|  runtime filters: RF001 <- c_custkey
+05:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: c_custkey = o_custkey
+|  runtime filters: RF001 <- o_custkey
 |
-|--11:EXCHANGE [HASH(c_custkey)]
+|--10:EXCHANGE [BROADCAST]
 |  |
-|  00:SCAN HDFS [tpch.customer]
-|     partitions=1/1 files=1 size=23.08MB
-|     runtime filters: RF000 -> c_nationkey
-|
-10:EXCHANGE [HASH(o_custkey)]
-|
-04:HASH JOIN [INNER JOIN, BROADCAST]
-|  hash predicates: l_orderkey = o_orderkey
-|  runtime filters: RF002 <- o_orderkey
-|
-|--09:EXCHANGE [BROADCAST]
+|  04:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  hash predicates: l_orderkey = o_orderkey
+|  |  runtime filters: RF002 <- o_orderkey
 |  |
-|  01:SCAN HDFS [tpch.orders]
-|     partitions=1/1 files=1 size=162.56MB
-|     predicates: o_orderdate >= '1993-10-01', o_orderdate < '1994-01-01'
-|     runtime filters: RF001 -> o_custkey
+|  |--09:EXCHANGE [BROADCAST]
+|  |  |
+|  |  01:SCAN HDFS [tpch.orders]
+|  |     partitions=1/1 files=1 size=162.56MB
+|  |     predicates: o_orderdate < '1994-01-01', o_orderdate >= '1993-10-01'
+|  |
+|  02:SCAN HDFS [tpch.lineitem]
+|     partitions=1/1 files=1 size=718.94MB
+|     predicates: l_returnflag = 'R'
+|     runtime filters: RF002 -> l_orderkey
 |
-02:SCAN HDFS [tpch.lineitem]
-   partitions=1/1 files=1 size=718.94MB
-   predicates: l_returnflag = 'R'
-   runtime filters: RF002 -> l_orderkey
+00:SCAN HDFS [tpch.customer]
+   partitions=1/1 files=1 size=23.08MB
+   runtime filters: RF000 -> c_nationkey, RF001 -> c_custkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+14:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: sum(l_extendedprice * (1 - l_discount)) DESC
+|  limit: 20
+|
+08:TOP-N [LIMIT=20]
+|  order by: sum(l_extendedprice * (1 - l_discount)) DESC
+|
+13:AGGREGATE [FINALIZE]
+|  output: sum:merge(l_extendedprice * (1 - l_discount))
+|  group by: c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
+|
+12:EXCHANGE [HASH(c_custkey,c_name,c_acctbal,c_phone,n_name,c_address,c_comment)]
+|
+07:AGGREGATE [STREAMING]
+|  output: sum(l_extendedprice * (1 - l_discount))
+|  group by: c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
+|
+06:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: c_nationkey = n_nationkey
+|  runtime filters: RF000 <- n_nationkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: n_nationkey
+|  |
+|  11:EXCHANGE [BROADCAST]
+|  |
+|  03:SCAN HDFS [tpch.nation]
+|     partitions=1/1 files=1 size=2.15KB
+|
+05:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: c_custkey = o_custkey
+|  runtime filters: RF001 <- o_custkey
+|
+|--JOIN BUILD
+|  |  join-table-id=01 plan-id=02 cohort-id=01
+|  |  build expressions: o_custkey
+|  |
+|  10:EXCHANGE [BROADCAST]
+|  |
+|  04:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  hash predicates: l_orderkey = o_orderkey
+|  |  runtime filters: RF002 <- o_orderkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=02 plan-id=03 cohort-id=02
+|  |  |  build expressions: o_orderkey
+|  |  |
+|  |  09:EXCHANGE [BROADCAST]
+|  |  |
+|  |  01:SCAN HDFS [tpch.orders]
+|  |     partitions=1/1 files=1 size=162.56MB
+|  |     predicates: o_orderdate < '1994-01-01', o_orderdate >= '1993-10-01'
+|  |
+|  02:SCAN HDFS [tpch.lineitem]
+|     partitions=1/1 files=1 size=718.94MB
+|     predicates: l_returnflag = 'R'
+|     runtime filters: RF002 -> l_orderkey
+|
+00:SCAN HDFS [tpch.customer]
+   partitions=1/1 files=1 size=23.08MB
+   runtime filters: RF000 -> c_nationkey, RF001 -> c_custkey
 ====
 # TPCH-Q11
 # Q11 - Important Stock Identification
@@ -1284,9 +2057,9 @@ from (
     ps_partkey,
     sum(ps_supplycost * ps_availqty) as value
   from
-    tpch.partsupp,
-    tpch.supplier,
-    tpch.nation
+    partsupp,
+    supplier,
+    nation
   where
     ps_suppkey = s_suppkey
     and s_nationkey = n_nationkey
@@ -1299,9 +2072,9 @@ where
     select
       sum(ps_supplycost * ps_availqty) * 0.0001
     from
-      tpch.partsupp,
-      tpch.supplier,
-      tpch.nation
+      partsupp,
+      supplier,
+      nation
     where
       ps_suppkey = s_suppkey
       and s_nationkey = n_nationkey
@@ -1310,6 +2083,8 @@ where
 order by
   value desc
 ---- PLAN
+PLAN-ROOT SINK
+|
 13:SORT
 |  order by: value DESC
 |
@@ -1363,6 +2138,8 @@ order by
    partitions=1/1 files=1 size=112.71MB
    runtime filters: RF001 -> ps_suppkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 23:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: value DESC
 |
@@ -1439,6 +2216,105 @@ order by
 00:SCAN HDFS [tpch.partsupp]
    partitions=1/1 files=1 size=112.71MB
    runtime filters: RF001 -> ps_suppkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+23:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: value DESC
+|
+13:SORT
+|  order by: value DESC
+|
+12:NESTED LOOP JOIN [INNER JOIN, BROADCAST]
+|  join table id: 00
+|  predicates: sum(ps_supplycost * ps_availqty) > sum(ps_supplycost * ps_availqty) * 0.0001
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |
+|  22:EXCHANGE [BROADCAST]
+|  |
+|  21:AGGREGATE [FINALIZE]
+|  |  output: sum:merge(ps_supplycost * ps_availqty)
+|  |
+|  20:EXCHANGE [UNPARTITIONED]
+|  |
+|  11:AGGREGATE
+|  |  output: sum(ps_supplycost * ps_availqty)
+|  |
+|  10:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  hash predicates: s_nationkey = n_nationkey
+|  |  runtime filters: RF002 <- n_nationkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=01 plan-id=02 cohort-id=02
+|  |  |  build expressions: n_nationkey
+|  |  |
+|  |  19:EXCHANGE [BROADCAST]
+|  |  |
+|  |  08:SCAN HDFS [tpch.nation]
+|  |     partitions=1/1 files=1 size=2.15KB
+|  |     predicates: n_name = 'GERMANY'
+|  |
+|  09:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  hash predicates: ps_suppkey = s_suppkey
+|  |  runtime filters: RF003 <- s_suppkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=02 plan-id=03 cohort-id=02
+|  |  |  build expressions: s_suppkey
+|  |  |
+|  |  18:EXCHANGE [BROADCAST]
+|  |  |
+|  |  07:SCAN HDFS [tpch.supplier]
+|  |     partitions=1/1 files=1 size=1.33MB
+|  |     runtime filters: RF002 -> s_nationkey
+|  |
+|  06:SCAN HDFS [tpch.partsupp]
+|     partitions=1/1 files=1 size=112.71MB
+|     runtime filters: RF003 -> ps_suppkey
+|
+17:AGGREGATE [FINALIZE]
+|  output: sum:merge(ps_supplycost * ps_availqty)
+|  group by: ps_partkey
+|
+16:EXCHANGE [HASH(ps_partkey)]
+|
+05:AGGREGATE [STREAMING]
+|  output: sum(ps_supplycost * ps_availqty)
+|  group by: ps_partkey
+|
+04:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: s_nationkey = n_nationkey
+|  runtime filters: RF000 <- n_nationkey
+|
+|--JOIN BUILD
+|  |  join-table-id=03 plan-id=04 cohort-id=01
+|  |  build expressions: n_nationkey
+|  |
+|  15:EXCHANGE [BROADCAST]
+|  |
+|  02:SCAN HDFS [tpch.nation]
+|     partitions=1/1 files=1 size=2.15KB
+|     predicates: n_name = 'GERMANY'
+|
+03:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: ps_suppkey = s_suppkey
+|  runtime filters: RF001 <- s_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=04 plan-id=05 cohort-id=01
+|  |  build expressions: s_suppkey
+|  |
+|  14:EXCHANGE [BROADCAST]
+|  |
+|  01:SCAN HDFS [tpch.supplier]
+|     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF000 -> s_nationkey
+|
+00:SCAN HDFS [tpch.partsupp]
+   partitions=1/1 files=1 size=112.71MB
+   runtime filters: RF001 -> ps_suppkey
 ====
 # TPCH-Q12
 # Q12 - Shipping Mode and Order Priority Query
@@ -1457,8 +2333,8 @@ select
     else 0
   end) as low_line_count
 from
-  tpch.orders,
-  tpch.lineitem
+  orders,
+  lineitem
 where
   o_orderkey = l_orderkey
   and l_shipmode in ('MAIL', 'SHIP')
@@ -1471,6 +2347,8 @@ group by
 order by
   l_shipmode
 ---- PLAN
+PLAN-ROOT SINK
+|
 04:SORT
 |  order by: l_shipmode ASC
 |
@@ -1484,37 +2362,79 @@ order by
 |
 |--01:SCAN HDFS [tpch.lineitem]
 |     partitions=1/1 files=1 size=718.94MB
-|     predicates: l_shipmode IN ('MAIL', 'SHIP'), l_commitdate < l_receiptdate, l_shipdate < l_commitdate, l_receiptdate >= '1994-01-01', l_receiptdate < '1995-01-01'
+|     predicates: l_shipmode IN ('MAIL', 'SHIP'), l_commitdate < l_receiptdate, l_receiptdate < '1995-01-01', l_receiptdate >= '1994-01-01', l_shipdate < l_commitdate
 |
 00:SCAN HDFS [tpch.orders]
    partitions=1/1 files=1 size=162.56MB
    runtime filters: RF000 -> o_orderkey
 ---- DISTRIBUTEDPLAN
-08:MERGING-EXCHANGE [UNPARTITIONED]
+PLAN-ROOT SINK
+|
+09:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: l_shipmode ASC
 |
 04:SORT
 |  order by: l_shipmode ASC
 |
-07:AGGREGATE [FINALIZE]
+08:AGGREGATE [FINALIZE]
 |  output: sum:merge(CASE WHEN o_orderpriority = '1-URGENT' OR o_orderpriority = '2-HIGH' THEN 1 ELSE 0 END), sum:merge(CASE WHEN o_orderpriority != '1-URGENT' AND o_orderpriority != '2-HIGH' THEN 1 ELSE 0 END)
 |  group by: l_shipmode
 |
-06:EXCHANGE [HASH(l_shipmode)]
+07:EXCHANGE [HASH(l_shipmode)]
 |
 03:AGGREGATE [STREAMING]
 |  output: sum(CASE WHEN o_orderpriority = '1-URGENT' OR o_orderpriority = '2-HIGH' THEN 1 ELSE 0 END), sum(CASE WHEN o_orderpriority != '1-URGENT' AND o_orderpriority != '2-HIGH' THEN 1 ELSE 0 END)
 |  group by: l_shipmode
 |
-02:HASH JOIN [INNER JOIN, BROADCAST]
+02:HASH JOIN [INNER JOIN, PARTITIONED]
 |  hash predicates: o_orderkey = l_orderkey
 |  runtime filters: RF000 <- l_orderkey
 |
-|--05:EXCHANGE [BROADCAST]
+|--06:EXCHANGE [HASH(l_orderkey)]
 |  |
 |  01:SCAN HDFS [tpch.lineitem]
 |     partitions=1/1 files=1 size=718.94MB
-|     predicates: l_shipmode IN ('MAIL', 'SHIP'), l_commitdate < l_receiptdate, l_shipdate < l_commitdate, l_receiptdate >= '1994-01-01', l_receiptdate < '1995-01-01'
+|     predicates: l_shipmode IN ('MAIL', 'SHIP'), l_commitdate < l_receiptdate, l_receiptdate < '1995-01-01', l_receiptdate >= '1994-01-01', l_shipdate < l_commitdate
+|
+05:EXCHANGE [HASH(o_orderkey)]
+|
+00:SCAN HDFS [tpch.orders]
+   partitions=1/1 files=1 size=162.56MB
+   runtime filters: RF000 -> o_orderkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+09:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: l_shipmode ASC
+|
+04:SORT
+|  order by: l_shipmode ASC
+|
+08:AGGREGATE [FINALIZE]
+|  output: sum:merge(CASE WHEN o_orderpriority = '1-URGENT' OR o_orderpriority = '2-HIGH' THEN 1 ELSE 0 END), sum:merge(CASE WHEN o_orderpriority != '1-URGENT' AND o_orderpriority != '2-HIGH' THEN 1 ELSE 0 END)
+|  group by: l_shipmode
+|
+07:EXCHANGE [HASH(l_shipmode)]
+|
+03:AGGREGATE [STREAMING]
+|  output: sum(CASE WHEN o_orderpriority = '1-URGENT' OR o_orderpriority = '2-HIGH' THEN 1 ELSE 0 END), sum(CASE WHEN o_orderpriority != '1-URGENT' AND o_orderpriority != '2-HIGH' THEN 1 ELSE 0 END)
+|  group by: l_shipmode
+|
+02:HASH JOIN [INNER JOIN, PARTITIONED]
+|  hash predicates: o_orderkey = l_orderkey
+|  runtime filters: RF000 <- l_orderkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: l_orderkey
+|  |
+|  06:EXCHANGE [HASH(l_orderkey)]
+|  |
+|  01:SCAN HDFS [tpch.lineitem]
+|     partitions=1/1 files=1 size=718.94MB
+|     predicates: l_shipmode IN ('MAIL', 'SHIP'), l_commitdate < l_receiptdate, l_receiptdate < '1995-01-01', l_receiptdate >= '1994-01-01', l_shipdate < l_commitdate
+|
+05:EXCHANGE [HASH(o_orderkey)]
 |
 00:SCAN HDFS [tpch.orders]
    partitions=1/1 files=1 size=162.56MB
@@ -1530,7 +2450,7 @@ from (
     c_custkey,
     count(o_orderkey) as c_count
   from
-    tpch.customer left outer join tpch.orders on (
+    customer left outer join tpch.orders on (
       c_custkey = o_custkey
       and o_comment not like '%special%requests%'
     )
@@ -1543,6 +2463,8 @@ order by
   custdist desc,
   c_count desc
 ---- PLAN
+PLAN-ROOT SINK
+|
 05:SORT
 |  order by: count(*) DESC, c_count DESC
 |
@@ -1566,29 +2488,25 @@ order by
    predicates: NOT o_comment LIKE '%special%requests%'
    runtime filters: RF000 -> o_custkey
 ---- DISTRIBUTEDPLAN
-12:MERGING-EXCHANGE [UNPARTITIONED]
+PLAN-ROOT SINK
+|
+10:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: count(*) DESC, c_count DESC
 |
 05:SORT
 |  order by: count(*) DESC, c_count DESC
 |
-11:AGGREGATE [FINALIZE]
+09:AGGREGATE [FINALIZE]
 |  output: count:merge(*)
 |  group by: c_count
 |
-10:EXCHANGE [HASH(c_count)]
+08:EXCHANGE [HASH(c_count)]
 |
 04:AGGREGATE [STREAMING]
 |  output: count(*)
 |  group by: count(o_orderkey)
 |
-09:AGGREGATE [FINALIZE]
-|  output: count:merge(o_orderkey)
-|  group by: c_custkey
-|
-08:EXCHANGE [HASH(c_custkey)]
-|
-03:AGGREGATE [STREAMING]
+03:AGGREGATE [FINALIZE]
 |  output: count(o_orderkey)
 |  group by: c_custkey
 |
@@ -1597,6 +2515,48 @@ order by
 |  runtime filters: RF000 <- c_custkey
 |
 |--07:EXCHANGE [HASH(c_custkey)]
+|  |
+|  00:SCAN HDFS [tpch.customer]
+|     partitions=1/1 files=1 size=23.08MB
+|
+06:EXCHANGE [HASH(o_custkey)]
+|
+01:SCAN HDFS [tpch.orders]
+   partitions=1/1 files=1 size=162.56MB
+   predicates: NOT o_comment LIKE '%special%requests%'
+   runtime filters: RF000 -> o_custkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+10:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: count(*) DESC, c_count DESC
+|
+05:SORT
+|  order by: count(*) DESC, c_count DESC
+|
+09:AGGREGATE [FINALIZE]
+|  output: count:merge(*)
+|  group by: c_count
+|
+08:EXCHANGE [HASH(c_count)]
+|
+04:AGGREGATE [STREAMING]
+|  output: count(*)
+|  group by: count(o_orderkey)
+|
+03:AGGREGATE [FINALIZE]
+|  output: count(o_orderkey)
+|  group by: c_custkey
+|
+02:HASH JOIN [RIGHT OUTER JOIN, PARTITIONED]
+|  hash predicates: o_custkey = c_custkey
+|  runtime filters: RF000 <- c_custkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: c_custkey
+|  |
+|  07:EXCHANGE [HASH(c_custkey)]
 |  |
 |  00:SCAN HDFS [tpch.customer]
 |     partitions=1/1 files=1 size=23.08MB
@@ -1617,13 +2577,15 @@ select
     else 0.0
     end) / sum(l_extendedprice * (1 - l_discount)) as promo_revenue
 from
-  tpch.lineitem,
-  tpch.part
+  lineitem,
+  part
 where
   l_partkey = p_partkey
   and l_shipdate >= '1995-09-01'
   and l_shipdate < '1995-10-01'
 ---- PLAN
+PLAN-ROOT SINK
+|
 03:AGGREGATE [FINALIZE]
 |  output: sum(CASE WHEN p_type LIKE 'PROMO%' THEN l_extendedprice * (1 - l_discount) ELSE 0.0 END), sum(l_extendedprice * (1 - l_discount))
 |
@@ -1636,29 +2598,63 @@ where
 |
 00:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   predicates: l_shipdate >= '1995-09-01', l_shipdate < '1995-10-01'
+   predicates: l_shipdate < '1995-10-01', l_shipdate >= '1995-09-01'
    runtime filters: RF000 -> l_partkey
 ---- DISTRIBUTEDPLAN
-06:AGGREGATE [FINALIZE]
+PLAN-ROOT SINK
+|
+07:AGGREGATE [FINALIZE]
 |  output: sum:merge(CASE WHEN p_type LIKE 'PROMO%' THEN l_extendedprice * (1 - l_discount) ELSE 0.0 END), sum:merge(l_extendedprice * (1 - l_discount))
 |
-05:EXCHANGE [UNPARTITIONED]
+06:EXCHANGE [UNPARTITIONED]
 |
 03:AGGREGATE
 |  output: sum(CASE WHEN p_type LIKE 'PROMO%' THEN l_extendedprice * (1 - l_discount) ELSE 0.0 END), sum(l_extendedprice * (1 - l_discount))
 |
-02:HASH JOIN [INNER JOIN, BROADCAST]
+02:HASH JOIN [INNER JOIN, PARTITIONED]
 |  hash predicates: l_partkey = p_partkey
 |  runtime filters: RF000 <- p_partkey
 |
-|--04:EXCHANGE [BROADCAST]
+|--05:EXCHANGE [HASH(p_partkey)]
 |  |
 |  01:SCAN HDFS [tpch.part]
 |     partitions=1/1 files=1 size=22.83MB
 |
+04:EXCHANGE [HASH(l_partkey)]
+|
 00:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   predicates: l_shipdate >= '1995-09-01', l_shipdate < '1995-10-01'
+   predicates: l_shipdate < '1995-10-01', l_shipdate >= '1995-09-01'
+   runtime filters: RF000 -> l_partkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+07:AGGREGATE [FINALIZE]
+|  output: sum:merge(CASE WHEN p_type LIKE 'PROMO%' THEN l_extendedprice * (1 - l_discount) ELSE 0.0 END), sum:merge(l_extendedprice * (1 - l_discount))
+|
+06:EXCHANGE [UNPARTITIONED]
+|
+03:AGGREGATE
+|  output: sum(CASE WHEN p_type LIKE 'PROMO%' THEN l_extendedprice * (1 - l_discount) ELSE 0.0 END), sum(l_extendedprice * (1 - l_discount))
+|
+02:HASH JOIN [INNER JOIN, PARTITIONED]
+|  hash predicates: l_partkey = p_partkey
+|  runtime filters: RF000 <- p_partkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: p_partkey
+|  |
+|  05:EXCHANGE [HASH(p_partkey)]
+|  |
+|  01:SCAN HDFS [tpch.part]
+|     partitions=1/1 files=1 size=22.83MB
+|
+04:EXCHANGE [HASH(l_partkey)]
+|
+00:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   predicates: l_shipdate < '1995-10-01', l_shipdate >= '1995-09-01'
    runtime filters: RF000 -> l_partkey
 ====
 # TPCH-Q15
@@ -1668,7 +2664,7 @@ with revenue_view as (
     l_suppkey as supplier_no,
     sum(l_extendedprice * (1 - l_discount)) as total_revenue
   from
-    tpch.lineitem
+    lineitem
   where
     l_shipdate >= '1996-01-01'
     and l_shipdate < '1996-04-01'
@@ -1681,7 +2677,7 @@ select
   s_phone,
   total_revenue
 from
-  tpch.supplier,
+  supplier,
   revenue_view
 where
   s_suppkey = supplier_no
@@ -1694,6 +2690,8 @@ where
 order by
   s_suppkey
 ---- PLAN
+PLAN-ROOT SINK
+|
 08:SORT
 |  order by: s_suppkey ASC
 |
@@ -1709,7 +2707,7 @@ order by
 |  |
 |  03:SCAN HDFS [tpch.lineitem]
 |     partitions=1/1 files=1 size=718.94MB
-|     predicates: l_shipdate >= '1996-01-01', l_shipdate < '1996-04-01'
+|     predicates: l_shipdate < '1996-04-01', l_shipdate >= '1996-01-01'
 |
 06:HASH JOIN [INNER JOIN]
 |  hash predicates: s_suppkey = l_suppkey
@@ -1721,12 +2719,14 @@ order by
 |  |
 |  01:SCAN HDFS [tpch.lineitem]
 |     partitions=1/1 files=1 size=718.94MB
-|     predicates: l_shipdate >= '1996-01-01', l_shipdate < '1996-04-01'
+|     predicates: l_shipdate < '1996-04-01', l_shipdate >= '1996-01-01'
 |
 00:SCAN HDFS [tpch.supplier]
    partitions=1/1 files=1 size=1.33MB
    runtime filters: RF000 -> s_suppkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 17:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: s_suppkey ASC
 |
@@ -1758,7 +2758,7 @@ order by
 |  |
 |  03:SCAN HDFS [tpch.lineitem]
 |     partitions=1/1 files=1 size=718.94MB
-|     predicates: l_shipdate >= '1996-01-01', l_shipdate < '1996-04-01'
+|     predicates: l_shipdate < '1996-04-01', l_shipdate >= '1996-01-01'
 |
 06:HASH JOIN [INNER JOIN, BROADCAST]
 |  hash predicates: s_suppkey = l_suppkey
@@ -1778,7 +2778,74 @@ order by
 |  |
 |  01:SCAN HDFS [tpch.lineitem]
 |     partitions=1/1 files=1 size=718.94MB
-|     predicates: l_shipdate >= '1996-01-01', l_shipdate < '1996-04-01'
+|     predicates: l_shipdate < '1996-04-01', l_shipdate >= '1996-01-01'
+|
+00:SCAN HDFS [tpch.supplier]
+   partitions=1/1 files=1 size=1.33MB
+   runtime filters: RF000 -> s_suppkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+17:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: s_suppkey ASC
+|
+08:SORT
+|  order by: s_suppkey ASC
+|
+07:HASH JOIN [LEFT SEMI JOIN, BROADCAST]
+|  hash predicates: sum(l_extendedprice * (1 - l_discount)) = max(total_revenue)
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: max(total_revenue)
+|  |
+|  16:EXCHANGE [BROADCAST]
+|  |
+|  15:AGGREGATE [FINALIZE]
+|  |  output: max:merge(total_revenue)
+|  |
+|  14:EXCHANGE [UNPARTITIONED]
+|  |
+|  05:AGGREGATE
+|  |  output: max(sum(l_extendedprice * (1 - l_discount)))
+|  |
+|  13:AGGREGATE [FINALIZE]
+|  |  output: sum:merge(l_extendedprice * (1 - l_discount))
+|  |  group by: l_suppkey
+|  |
+|  12:EXCHANGE [HASH(l_suppkey)]
+|  |
+|  04:AGGREGATE [STREAMING]
+|  |  output: sum(l_extendedprice * (1 - l_discount))
+|  |  group by: l_suppkey
+|  |
+|  03:SCAN HDFS [tpch.lineitem]
+|     partitions=1/1 files=1 size=718.94MB
+|     predicates: l_shipdate < '1996-04-01', l_shipdate >= '1996-01-01'
+|
+06:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: s_suppkey = l_suppkey
+|  runtime filters: RF000 <- l_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=01 plan-id=02 cohort-id=01
+|  |  build expressions: l_suppkey
+|  |
+|  11:EXCHANGE [BROADCAST]
+|  |
+|  10:AGGREGATE [FINALIZE]
+|  |  output: sum:merge(l_extendedprice * (1 - l_discount))
+|  |  group by: l_suppkey
+|  |
+|  09:EXCHANGE [HASH(l_suppkey)]
+|  |
+|  02:AGGREGATE [STREAMING]
+|  |  output: sum(l_extendedprice * (1 - l_discount))
+|  |  group by: l_suppkey
+|  |
+|  01:SCAN HDFS [tpch.lineitem]
+|     partitions=1/1 files=1 size=718.94MB
+|     predicates: l_shipdate < '1996-04-01', l_shipdate >= '1996-01-01'
 |
 00:SCAN HDFS [tpch.supplier]
    partitions=1/1 files=1 size=1.33MB
@@ -1792,8 +2859,8 @@ select
   p_size,
   count(distinct ps_suppkey) as supplier_cnt
 from
-  tpch.partsupp,
-  tpch.part
+  partsupp,
+  part
 where
   p_partkey = ps_partkey
   and p_brand <> 'Brand#45'
@@ -1803,7 +2870,7 @@ where
     select
       s_suppkey
     from
-      tpch.supplier
+      supplier
     where
       s_comment like '%Customer%Complaints%'
   )
@@ -1817,6 +2884,8 @@ order by
   p_type,
   p_size
 ---- PLAN
+PLAN-ROOT SINK
+|
 07:SORT
 |  order by: count(ps_suppkey) DESC, p_brand ASC, p_type ASC, p_size ASC
 |
@@ -1840,12 +2909,14 @@ order by
 |
 |--01:SCAN HDFS [tpch.part]
 |     partitions=1/1 files=1 size=22.83MB
-|     predicates: p_brand != 'Brand#45', NOT p_type LIKE 'MEDIUM POLISHED%', p_size IN (49, 14, 23, 45, 19, 3, 36, 9)
+|     predicates: p_size IN (49, 14, 23, 45, 19, 3, 36, 9), p_brand != 'Brand#45', NOT p_type LIKE 'MEDIUM POLISHED%'
 |
 00:SCAN HDFS [tpch.partsupp]
    partitions=1/1 files=1 size=112.71MB
    runtime filters: RF000 -> ps_partkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 12:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: count(ps_suppkey) DESC, p_brand ASC, p_type ASC, p_size ASC
 |
@@ -1881,7 +2952,58 @@ order by
 |  |
 |  01:SCAN HDFS [tpch.part]
 |     partitions=1/1 files=1 size=22.83MB
-|     predicates: p_brand != 'Brand#45', NOT p_type LIKE 'MEDIUM POLISHED%', p_size IN (49, 14, 23, 45, 19, 3, 36, 9)
+|     predicates: p_size IN (49, 14, 23, 45, 19, 3, 36, 9), p_brand != 'Brand#45', NOT p_type LIKE 'MEDIUM POLISHED%'
+|
+00:SCAN HDFS [tpch.partsupp]
+   partitions=1/1 files=1 size=112.71MB
+   runtime filters: RF000 -> ps_partkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+12:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: count(ps_suppkey) DESC, p_brand ASC, p_type ASC, p_size ASC
+|
+07:SORT
+|  order by: count(ps_suppkey) DESC, p_brand ASC, p_type ASC, p_size ASC
+|
+06:AGGREGATE [FINALIZE]
+|  output: count(ps_suppkey)
+|  group by: p_brand, p_type, p_size
+|
+11:AGGREGATE
+|  group by: p_brand, p_type, p_size, ps_suppkey
+|
+10:EXCHANGE [HASH(p_brand,p_type,p_size)]
+|
+05:AGGREGATE [STREAMING]
+|  group by: p_brand, p_type, p_size, ps_suppkey
+|
+04:HASH JOIN [NULL AWARE LEFT ANTI JOIN, BROADCAST]
+|  hash predicates: ps_suppkey = s_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: s_suppkey
+|  |
+|  09:EXCHANGE [BROADCAST]
+|  |
+|  02:SCAN HDFS [tpch.supplier]
+|     partitions=1/1 files=1 size=1.33MB
+|     predicates: s_comment LIKE '%Customer%Complaints%'
+|
+03:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: ps_partkey = p_partkey
+|  runtime filters: RF000 <- p_partkey
+|
+|--JOIN BUILD
+|  |  join-table-id=01 plan-id=02 cohort-id=01
+|  |  build expressions: p_partkey
+|  |
+|  08:EXCHANGE [BROADCAST]
+|  |
+|  01:SCAN HDFS [tpch.part]
+|     partitions=1/1 files=1 size=22.83MB
+|     predicates: p_size IN (49, 14, 23, 45, 19, 3, 36, 9), p_brand != 'Brand#45', NOT p_type LIKE 'MEDIUM POLISHED%'
 |
 00:SCAN HDFS [tpch.partsupp]
    partitions=1/1 files=1 size=112.71MB
@@ -1892,8 +3014,8 @@ order by
 select
   sum(l_extendedprice) / 7.0 as avg_yearly
 from
-  tpch.lineitem,
-  tpch.part
+  lineitem,
+  part
 where
   p_partkey = l_partkey
   and p_brand = 'Brand#23'
@@ -1902,11 +3024,13 @@ where
     select
       0.2 * avg(l_quantity)
     from
-      tpch.lineitem
+      lineitem
     where
       l_partkey = p_partkey
   )
 ---- PLAN
+PLAN-ROOT SINK
+|
 06:AGGREGATE [FINALIZE]
 |  output: sum(l_extendedprice)
 |
@@ -1921,7 +3045,7 @@ where
 |  |
 |  |--01:SCAN HDFS [tpch.part]
 |  |     partitions=1/1 files=1 size=22.83MB
-|  |     predicates: p_brand = 'Brand#23', p_container = 'MED BOX'
+|  |     predicates: p_container = 'MED BOX', p_brand = 'Brand#23'
 |  |
 |  00:SCAN HDFS [tpch.lineitem]
 |     partitions=1/1 files=1 size=718.94MB
@@ -1935,6 +3059,8 @@ where
    partitions=1/1 files=1 size=718.94MB
    runtime filters: RF000 -> tpch.lineitem.l_partkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 12:AGGREGATE [FINALIZE]
 |  output: sum:merge(l_extendedprice)
 |
@@ -1958,7 +3084,60 @@ where
 |  |  |
 |  |  01:SCAN HDFS [tpch.part]
 |  |     partitions=1/1 files=1 size=22.83MB
-|  |     predicates: p_brand = 'Brand#23', p_container = 'MED BOX'
+|  |     predicates: p_container = 'MED BOX', p_brand = 'Brand#23'
+|  |
+|  00:SCAN HDFS [tpch.lineitem]
+|     partitions=1/1 files=1 size=718.94MB
+|     runtime filters: RF001 -> l_partkey
+|
+08:AGGREGATE [FINALIZE]
+|  output: avg:merge(l_quantity)
+|  group by: l_partkey
+|
+07:EXCHANGE [HASH(l_partkey)]
+|
+03:AGGREGATE [STREAMING]
+|  output: avg(l_quantity)
+|  group by: l_partkey
+|
+02:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   runtime filters: RF000 -> tpch.lineitem.l_partkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+12:AGGREGATE [FINALIZE]
+|  output: sum:merge(l_extendedprice)
+|
+11:EXCHANGE [UNPARTITIONED]
+|
+06:AGGREGATE
+|  output: sum(l_extendedprice)
+|
+05:HASH JOIN [RIGHT SEMI JOIN, PARTITIONED]
+|  hash predicates: l_partkey = p_partkey
+|  other join predicates: l_quantity < 0.2 * avg(l_quantity)
+|  runtime filters: RF000 <- p_partkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: p_partkey
+|  |
+|  10:EXCHANGE [HASH(p_partkey)]
+|  |
+|  04:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  hash predicates: l_partkey = p_partkey
+|  |  runtime filters: RF001 <- p_partkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=01 plan-id=02 cohort-id=02
+|  |  |  build expressions: p_partkey
+|  |  |
+|  |  09:EXCHANGE [BROADCAST]
+|  |  |
+|  |  01:SCAN HDFS [tpch.part]
+|  |     partitions=1/1 files=1 size=22.83MB
+|  |     predicates: p_container = 'MED BOX', p_brand = 'Brand#23'
 |  |
 |  00:SCAN HDFS [tpch.lineitem]
 |     partitions=1/1 files=1 size=718.94MB
@@ -1988,15 +3167,15 @@ select
   o_totalprice,
   sum(l_quantity)
 from
-  tpch.customer,
-  tpch.orders,
-  tpch.lineitem
+  customer,
+  orders,
+  lineitem
 where
   o_orderkey in (
     select
       l_orderkey
     from
-      tpch.lineitem
+      lineitem
     group by
       l_orderkey
     having
@@ -2015,6 +3194,8 @@ order by
   o_orderdate
 limit 100
 ---- PLAN
+PLAN-ROOT SINK
+|
 09:TOP-N [LIMIT=100]
 |  order by: o_totalprice DESC, o_orderdate ASC
 |
@@ -2047,12 +3228,14 @@ limit 100
 |
 |--01:SCAN HDFS [tpch.orders]
 |     partitions=1/1 files=1 size=162.56MB
-|     runtime filters: RF001 -> o_custkey
+|     runtime filters: RF000 -> o_orderkey, RF001 -> o_custkey
 |
 02:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
    runtime filters: RF000 -> tpch.lineitem.l_orderkey, RF002 -> l_orderkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 17:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: o_totalprice DESC, o_orderdate ASC
 |  limit: 100
@@ -2105,7 +3288,81 @@ limit 100
 |  |
 |  01:SCAN HDFS [tpch.orders]
 |     partitions=1/1 files=1 size=162.56MB
-|     runtime filters: RF001 -> o_custkey
+|     runtime filters: RF000 -> o_orderkey, RF001 -> o_custkey
+|
+10:EXCHANGE [HASH(l_orderkey)]
+|
+02:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   runtime filters: RF000 -> tpch.lineitem.l_orderkey, RF002 -> l_orderkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+17:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: o_totalprice DESC, o_orderdate ASC
+|  limit: 100
+|
+09:TOP-N [LIMIT=100]
+|  order by: o_totalprice DESC, o_orderdate ASC
+|
+16:AGGREGATE [FINALIZE]
+|  output: sum:merge(l_quantity)
+|  group by: c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
+|
+15:EXCHANGE [HASH(c_name,c_custkey,o_orderkey,o_orderdate,o_totalprice)]
+|
+08:AGGREGATE [STREAMING]
+|  output: sum(l_quantity)
+|  group by: c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
+|
+07:HASH JOIN [LEFT SEMI JOIN, PARTITIONED]
+|  hash predicates: o_orderkey = l_orderkey
+|  runtime filters: RF000 <- l_orderkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: l_orderkey
+|  |
+|  14:AGGREGATE [FINALIZE]
+|  |  output: sum:merge(l_quantity)
+|  |  group by: l_orderkey
+|  |  having: sum(l_quantity) > 300
+|  |
+|  13:EXCHANGE [HASH(l_orderkey)]
+|  |
+|  04:AGGREGATE [STREAMING]
+|  |  output: sum(l_quantity)
+|  |  group by: l_orderkey
+|  |
+|  03:SCAN HDFS [tpch.lineitem]
+|     partitions=1/1 files=1 size=718.94MB
+|
+06:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: o_custkey = c_custkey
+|  runtime filters: RF001 <- c_custkey
+|
+|--JOIN BUILD
+|  |  join-table-id=01 plan-id=02 cohort-id=01
+|  |  build expressions: c_custkey
+|  |
+|  12:EXCHANGE [BROADCAST]
+|  |
+|  00:SCAN HDFS [tpch.customer]
+|     partitions=1/1 files=1 size=23.08MB
+|
+05:HASH JOIN [INNER JOIN, PARTITIONED]
+|  hash predicates: l_orderkey = o_orderkey
+|  runtime filters: RF002 <- o_orderkey
+|
+|--JOIN BUILD
+|  |  join-table-id=02 plan-id=03 cohort-id=01
+|  |  build expressions: o_orderkey
+|  |
+|  11:EXCHANGE [HASH(o_orderkey)]
+|  |
+|  01:SCAN HDFS [tpch.orders]
+|     partitions=1/1 files=1 size=162.56MB
+|     runtime filters: RF000 -> o_orderkey, RF001 -> o_custkey
 |
 10:EXCHANGE [HASH(l_orderkey)]
 |
@@ -2118,8 +3375,8 @@ limit 100
 select
   sum(l_extendedprice * (1 - l_discount)) as revenue
 from
-  tpch.lineitem,
-  tpch.part
+  lineitem,
+  part
 where
   p_partkey = l_partkey
   and (
@@ -2151,21 +3408,27 @@ where
     )
   )
 ---- PLAN
+PLAN-ROOT SINK
+|
 03:AGGREGATE [FINALIZE]
 |  output: sum(l_extendedprice * (1 - l_discount))
 |
 02:HASH JOIN [INNER JOIN]
 |  hash predicates: l_partkey = p_partkey
-|  other predicates: ((p_brand = 'Brand#12' AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG') AND l_quantity >= 1 AND l_quantity <= 11 AND p_size BETWEEN 1 AND 5 AND l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON') OR (p_brand = 'Brand#23' AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK') AND l_quantity >= 10 AND l_quantity <= 20 AND p_size BETWEEN 1 AND 10 AND l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON') OR (p_brand = 'Brand#34' AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG') AND l_quantity >= 20 AND l_quantity <= 30 AND p_size BETWEEN 1 AND 15 AND l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON'))
+|  other predicates: ((p_brand = 'Brand#12' AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG') AND l_quantity >= 1 AND l_quantity <= 11 AND p_size <= 5) OR (p_brand = 'Brand#23' AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK') AND l_quantity >= 10 AND l_quantity <= 20 AND p_size <= 10) OR (p_brand = 'Brand#34' AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG') AND l_quantity >= 20 AND l_quantity <= 30 AND p_size <= 15))
 |  runtime filters: RF000 <- p_partkey
 |
 |--01:SCAN HDFS [tpch.part]
 |     partitions=1/1 files=1 size=22.83MB
+|     predicates: p_size >= 1
 |
 00:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
+   predicates: l_shipmode IN ('AIR', 'AIR REG'), l_shipinstruct = 'DELIVER IN PERSON'
    runtime filters: RF000 -> l_partkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 06:AGGREGATE [FINALIZE]
 |  output: sum:merge(l_extendedprice * (1 - l_discount))
 |
@@ -2176,16 +3439,48 @@ where
 |
 02:HASH JOIN [INNER JOIN, BROADCAST]
 |  hash predicates: l_partkey = p_partkey
-|  other predicates: ((p_brand = 'Brand#12' AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG') AND l_quantity >= 1 AND l_quantity <= 11 AND p_size BETWEEN 1 AND 5 AND l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON') OR (p_brand = 'Brand#23' AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK') AND l_quantity >= 10 AND l_quantity <= 20 AND p_size BETWEEN 1 AND 10 AND l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON') OR (p_brand = 'Brand#34' AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG') AND l_quantity >= 20 AND l_quantity <= 30 AND p_size BETWEEN 1 AND 15 AND l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON'))
+|  other predicates: ((p_brand = 'Brand#12' AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG') AND l_quantity >= 1 AND l_quantity <= 11 AND p_size <= 5) OR (p_brand = 'Brand#23' AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK') AND l_quantity >= 10 AND l_quantity <= 20 AND p_size <= 10) OR (p_brand = 'Brand#34' AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG') AND l_quantity >= 20 AND l_quantity <= 30 AND p_size <= 15))
 |  runtime filters: RF000 <- p_partkey
 |
 |--04:EXCHANGE [BROADCAST]
 |  |
 |  01:SCAN HDFS [tpch.part]
 |     partitions=1/1 files=1 size=22.83MB
+|     predicates: p_size >= 1
 |
 00:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
+   predicates: l_shipmode IN ('AIR', 'AIR REG'), l_shipinstruct = 'DELIVER IN PERSON'
+   runtime filters: RF000 -> l_partkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+06:AGGREGATE [FINALIZE]
+|  output: sum:merge(l_extendedprice * (1 - l_discount))
+|
+05:EXCHANGE [UNPARTITIONED]
+|
+03:AGGREGATE
+|  output: sum(l_extendedprice * (1 - l_discount))
+|
+02:HASH JOIN [INNER JOIN, BROADCAST]
+|  hash predicates: l_partkey = p_partkey
+|  other predicates: ((p_brand = 'Brand#12' AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG') AND l_quantity >= 1 AND l_quantity <= 11 AND p_size <= 5) OR (p_brand = 'Brand#23' AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK') AND l_quantity >= 10 AND l_quantity <= 20 AND p_size <= 10) OR (p_brand = 'Brand#34' AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG') AND l_quantity >= 20 AND l_quantity <= 30 AND p_size <= 15))
+|  runtime filters: RF000 <- p_partkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: p_partkey
+|  |
+|  04:EXCHANGE [BROADCAST]
+|  |
+|  01:SCAN HDFS [tpch.part]
+|     partitions=1/1 files=1 size=22.83MB
+|     predicates: p_size >= 1
+|
+00:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   predicates: l_shipmode IN ('AIR', 'AIR REG'), l_shipinstruct = 'DELIVER IN PERSON'
    runtime filters: RF000 -> l_partkey
 ====
 # TPCH-Q20
@@ -2194,20 +3489,20 @@ select
   s_name,
   s_address
 from
-  tpch.supplier,
-  tpch.nation
+  supplier,
+  nation
 where
   s_suppkey in (
     select
       ps_suppkey
     from
-      tpch.partsupp
+      partsupp
     where
       ps_partkey in (
         select
           p_partkey
         from
-          tpch.part
+          part
         where
           p_name like 'forest%'
         )
@@ -2215,7 +3510,7 @@ where
         select
           0.5 * sum(l_quantity)
         from
-          tpch.lineitem
+          lineitem
         where
           l_partkey = ps_partkey
           and l_suppkey = ps_suppkey
@@ -2228,6 +3523,8 @@ where
 order by
   s_name
 ---- PLAN
+PLAN-ROOT SINK
+|
 10:SORT
 |  order by: s_name ASC
 |
@@ -2248,9 +3545,9 @@ order by
 |     runtime filters: RF004 -> s_nationkey
 |
 07:HASH JOIN [RIGHT SEMI JOIN]
-|  hash predicates: l_suppkey = ps_suppkey, l_partkey = ps_partkey
+|  hash predicates: l_partkey = ps_partkey, l_suppkey = ps_suppkey
 |  other join predicates: ps_availqty > 0.5 * sum(l_quantity)
-|  runtime filters: RF001 <- ps_suppkey, RF002 <- ps_partkey
+|  runtime filters: RF001 <- ps_partkey, RF002 <- ps_suppkey
 |
 |--06:HASH JOIN [LEFT SEMI JOIN]
 |  |  hash predicates: ps_partkey = p_partkey
@@ -2262,7 +3559,7 @@ order by
 |  |
 |  02:SCAN HDFS [tpch.partsupp]
 |     partitions=1/1 files=1 size=112.71MB
-|     runtime filters: RF003 -> ps_partkey
+|     runtime filters: RF000 -> ps_suppkey, RF003 -> ps_partkey
 |
 05:AGGREGATE [FINALIZE]
 |  output: sum(l_quantity)
@@ -2270,9 +3567,11 @@ order by
 |
 04:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   predicates: l_shipdate >= '1994-01-01', l_shipdate < '1995-01-01'
-   runtime filters: RF000 -> tpch.lineitem.l_suppkey, RF001 -> tpch.lineitem.l_suppkey, RF002 -> tpch.lineitem.l_partkey
+   predicates: l_shipdate < '1995-01-01', l_shipdate >= '1994-01-01'
+   runtime filters: RF000 -> tpch.lineitem.l_suppkey, RF001 -> tpch.lineitem.l_partkey, RF002 -> tpch.lineitem.l_suppkey
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 18:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: s_name ASC
 |
@@ -2302,9 +3601,9 @@ order by
 16:EXCHANGE [HASH(ps_suppkey)]
 |
 07:HASH JOIN [RIGHT SEMI JOIN, PARTITIONED]
-|  hash predicates: l_suppkey = ps_suppkey, l_partkey = ps_partkey
+|  hash predicates: l_partkey = ps_partkey, l_suppkey = ps_suppkey
 |  other join predicates: ps_availqty > 0.5 * sum(l_quantity)
-|  runtime filters: RF001 <- ps_suppkey, RF002 <- ps_partkey
+|  runtime filters: RF001 <- ps_partkey, RF002 <- ps_suppkey
 |
 |--14:EXCHANGE [HASH(ps_partkey,ps_suppkey)]
 |  |
@@ -2320,7 +3619,7 @@ order by
 |  |
 |  02:SCAN HDFS [tpch.partsupp]
 |     partitions=1/1 files=1 size=112.71MB
-|     runtime filters: RF003 -> ps_partkey
+|     runtime filters: RF000 -> ps_suppkey, RF003 -> ps_partkey
 |
 12:AGGREGATE [FINALIZE]
 |  output: sum:merge(l_quantity)
@@ -2334,8 +3633,90 @@ order by
 |
 04:SCAN HDFS [tpch.lineitem]
    partitions=1/1 files=1 size=718.94MB
-   predicates: l_shipdate >= '1994-01-01', l_shipdate < '1995-01-01'
-   runtime filters: RF000 -> tpch.lineitem.l_suppkey, RF001 -> tpch.lineitem.l_suppkey, RF002 -> tpch.lineitem.l_partkey
+   predicates: l_shipdate < '1995-01-01', l_shipdate >= '1994-01-01'
+   runtime filters: RF000 -> tpch.lineitem.l_suppkey, RF001 -> tpch.lineitem.l_partkey, RF002 -> tpch.lineitem.l_suppkey
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+18:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: s_name ASC
+|
+10:SORT
+|  order by: s_name ASC
+|
+09:HASH JOIN [RIGHT SEMI JOIN, PARTITIONED]
+|  hash predicates: ps_suppkey = s_suppkey
+|  runtime filters: RF000 <- s_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: s_suppkey
+|  |
+|  17:EXCHANGE [HASH(s_suppkey)]
+|  |
+|  08:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  hash predicates: s_nationkey = n_nationkey
+|  |  runtime filters: RF004 <- n_nationkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=01 plan-id=02 cohort-id=02
+|  |  |  build expressions: n_nationkey
+|  |  |
+|  |  15:EXCHANGE [BROADCAST]
+|  |  |
+|  |  01:SCAN HDFS [tpch.nation]
+|  |     partitions=1/1 files=1 size=2.15KB
+|  |     predicates: n_name = 'CANADA'
+|  |
+|  00:SCAN HDFS [tpch.supplier]
+|     partitions=1/1 files=1 size=1.33MB
+|     runtime filters: RF004 -> s_nationkey
+|
+16:EXCHANGE [HASH(ps_suppkey)]
+|
+07:HASH JOIN [RIGHT SEMI JOIN, PARTITIONED]
+|  hash predicates: l_partkey = ps_partkey, l_suppkey = ps_suppkey
+|  other join predicates: ps_availqty > 0.5 * sum(l_quantity)
+|  runtime filters: RF001 <- ps_partkey, RF002 <- ps_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=02 plan-id=03 cohort-id=01
+|  |  build expressions: ps_partkey, ps_suppkey
+|  |
+|  14:EXCHANGE [HASH(ps_partkey,ps_suppkey)]
+|  |
+|  06:HASH JOIN [LEFT SEMI JOIN, BROADCAST]
+|  |  hash predicates: ps_partkey = p_partkey
+|  |  runtime filters: RF003 <- p_partkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=03 plan-id=04 cohort-id=03
+|  |  |  build expressions: p_partkey
+|  |  |
+|  |  13:EXCHANGE [BROADCAST]
+|  |  |
+|  |  03:SCAN HDFS [tpch.part]
+|  |     partitions=1/1 files=1 size=22.83MB
+|  |     predicates: p_name LIKE 'forest%'
+|  |
+|  02:SCAN HDFS [tpch.partsupp]
+|     partitions=1/1 files=1 size=112.71MB
+|     runtime filters: RF000 -> ps_suppkey, RF003 -> ps_partkey
+|
+12:AGGREGATE [FINALIZE]
+|  output: sum:merge(l_quantity)
+|  group by: l_partkey, l_suppkey
+|
+11:EXCHANGE [HASH(l_partkey,l_suppkey)]
+|
+05:AGGREGATE [STREAMING]
+|  output: sum(l_quantity)
+|  group by: l_partkey, l_suppkey
+|
+04:SCAN HDFS [tpch.lineitem]
+   partitions=1/1 files=1 size=718.94MB
+   predicates: l_shipdate < '1995-01-01', l_shipdate >= '1994-01-01'
+   runtime filters: RF000 -> tpch.lineitem.l_suppkey, RF001 -> tpch.lineitem.l_partkey, RF002 -> tpch.lineitem.l_suppkey
 ====
 # TPCH-Q21
 # Q21 - Suppliers Who Kept Orders Waiting Query
@@ -2343,9 +3724,9 @@ select
   s_name,
   count(*) as numwait
 from
-  tpch.supplier,
-  tpch.lineitem l1,
-  tpch.orders,
+  supplier,
+  lineitem l1,
+  orders,
   tpch.nation
 where
   s_suppkey = l1.l_suppkey
@@ -2356,7 +3737,7 @@ where
     select
       *
     from
-      tpch.lineitem l2
+      lineitem l2
     where
       l2.l_orderkey = l1.l_orderkey
       and l2.l_suppkey <> l1.l_suppkey
@@ -2365,7 +3746,7 @@ where
     select
       *
     from
-      tpch.lineitem l3
+      lineitem l3
     where
       l3.l_orderkey = l1.l_orderkey
       and l3.l_suppkey <> l1.l_suppkey
@@ -2380,6 +3761,8 @@ order by
   s_name
 limit 100
 ---- PLAN
+PLAN-ROOT SINK
+|
 12:TOP-N [LIMIT=100]
 |  order by: count(*) DESC, s_name ASC
 |
@@ -2433,6 +3816,8 @@ limit 100
    partitions=1/1 files=1 size=718.94MB
    predicates: l3.l_receiptdate > l3.l_commitdate
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 21:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: count(*) DESC, s_name ASC
 |  limit: 100
@@ -2459,13 +3844,11 @@ limit 100
 |  |  other join predicates: l2.l_suppkey != l1.l_suppkey
 |  |  runtime filters: RF000 <- l1.l_orderkey
 |  |
-|  |--17:EXCHANGE [HASH(l1.l_orderkey)]
-|  |  |
-|  |  08:HASH JOIN [INNER JOIN, BROADCAST]
+|  |--08:HASH JOIN [INNER JOIN, BROADCAST]
 |  |  |  hash predicates: s_nationkey = n_nationkey
 |  |  |  runtime filters: RF001 <- n_nationkey
 |  |  |
-|  |  |--15:EXCHANGE [BROADCAST]
+|  |  |--16:EXCHANGE [BROADCAST]
 |  |  |  |
 |  |  |  03:SCAN HDFS [tpch.nation]
 |  |  |     partitions=1/1 files=1 size=2.15KB
@@ -2475,28 +3858,127 @@ limit 100
 |  |  |  hash predicates: l1.l_suppkey = s_suppkey
 |  |  |  runtime filters: RF002 <- s_suppkey
 |  |  |
-|  |  |--14:EXCHANGE [BROADCAST]
+|  |  |--15:EXCHANGE [BROADCAST]
 |  |  |  |
 |  |  |  00:SCAN HDFS [tpch.supplier]
 |  |  |     partitions=1/1 files=1 size=1.33MB
 |  |  |     runtime filters: RF001 -> s_nationkey
 |  |  |
-|  |  06:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  06:HASH JOIN [INNER JOIN, PARTITIONED]
 |  |  |  hash predicates: l1.l_orderkey = o_orderkey
 |  |  |  runtime filters: RF003 <- o_orderkey
 |  |  |
-|  |  |--13:EXCHANGE [BROADCAST]
+|  |  |--14:EXCHANGE [HASH(o_orderkey)]
 |  |  |  |
 |  |  |  02:SCAN HDFS [tpch.orders]
 |  |  |     partitions=1/1 files=1 size=162.56MB
 |  |  |     predicates: o_orderstatus = 'F'
+|  |  |
+|  |  13:EXCHANGE [HASH(l1.l_orderkey)]
 |  |  |
 |  |  01:SCAN HDFS [tpch.lineitem l1]
 |  |     partitions=1/1 files=1 size=718.94MB
 |  |     predicates: l1.l_receiptdate > l1.l_commitdate
 |  |     runtime filters: RF002 -> l1.l_suppkey, RF003 -> l1.l_orderkey
 |  |
-|  16:EXCHANGE [HASH(l2.l_orderkey)]
+|  17:EXCHANGE [HASH(l2.l_orderkey)]
+|  |
+|  04:SCAN HDFS [tpch.lineitem l2]
+|     partitions=1/1 files=1 size=718.94MB
+|     runtime filters: RF000 -> l2.l_orderkey
+|
+18:EXCHANGE [HASH(l3.l_orderkey)]
+|
+05:SCAN HDFS [tpch.lineitem l3]
+   partitions=1/1 files=1 size=718.94MB
+   predicates: l3.l_receiptdate > l3.l_commitdate
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+21:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: count(*) DESC, s_name ASC
+|  limit: 100
+|
+12:TOP-N [LIMIT=100]
+|  order by: count(*) DESC, s_name ASC
+|
+20:AGGREGATE [FINALIZE]
+|  output: count:merge(*)
+|  group by: s_name
+|
+19:EXCHANGE [HASH(s_name)]
+|
+11:AGGREGATE [STREAMING]
+|  output: count(*)
+|  group by: s_name
+|
+10:HASH JOIN [RIGHT ANTI JOIN, PARTITIONED]
+|  hash predicates: l3.l_orderkey = l1.l_orderkey
+|  other join predicates: l3.l_suppkey != l1.l_suppkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: l1.l_orderkey
+|  |
+|  09:HASH JOIN [RIGHT SEMI JOIN, PARTITIONED]
+|  |  hash predicates: l2.l_orderkey = l1.l_orderkey
+|  |  other join predicates: l2.l_suppkey != l1.l_suppkey
+|  |  runtime filters: RF000 <- l1.l_orderkey
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=01 plan-id=02 cohort-id=02
+|  |  |  build expressions: l1.l_orderkey
+|  |  |
+|  |  08:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  |  hash predicates: s_nationkey = n_nationkey
+|  |  |  runtime filters: RF001 <- n_nationkey
+|  |  |
+|  |  |--JOIN BUILD
+|  |  |  |  join-table-id=02 plan-id=03 cohort-id=03
+|  |  |  |  build expressions: n_nationkey
+|  |  |  |
+|  |  |  16:EXCHANGE [BROADCAST]
+|  |  |  |
+|  |  |  03:SCAN HDFS [tpch.nation]
+|  |  |     partitions=1/1 files=1 size=2.15KB
+|  |  |     predicates: n_name = 'SAUDI ARABIA'
+|  |  |
+|  |  07:HASH JOIN [INNER JOIN, BROADCAST]
+|  |  |  hash predicates: l1.l_suppkey = s_suppkey
+|  |  |  runtime filters: RF002 <- s_suppkey
+|  |  |
+|  |  |--JOIN BUILD
+|  |  |  |  join-table-id=03 plan-id=04 cohort-id=03
+|  |  |  |  build expressions: s_suppkey
+|  |  |  |
+|  |  |  15:EXCHANGE [BROADCAST]
+|  |  |  |
+|  |  |  00:SCAN HDFS [tpch.supplier]
+|  |  |     partitions=1/1 files=1 size=1.33MB
+|  |  |     runtime filters: RF001 -> s_nationkey
+|  |  |
+|  |  06:HASH JOIN [INNER JOIN, PARTITIONED]
+|  |  |  hash predicates: l1.l_orderkey = o_orderkey
+|  |  |  runtime filters: RF003 <- o_orderkey
+|  |  |
+|  |  |--JOIN BUILD
+|  |  |  |  join-table-id=04 plan-id=05 cohort-id=03
+|  |  |  |  build expressions: o_orderkey
+|  |  |  |
+|  |  |  14:EXCHANGE [HASH(o_orderkey)]
+|  |  |  |
+|  |  |  02:SCAN HDFS [tpch.orders]
+|  |  |     partitions=1/1 files=1 size=162.56MB
+|  |  |     predicates: o_orderstatus = 'F'
+|  |  |
+|  |  13:EXCHANGE [HASH(l1.l_orderkey)]
+|  |  |
+|  |  01:SCAN HDFS [tpch.lineitem l1]
+|  |     partitions=1/1 files=1 size=718.94MB
+|  |     predicates: l1.l_receiptdate > l1.l_commitdate
+|  |     runtime filters: RF002 -> l1.l_suppkey, RF003 -> l1.l_orderkey
+|  |
+|  17:EXCHANGE [HASH(l2.l_orderkey)]
 |  |
 |  04:SCAN HDFS [tpch.lineitem l2]
 |     partitions=1/1 files=1 size=718.94MB
@@ -2519,14 +4001,14 @@ from (
     substr(c_phone, 1, 2) as cntrycode,
     c_acctbal
   from
-    tpch.customer
+    customer
   where
     substr(c_phone, 1, 2) in ('13', '31', '23', '29', '30', '18', '17')
     and c_acctbal > (
       select
         avg(c_acctbal)
       from
-        tpch.customer
+        customer
       where
         c_acctbal > 0.00
         and substr(c_phone, 1, 2) in ('13', '31', '23', '29', '30', '18', '17')
@@ -2535,7 +4017,7 @@ from (
       select
         *
       from
-        tpch.orders
+        orders
       where
         o_custkey = c_custkey
     )
@@ -2545,6 +4027,8 @@ group by
 order by
   cntrycode
 ---- PLAN
+PLAN-ROOT SINK
+|
 07:SORT
 |  order by: cntrycode ASC
 |
@@ -2572,6 +4056,8 @@ order by
 03:SCAN HDFS [tpch.orders]
    partitions=1/1 files=1 size=162.56MB
 ---- DISTRIBUTEDPLAN
+PLAN-ROOT SINK
+|
 15:MERGING-EXCHANGE [UNPARTITIONED]
 |  order by: cntrycode ASC
 |
@@ -2597,6 +4083,63 @@ order by
 |  |  predicates: c_acctbal > avg(c_acctbal)
 |  |
 |  |--10:EXCHANGE [BROADCAST]
+|  |  |
+|  |  09:AGGREGATE [FINALIZE]
+|  |  |  output: avg:merge(c_acctbal)
+|  |  |
+|  |  08:EXCHANGE [UNPARTITIONED]
+|  |  |
+|  |  02:AGGREGATE
+|  |  |  output: avg(c_acctbal)
+|  |  |
+|  |  01:SCAN HDFS [tpch.customer]
+|  |     partitions=1/1 files=1 size=23.08MB
+|  |     predicates: c_acctbal > 0.00, substr(c_phone, 1, 2) IN ('13', '31', '23', '29', '30', '18', '17')
+|  |
+|  00:SCAN HDFS [tpch.customer]
+|     partitions=1/1 files=1 size=23.08MB
+|     predicates: substr(c_phone, 1, 2) IN ('13', '31', '23', '29', '30', '18', '17')
+|
+11:EXCHANGE [HASH(o_custkey)]
+|
+03:SCAN HDFS [tpch.orders]
+   partitions=1/1 files=1 size=162.56MB
+---- PARALLELPLANS
+PLAN-ROOT SINK
+|
+15:MERGING-EXCHANGE [UNPARTITIONED]
+|  order by: cntrycode ASC
+|
+07:SORT
+|  order by: cntrycode ASC
+|
+14:AGGREGATE [FINALIZE]
+|  output: count:merge(*), sum:merge(c_acctbal)
+|  group by: cntrycode
+|
+13:EXCHANGE [HASH(cntrycode)]
+|
+06:AGGREGATE [STREAMING]
+|  output: count(*), sum(c_acctbal)
+|  group by: substr(c_phone, 1, 2)
+|
+05:HASH JOIN [RIGHT ANTI JOIN, PARTITIONED]
+|  hash predicates: o_custkey = c_custkey
+|
+|--JOIN BUILD
+|  |  join-table-id=00 plan-id=01 cohort-id=01
+|  |  build expressions: c_custkey
+|  |
+|  12:EXCHANGE [HASH(c_custkey)]
+|  |
+|  04:NESTED LOOP JOIN [INNER JOIN, BROADCAST]
+|  |  join table id: 01
+|  |  predicates: c_acctbal > avg(c_acctbal)
+|  |
+|  |--JOIN BUILD
+|  |  |  join-table-id=01 plan-id=02 cohort-id=02
+|  |  |
+|  |  10:EXCHANGE [BROADCAST]
 |  |  |
 |  |  09:AGGREGATE [FINALIZE]
 |  |  |  output: avg:merge(c_acctbal)

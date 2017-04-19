@@ -512,3 +512,269 @@ WRITE TO HDFS [functional.alltypestiny, OVERWRITE=false, PARTITION-KEYS=(2009,1)
 00:SCAN HDFS [functional.alltypestiny]
    partitions=4/4 files=4 size=460B
 ====
+# IMPALA-3930: Test insert with shuffle hint on constant partition exprs. The table sink
+# is executed at the coordinator.
+insert into table functional.alltypes partition(year=2009, month=1) /* +shuffle */
+select id, bool_col, tinyint_col, smallint_col, int_col, bigint_col,
+float_col, double_col, date_string_col, string_col, timestamp_col
+from functional.alltypes
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(2009,1)]
+|  partitions=1
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+====
+# IMPALA-3930: Same as above but with a dynamic partition insert.
+insert into table functional.alltypes partition(year, month) /* +shuffle */
+select id, bool_col, tinyint_col, smallint_col, int_col, bigint_col,
+float_col, double_col, date_string_col, string_col, timestamp_col, 2009, 1
+from functional.alltypes
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(2009,1)]
+|  partitions=1
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+====
+# IMPALA-3930: Same as above but with a mix of static/dynamic partition exprs, and
+# with more complex constant exprs.
+insert into table functional.alltypes partition(year, month=cast(10/2 as int)) /* +shuffle */
+select id, bool_col, tinyint_col, smallint_col, int_col, bigint_col,
+float_col, double_col, date_string_col, string_col, timestamp_col, cast(concat("2", "010") as smallint) - 1
+from functional.alltypes
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(2009,5)]
+|  partitions=1
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+====
+# Test insert into an unpartitioned table with shuffle hint.
+insert into table functional.alltypesnopart /* +shuffle */
+select id, bool_col, tinyint_col, smallint_col, int_col, bigint_col,
+float_col, double_col, date_string_col, string_col, timestamp_col
+from functional.alltypes
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypesnopart, OVERWRITE=false]
+|  partitions=1
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+====
+# IMPALA-2521: clustered insert into partitioned table adds sort node.
+insert into table functional.alltypes partition(year, month) /*+ clustered */
+select * from functional.alltypes
+---- PLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+01:SORT
+|  order by: year ASC NULLS LAST, month ASC NULLS LAST
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+02:SORT
+|  order by: year ASC NULLS LAST, month ASC NULLS LAST
+|
+01:EXCHANGE [HASH(functional.alltypes.year,functional.alltypes.month)]
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+====
+# IMPALA-2521: clustered insert into partitioned table adds sort node.
+insert into table functional.alltypes partition(year, month) /*+ clustered,noshuffle */
+select * from functional.alltypes
+---- PLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+01:SORT
+|  order by: year ASC NULLS LAST, month ASC NULLS LAST
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+01:SORT
+|  order by: year ASC NULLS LAST, month ASC NULLS LAST
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+====
+# IMPALA-2521: clustered insert into partitioned table adds sort node. Subquery in
+# WHERE-clause exercises the reset() + analyze() path during rewrite.
+insert into table functional.alltypes partition(year, month) /*+ clustered */
+select * from functional.alltypes
+where int_col = (select max(int_col) from functional.alltypes)
+---- PLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+04:SORT
+|  order by: year ASC NULLS LAST, month ASC NULLS LAST
+|
+03:HASH JOIN [LEFT SEMI JOIN]
+|  hash predicates: int_col = max(int_col)
+|  runtime filters: RF000 <- max(int_col)
+|
+|--02:AGGREGATE [FINALIZE]
+|  |  output: max(int_col)
+|  |
+|  01:SCAN HDFS [functional.alltypes]
+|     partitions=24/24 files=24 size=478.45KB
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+   runtime filters: RF000 -> int_col
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+08:SORT
+|  order by: year ASC NULLS LAST, month ASC NULLS LAST
+|
+07:EXCHANGE [HASH(functional.alltypes.year,functional.alltypes.month)]
+|
+03:HASH JOIN [LEFT SEMI JOIN, BROADCAST]
+|  hash predicates: int_col = max(int_col)
+|  runtime filters: RF000 <- max(int_col)
+|
+|--06:EXCHANGE [BROADCAST]
+|  |
+|  05:AGGREGATE [FINALIZE]
+|  |  output: max:merge(int_col)
+|  |
+|  04:EXCHANGE [UNPARTITIONED]
+|  |
+|  02:AGGREGATE
+|  |  output: max(int_col)
+|  |
+|  01:SCAN HDFS [functional.alltypes]
+|     partitions=24/24 files=24 size=478.45KB
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+   runtime filters: RF000 -> int_col
+====
+# IMPALA-2521: clustered insert into non-partitioned table does not add sort node.
+insert into table functional.alltypesnopart /*+ clustered */
+select * from functional.alltypesnopart
+---- PLAN
+WRITE TO HDFS [functional.alltypesnopart, OVERWRITE=false]
+|  partitions=1
+|
+00:SCAN HDFS [functional.alltypesnopart]
+   partitions=1/1 files=0 size=0B
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypesnopart, OVERWRITE=false]
+|  partitions=1
+|
+00:SCAN HDFS [functional.alltypesnopart]
+   partitions=1/1 files=0 size=0B
+====
+# IMPALA-2521: clustered insert into non-partitioned table does not add sort node.
+insert into table functional.alltypesnopart /*+ clustered,shuffle */
+select * from functional.alltypesnopart
+---- PLAN
+WRITE TO HDFS [functional.alltypesnopart, OVERWRITE=false]
+|  partitions=1
+|
+00:SCAN HDFS [functional.alltypesnopart]
+   partitions=1/1 files=0 size=0B
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypesnopart, OVERWRITE=false]
+|  partitions=1
+|
+01:EXCHANGE [UNPARTITIONED]
+|
+00:SCAN HDFS [functional.alltypesnopart]
+   partitions=1/1 files=0 size=0B
+====
+# IMPALA-4163: sortby hint in insert statement adds sort node.
+insert into table functional.alltypes partition(year, month)
+       /*+ sortby(int_col, bool_col),shuffle */
+       select * from functional.alltypes
+---- PLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+01:SORT
+|  order by: int_col ASC NULLS LAST, bool_col ASC NULLS LAST
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+02:SORT
+|  order by: int_col ASC NULLS LAST, bool_col ASC NULLS LAST
+|
+01:EXCHANGE [HASH(functional.alltypes.year,functional.alltypes.month)]
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+====
+# IMPALA-4163: sortby hint in insert statement with noshuffle adds sort node.
+insert into table functional.alltypes partition(year, month)
+       /*+ sortby(int_col, bool_col),noshuffle */
+       select * from functional.alltypes
+---- PLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+01:SORT
+|  order by: int_col ASC NULLS LAST, bool_col ASC NULLS LAST
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+01:SORT
+|  order by: int_col ASC NULLS LAST, bool_col ASC NULLS LAST
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+====
+# IMPALA-4163: sortby hint in insert statement adds ordering columns to clustering sort.
+insert into table functional.alltypes partition(year, month)
+       /*+ sortby(int_col, bool_col),clustered */
+       select * from functional.alltypes
+---- PLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+01:SORT
+|  order by: year ASC NULLS LAST, month ASC NULLS LAST, int_col ASC NULLS LAST, bool_col ASC NULLS LAST
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+---- DISTRIBUTEDPLAN
+WRITE TO HDFS [functional.alltypes, OVERWRITE=false, PARTITION-KEYS=(year,month)]
+|  partitions=24
+|
+02:SORT
+|  order by: year ASC NULLS LAST, month ASC NULLS LAST, int_col ASC NULLS LAST, bool_col ASC NULLS LAST
+|
+01:EXCHANGE [HASH(functional.alltypes.year,functional.alltypes.month)]
+|
+00:SCAN HDFS [functional.alltypes]
+   partitions=24/24 files=24 size=478.45KB
+====
