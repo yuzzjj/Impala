@@ -31,10 +31,9 @@
 
 namespace impala {
 
-class Expr;
-class ExprContext;
 class RowBatch;
 class RowDescriptor;
+
 class MemTracker;
 class TDataStreamSink;
 class TNetworkAddress;
@@ -47,6 +46,7 @@ class TPlanFragmentDestination;
 //
 /// TODO: capture stats that describe distribution of rows/data volume
 /// across channels.
+/// TODO: create a PlanNode equivalent class for DataSink.
 class DataStreamSender : public DataSink {
  public:
   /// Construct a sender according to the output specification (sink),
@@ -57,10 +57,11 @@ class DataStreamSender : public DataSink {
   /// The RowDescriptor must live until Close() is called.
   /// NOTE: supported partition types are UNPARTITIONED (broadcast), HASH_PARTITIONED,
   /// and RANDOM.
-  DataStreamSender(ObjectPool* pool, int sender_id,
-    const RowDescriptor& row_desc, const TDataStreamSink& sink,
-    const std::vector<TPlanFragmentDestination>& destinations,
-    int per_channel_buffer_size);
+  DataStreamSender(int sender_id, const RowDescriptor* row_desc,
+      const TDataStreamSink& tsink,
+      const std::vector<TPlanFragmentDestination>& destinations,
+      int per_channel_buffer_size);
+
   virtual ~DataStreamSender();
 
   virtual std::string GetName();
@@ -98,14 +99,19 @@ class DataStreamSender : public DataSink {
   /// broadcast to multiple receivers, they are counted once per receiver.
   int64_t GetNumDataBytesSent() const;
 
+ protected:
+  friend class DataStreamTest;
+
+  virtual Status Init(const std::vector<TExpr>& thrift_output_exprs,
+      const TDataSink& tsink, RuntimeState* state);
+
  private:
   class Channel;
 
   /// Sender instance id, unique within a fragment.
   int sender_id_;
   RuntimeState* state_;
-  bool broadcast_;  // if true, send all rows on all channels
-  bool random_; // if true, round-robins row batches among channels
+  TPartitionType::type partition_type_; // The type of partitioning to perform.
   int current_channel_idx_; // index of current channel to send to if random_ == true
 
   /// If true, this sender has called FlushFinal() successfully.
@@ -121,8 +127,12 @@ class DataStreamSender : public DataSink {
   TRowBatch thrift_batch2_;
   TRowBatch* current_thrift_batch_;  // the next one to fill in Send()
 
-  std::vector<ExprContext*> partition_expr_ctxs_;  // compute per-row partition values
   std::vector<Channel*> channels_;
+
+  /// Expressions of partition keys. It's used to compute the
+  /// per-row partition values for shuffling exchange;
+  std::vector<ScalarExpr*> partition_exprs_;
+  std::vector<ScalarExprEvaluator*> partition_expr_evals_;
 
   RuntimeProfile::Counter* serialize_batch_timer_;
   /// The concurrent wall time spent sending data over the network.
@@ -139,6 +149,10 @@ class DataStreamSender : public DataSink {
 
   /// Identifier of the destination plan node.
   PlanNodeId dest_node_id_;
+
+  /// Used for Kudu partitioning to round-robin rows that don't correspond to a partition
+  /// or when errors are encountered.
+  int next_unknown_partition_;
 };
 
 }

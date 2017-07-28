@@ -308,8 +308,12 @@ public class AnalyticPlanner {
       }
     }
 
-    SortInfo sortInfo = new SortInfo(
-        Expr.substituteList(sortExprs, sortSmap, analyzer_, false), isAsc, nullsFirst);
+    SortInfo sortInfo = new SortInfo(sortExprs, isAsc, nullsFirst);
+    ExprSubstitutionMap smap =
+        sortInfo.createMaterializedOrderExprs(sortTupleDesc, analyzer_);
+    sortSlotExprs.addAll(smap.getLhs());
+    sortSmap = ExprSubstitutionMap.combine(sortSmap, smap);
+    sortInfo.substituteOrderingExprs(sortSmap, analyzer_);
     if (LOG.isTraceEnabled()) {
       LOG.trace("sortinfo exprs: " + Expr.debugString(sortInfo.getOrderingExprs()));
     }
@@ -352,7 +356,8 @@ public class AnalyticPlanner {
       }
 
       SortInfo sortInfo = createSortInfo(root, sortExprs, isAsc, nullsFirst);
-      SortNode sortNode = new SortNode(ctx_.getNextNodeId(), root, sortInfo, false, 0);
+      SortNode sortNode =
+          SortNode.createTotalSortNode(ctx_.getNextNodeId(), root, sortInfo, 0);
 
       // if this sort group does not have partitioning exprs, we want the sort
       // to be executed like a regular distributed sort

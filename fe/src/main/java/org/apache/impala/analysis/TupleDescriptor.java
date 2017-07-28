@@ -231,11 +231,23 @@ public class TupleDescriptor {
     return ttupleDesc;
   }
 
+  /**
+   * In some cases changes are made to a tuple after the memory layout has been computed.
+   * This function allows us to recompute the memory layout, if necessary. No-op if this
+   * tuple does not have an existing mem layout.
+   */
+  public void recomputeMemLayout() {
+    if (!hasMemLayout_) return;
+    hasMemLayout_ = false;
+    computeMemLayout();
+  }
+
   public void computeMemLayout() {
     if (hasMemLayout_) return;
     hasMemLayout_ = true;
 
     boolean alwaysAddNullBit = hasNullableKuduScanSlots();
+    avgSerializedSize_ = 0;
 
     // maps from slot size to slot descriptors with that size
     Map<Integer, List<SlotDescriptor>> slotsBySize =
@@ -327,7 +339,7 @@ public class TupleDescriptor {
     for (SlotDescriptor slotDesc: getSlots()) {
       if (!slotDesc.isMaterialized()) continue;
       if (slotDesc.getColumn() == null ||
-          slotDesc.getColumn().getPosition() >= hdfsTable.getNumClusteringCols()) {
+          !hdfsTable.isClusteringColumn(slotDesc.getColumn())) {
         return false;
       }
     }

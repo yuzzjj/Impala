@@ -389,14 +389,23 @@ struct TQueryExecRequest {
   // Estimated per-host peak memory consumption in bytes. Used for resource management.
   8: optional i64 per_host_mem_estimate
 
-  // Minimum buffer reservation required per host in bytes.
+  // Minimum query-wide buffer reservation required per host in bytes. This is the peak
+  // minimum reservation that may be required by the concurrently-executing operators at
+  // any point in query execution. It may be less than the initial reservation total
+  // claims (below) if execution of some operators never overlaps, which allows reuse of
+  // reservations.
   9: optional i64 per_host_min_reservation;
 
+  // Total of the initial buffer reservations that we expect to be claimed per host.
+  // I.e. the sum over all operators in all fragment instances that execute on that host.
+  // Measured in bytes.
+  10: optional i64 per_host_initial_reservation_total_claims;
+
   // List of replica hosts.  Used by the host_idx field of TScanRangeLocation.
-  10: required list<Types.TNetworkAddress> host_list
+  11: required list<Types.TNetworkAddress> host_list
 
   // Column lineage graph
-  11: optional LineageGraph.TLineageGraph lineage_graph
+  12: optional LineageGraph.TLineageGraph lineage_graph
 }
 
 enum TCatalogOpType {
@@ -564,6 +573,11 @@ struct TExecRequest {
 
   // Timeline of planner's operation, for profiling
   11: optional RuntimeProfile.TEventSequence timeline
+
+  // If false, the user that runs this statement doesn't have access to the runtime
+  // profile. For example, a user can't access the runtime profile of a query
+  // that has a view for which the user doesn't have access to the underlying tables.
+  12: optional bool user_has_profile_access
 }
 
 // Parameters to FeSupport.cacheJar().

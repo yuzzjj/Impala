@@ -20,9 +20,19 @@
 
 #include "udf/udf.h"
 
-using namespace impala_udf;
-
 namespace impala {
+
+using impala_udf::FunctionContext;
+using impala_udf::BooleanVal;
+using impala_udf::TinyIntVal;
+using impala_udf::SmallIntVal;
+using impala_udf::IntVal;
+using impala_udf::BigIntVal;
+using impala_udf::FloatVal;
+using impala_udf::DoubleVal;
+using impala_udf::TimestampVal;
+using impala_udf::StringVal;
+using impala_udf::DecimalVal;
 
 /// Builtins written against the UDF interface. The builtins in the other files
 /// should be replaced to the UDF interface as well.
@@ -59,10 +69,13 @@ class UdfBuiltins {
   ///    DAY, DY, D : Starting day of the week
   ///    HH, HH12, HH24 : Hour
   ///    MI : Minute
-  //
+  ///
   ///    Reference:
   ///    http://docs.oracle.com/cd/B19306_01/server.102/b14200/functions201.htm
   static TimestampVal Trunc(FunctionContext* context, const TimestampVal& date,
+      const StringVal& unit_str);
+  /// Implementation of Trunc, not cross-compiled.
+  static TimestampVal TruncImpl(FunctionContext* context, const TimestampVal& date,
       const StringVal& unit_str);
   static void TruncPrepare(FunctionContext* context,
       FunctionContext::FunctionStateScope scope);
@@ -74,7 +87,7 @@ class UdfBuiltins {
   ///      YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, MILLISECOND, EPOCH
   ///    Reference:
   ///    http://docs.oracle.com/cd/B19306_01/server.102/b14200/functions050.htm
-  //
+  ///
   /// This is used by the DATE_PART function.
   static IntVal Extract(FunctionContext* context, const StringVal& field_str,
       const TimestampVal& date);

@@ -366,8 +366,7 @@ Status impala::SetQueryOption(const string& key, const string& value,
         StringParser::ParseResult status;
         int val = StringParser::StringToInt<int>(value.c_str(), value.size(), &status);
         if (status != StringParser::PARSE_SUCCESS) {
-          return Status(Substitute("Invalid number of runtime filters: '$0'.",
-              value.c_str()));
+          return Status(Substitute("Invalid number of runtime filters: '$0'.", value));
         }
         if (val < 0) {
           return Status(Substitute("Invalid number of runtime filters: '$0'. "
@@ -473,6 +472,37 @@ Status impala::SetQueryOption(const string& key, const string& value,
       case TImpalaQueryOptions::PARQUET_DICTIONARY_FILTERING: {
         query_options->__set_parquet_dictionary_filtering(
             iequals(value, "true") || iequals(value, "1"));
+        break;
+      }
+      case TImpalaQueryOptions::PARQUET_READ_STATISTICS: {
+        query_options->__set_parquet_read_statistics(
+            iequals(value, "true") || iequals(value, "1"));
+        break;
+      }
+      case TImpalaQueryOptions::DEFAULT_JOIN_DISTRIBUTION_MODE: {
+        if (iequals(value, "BROADCAST") || iequals(value, "0")) {
+          query_options->__set_default_join_distribution_mode(
+              TJoinDistributionMode::BROADCAST);
+        } else if (iequals(value, "SHUFFLE") || iequals(value, "1")) {
+          query_options->__set_default_join_distribution_mode(
+              TJoinDistributionMode::SHUFFLE);
+        } else {
+          return Status(Substitute("Invalid default_join_distribution_mode '$0'. "
+              "Valid values are BROADCAST or SHUFFLE", value));
+        }
+        break;
+      }
+      case TImpalaQueryOptions::DISABLE_CODEGEN_ROWS_THRESHOLD: {
+        StringParser::ParseResult status;
+        int val = StringParser::StringToInt<int>(value.c_str(), value.size(), &status);
+        if (status != StringParser::PARSE_SUCCESS) {
+          return Status(Substitute("Invalid threshold: '$0'.", value));
+        }
+        if (val < 0) {
+          return Status(Substitute(
+              "Invalid threshold: '$0'. Only positive values are allowed.", val));
+        }
+        query_options->__set_disable_codegen_rows_threshold(val);
         break;
       }
       default:

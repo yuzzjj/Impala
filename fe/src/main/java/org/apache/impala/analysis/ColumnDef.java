@@ -17,6 +17,7 @@
 
 package org.apache.impala.analysis;
 
+import java.math.BigInteger;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -29,10 +30,10 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 
 import org.apache.commons.lang3.builder.EqualsBuilder;
-import org.apache.hadoop.hive.metastore.MetaStoreUtils;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.impala.catalog.Type;
 import org.apache.impala.common.AnalysisException;
+import org.apache.impala.compat.MetastoreShim;
 import org.apache.impala.thrift.TColumn;
 import org.apache.impala.util.KuduUtil;
 import org.apache.impala.util.MetaStoreUtil;
@@ -40,18 +41,19 @@ import org.apache.kudu.ColumnSchema.CompressionAlgorithm;
 import org.apache.kudu.ColumnSchema.Encoding;
 
 /**
- * Represents a column definition in a CREATE/ALTER TABLE/VIEW statement.
+ * Represents a column definition in a CREATE/ALTER TABLE/VIEW/COLUMN statement.
  * Column definitions in CREATE/ALTER TABLE statements require a column type,
  * whereas column definitions in CREATE/ALTER VIEW statements infer the column type from
- * the corresponding view definition. All column definitions have an optional comment.
+ * the corresponding view definition, and ALTER COLUMN statements take the existing type
+ * of the target column. All column definitions have an optional comment.
  * Since a column definition refers a column stored in the Metastore, the column name
  * must be valid according to the Metastore's rules (see @MetaStoreUtils). A number of
  * additional column options may be specified for Kudu tables.
  */
 public class ColumnDef {
   private final String colName_;
-  // Required in CREATE/ALTER TABLE stmts. Set to NULL in CREATE/ALTER VIEW stmts,
-  // for which we setType() after analyzing the defining view definition stmt.
+  // Required in CREATE/ALTER TABLE stmts. Set to NULL in CREATE/ALTER VIEW/ALTER COLUMN
+  // stmts, for which we setType() during analysis.
   private final TypeDef typeDef_;
   private Type type_;
   private String comment_;
@@ -80,8 +82,17 @@ public class ColumnDef {
   private String compressionVal_;
   // Compression algorithm for this column; set in analysis.
   private CompressionAlgorithm compression_;
-  // Default value for this column.
+
+  // Default value specified for this column.
   private Expr defaultValue_;
+
+  // Default value for this column involving any conversions necessary, set during
+  // analysis. For TIMESTAMP columns, defaultValue_ is a TimestampLiteral and this is an
+  // IntegerLiteral containing the Unix time in microseconds. For all other column types,
+  // this is equal to defaultValue_.
+  // TODO: Remove when Impala supports a 64-bit TIMESTAMP type.
+  private Expr outputDefaultValue_;
+
   // Desired block size for this column.
   private LiteralExpr blockSize_;
 
@@ -172,10 +183,11 @@ public class ColumnDef {
   public boolean isExplicitNotNullable() { return isNullabilitySet() && !isNullable_; }
 
   public boolean hasDefaultValue() { return defaultValue_ != null; }
+  public Expr getDefaultValue() { return defaultValue_; }
 
   public void analyze(Analyzer analyzer) throws AnalysisException {
     // Check whether the column name meets the Metastore's requirements.
-    if (!MetaStoreUtils.validateName(colName_)) {
+    if (!MetastoreShim.validateName(colName_)) {
       throw new AnalysisException("Invalid column/field name: " + colName_);
     }
     if (typeDef_ != null) {
@@ -238,27 +250,56 @@ public class ColumnDef {
         throw new AnalysisException(String.format("Only constant values are allowed " +
             "for default values: %s", defaultValue_.toSql()));
       }
-      defaultValue_ = LiteralExpr.create(defaultValue_, analyzer.getQueryCtx());
-      if (defaultValue_ == null) {
+      LiteralExpr defaultValLiteral = LiteralExpr.create(defaultValue_,
+          analyzer.getQueryCtx());
+      if (defaultValLiteral == null) {
         throw new AnalysisException(String.format("Only constant values are allowed " +
             "for default values: %s", defaultValue_.toSql()));
       }
-      if (defaultValue_.getType().isNull() && ((isNullable_ != null && !isNullable_)
+      if (defaultValLiteral.getType().isNull() && ((isNullable_ != null && !isNullable_)
           || isPrimaryKey_)) {
         throw new AnalysisException(String.format("Default value of NULL not allowed " +
             "on non-nullable column: '%s'", getColName()));
       }
-      if (!Type.isImplicitlyCastable(defaultValue_.getType(), type_, true)) {
+
+      // Special case string literals in timestamp columns for convenience.
+      if (defaultValLiteral.getType().isStringType() && type_.isTimestamp()) {
+        // Add an explicit cast to TIMESTAMP
+        Expr e = new CastExpr(new TypeDef(Type.TIMESTAMP), defaultValLiteral);
+        e.analyze(analyzer);
+        defaultValLiteral = LiteralExpr.create(e, analyzer.getQueryCtx());
+        Preconditions.checkNotNull(defaultValLiteral);
+        if (defaultValLiteral.isNullLiteral()) {
+          throw new AnalysisException(String.format("String %s cannot be cast " +
+              "to a TIMESTAMP literal.", defaultValue_.toSql()));
+        }
+      }
+
+      if (!Type.isImplicitlyCastable(defaultValLiteral.getType(), type_, true)) {
         throw new AnalysisException(String.format("Default value %s (type: %s) " +
             "is not compatible with column '%s' (type: %s).", defaultValue_.toSql(),
             defaultValue_.getType().toSql(), colName_, type_.toSql()));
       }
-      if (!defaultValue_.getType().equals(type_)) {
-        Expr castLiteral = defaultValue_.uncheckedCastTo(type_);
+      if (!defaultValLiteral.getType().equals(type_)) {
+        Expr castLiteral = defaultValLiteral.uncheckedCastTo(type_);
         Preconditions.checkNotNull(castLiteral);
-        defaultValue_ = LiteralExpr.create(castLiteral, analyzer.getQueryCtx());
+        defaultValLiteral = LiteralExpr.create(castLiteral, analyzer.getQueryCtx());
       }
-      Preconditions.checkNotNull(defaultValue_);
+      Preconditions.checkNotNull(defaultValLiteral);
+      outputDefaultValue_ = defaultValLiteral;
+
+      // TODO: Remove when Impala supports a 64-bit TIMESTAMP type.
+      if (type_.isTimestamp()) {
+        try {
+          long unixTimeMicros = KuduUtil.timestampToUnixTimeMicros(analyzer,
+              defaultValLiteral);
+          outputDefaultValue_ = new NumericLiteral(BigInteger.valueOf(unixTimeMicros),
+              Type.BIGINT);
+        } catch (Exception e) {
+          throw new AnalysisException(String.format(
+              "%s cannot be cast to a TIMESTAMP literal.", defaultValue_.toSql()), e);
+        }
+      }
     }
 
     // Analyze the block size value, if any.
@@ -314,7 +355,7 @@ public class ColumnDef {
     Integer blockSize =
         blockSize_ == null ? null : (int) ((NumericLiteral) blockSize_).getIntValue();
     KuduUtil.setColumnOptions(col, isPrimaryKey_, isNullable_, encoding_,
-        compression_, defaultValue_, blockSize);
+        compression_, outputDefaultValue_, blockSize, colName_);
     if (comment_ != null) col.setComment(comment_);
     return col;
   }

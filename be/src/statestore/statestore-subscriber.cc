@@ -31,6 +31,7 @@
 #include "gen-cpp/StatestoreService_types.h"
 #include "rpc/rpc-trace.h"
 #include "rpc/thrift-util.h"
+#include "statestore/statestore-service-client-wrapper.h"
 #include "util/time.h"
 #include "util/debug-util.h"
 
@@ -48,6 +49,10 @@ DEFINE_int32(statestore_subscriber_cnxn_retry_interval_ms, 3000, "The interval, 
     "to wait between attempts to make an RPC connection to the statestore.");
 DECLARE_string(ssl_client_ca_certificate);
 
+DECLARE_string(ssl_server_certificate);
+DECLARE_string(ssl_private_key);
+DECLARE_string(ssl_private_key_password_cmd);
+
 namespace impala {
 
 // Used to identify the statestore in the failure detector
@@ -60,7 +65,7 @@ const string CALLBACK_METRIC_PATTERN = "statestore-subscriber.topic-$0.processin
 // statestore after a failure.
 const int32_t SLEEP_INTERVAL_MS = 5000;
 
-typedef ClientConnection<StatestoreServiceClient> StatestoreConnection;
+typedef ClientConnection<StatestoreServiceClientWrapper> StatestoreServiceConn;
 
 // Proxy class for the subscriber heartbeat thrift API, which
 // translates RPCs into method calls on the local subscriber object.
@@ -138,7 +143,7 @@ Status StatestoreSubscriber::AddTopic(const Statestore::TopicId& topic_id,
 
 Status StatestoreSubscriber::Register() {
   Status client_status;
-  StatestoreConnection client(client_cache_.get(), statestore_address_, &client_status);
+  StatestoreServiceConn client(client_cache_.get(), statestore_address_, &client_status);
   RETURN_IF_ERROR(client_status);
 
   TRegisterSubscriberRequest request;
@@ -153,8 +158,8 @@ Status StatestoreSubscriber::Register() {
   request.subscriber_location = heartbeat_address_;
   request.subscriber_id = subscriber_id_;
   TRegisterSubscriberResponse response;
-  RETURN_IF_ERROR(
-      client.DoRpc(&StatestoreServiceClient::RegisterSubscriber, request, &response));
+  RETURN_IF_ERROR(client.DoRpc(&StatestoreServiceClientWrapper::RegisterSubscriber,
+      request, &response));
   Status status = Status(response.status);
   if (status.ok()) connected_to_statestore_metric_->set_value(true);
   if (response.__isset.registration_id) {
@@ -189,7 +194,13 @@ Status StatestoreSubscriber::Start() {
 
     heartbeat_server_.reset(new ThriftServer("StatestoreSubscriber", processor,
         heartbeat_address_.port, NULL, NULL, 5));
+    if (EnableInternalSslConnections()) {
+      LOG(INFO) << "Enabling SSL for Statestore subscriber";
+      RETURN_IF_ERROR(heartbeat_server_->EnableSsl(FLAGS_ssl_server_certificate,
+          FLAGS_ssl_private_key, FLAGS_ssl_private_key_password_cmd));
+    }
     RETURN_IF_ERROR(heartbeat_server_->Start());
+
     LOG(INFO) << "Registering with statestore";
     status = Register();
     if (status.ok()) {
@@ -252,7 +263,7 @@ void StatestoreSubscriber::RecoveryModeChecker() {
       // we would otherwise have to cache updates here.
       last_recovery_duration_metric_->set_value(
           recovery_timer.ElapsedTime() / (1000.0 * 1000.0 * 1000.0));
-      last_recovery_time_metric_->set_value(TimestampValue::LocalTime().DebugString());
+      last_recovery_time_metric_->set_value(TimestampValue::LocalTime().ToString());
     }
 
     SleepForMs(SLEEP_INTERVAL_MS);

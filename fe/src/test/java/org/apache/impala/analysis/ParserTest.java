@@ -26,11 +26,10 @@ import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.hadoop.hive.metastore.MetaStoreUtils;
 import org.apache.impala.analysis.TimestampArithmeticExpr.TimeUnit;
 import org.apache.impala.common.AnalysisException;
 import org.apache.impala.common.FrontendTestBase;
-import org.apache.impala.testutil.TestUtils;
+import org.apache.impala.compat.MetastoreShim;
 import org.junit.Test;
 
 import com.google.common.base.Preconditions;
@@ -209,13 +208,14 @@ public class ParserTest extends FrontendTestBase {
     ParsesOk("/* select 1; */ select 1");
     ParsesOk("/** select 1; */ select 1");
     ParsesOk("/* select */ select 1 /* 1 */");
-    ParsesOk("select 1 /* sortby(() */");
-    // Empty columns list in sortby hint
-    ParserError("select 1 /*+ sortby() */");
+    // Test hint with arguments
+    ParsesOk("select 1 /* hint_with_args(() */");
+    // Empty argument list in hint_with_args hint is not allowed
+    ParserError("select 1 /*+ hint_with_args() */");
     // Mismatching parentheses
-    ParserError("select 1 /*+ sortby(() */");
-    ParserError("select 1 /*+ sortby(a) \n");
-    ParserError("select 1 --+ sortby(a) */\n from t");
+    ParserError("select 1 /*+ hint_with_args(() */");
+    ParserError("select 1 /*+ hint_with_args(a) \n");
+    ParserError("select 1 --+ hint_with_args(a) */\n from t");
   }
 
   /**
@@ -237,9 +237,10 @@ public class ParserTest extends FrontendTestBase {
     ParserError("-- baz /*\nselect 1*/");
     ParsesOk("select -- blah\n 1");
     ParsesOk("select -- select 1\n 1");
-    ParsesOk("select 1 -- sortby(()");
+    // Test hint with arguments
+    ParsesOk("select 1 -- hint_with_args(()");
     // Mismatching parentheses
-    ParserError("select 1 -- +sortby(()\n");
+    ParserError("select 1 -- +hint_with_args(()\n");
   }
 
   /**
@@ -460,19 +461,20 @@ public class ParserTest extends FrontendTestBase {
 
       // Tests for hints with arguments.
       TestInsertHints(String.format(
-          "insert into t %ssortby(a)%s select * from t", prefix, suffix),
-          "sortby(a)");
+          "insert into t %shint_with_args(a)%s select * from t", prefix, suffix),
+          "hint_with_args(a)");
       TestInsertHints(String.format(
-          "insert into t %sclustered,shuffle,sortby(a)%s select * from t", prefix,
-          suffix), "clustered", "shuffle", "sortby(a)");
+          "insert into t %sclustered,shuffle,hint_with_args(a)%s select * from t", prefix,
+          suffix), "clustered", "shuffle", "hint_with_args(a)");
       TestInsertHints(String.format(
-          "insert into t %ssortby(a,b)%s select * from t", prefix, suffix),
-          "sortby(a,b)");
+          "insert into t %shint_with_args(a,b)%s select * from t", prefix, suffix),
+          "hint_with_args(a,b)");
       TestInsertHints(String.format(
-          "insert into t %ssortby(a  , b)%s select * from t", prefix, suffix),
-          "sortby(a,b)");
+          "insert into t %shint_with_args(a  , b)%s select * from t", prefix, suffix),
+          "hint_with_args(a,b)");
       ParserError(String.format(
-          "insert into t %ssortby(  a  ,  , ,,, b  )%s select * from t", prefix, suffix));
+          "insert into t %shint_with_args(  a  ,  , ,,, b  )%s select * from t",
+          prefix, suffix));
     }
     // No "+" at the beginning so the comment is not recognized as a hint.
     TestJoinHints("select * from functional.alltypes a join /* comment */" +
@@ -581,6 +583,58 @@ public class ParserTest extends FrontendTestBase {
     // Cross joins do not accept on/using
     ParserError("select * from a cross join b on (a.id = b.id)");
     ParserError("select * from a cross join b using (id)");
+  }
+
+  @Test
+  public void TestTableSampleClause() {
+    String tblRefs[] = new String[] { "tbl", "db.tbl", "db.tbl.col", "db.tbl.col.fld" };
+    String tblAliases[] = new String[] { "", "t" };
+    String tblSampleClauses[] = new String[] {
+        "", "tablesample system(10)", "tablesample system(100) repeatable(20)" };
+    String tblHints[] = new String[] {
+        "", "/* +schedule_remote */", "[schedule_random_replica]"
+    };
+    for (String tbl: tblRefs) {
+      for (String alias: tblAliases) {
+        for (String smp: tblSampleClauses) {
+          for (String hint: tblHints) {
+            // Single table.
+            ParsesOk(String.format("select * from %s %s %s %s", tbl, alias, smp, hint));
+            // Multi table.
+            ParsesOk(String.format(
+                "select a.* from %s %s %s %s join %s %s %s %s using (id)",
+                tbl, alias, smp, hint, tbl, alias, smp, hint));
+            ParsesOk(String.format(
+                "select a.* from %s %s %s %s, %s %s %s %s",
+                tbl, alias, smp, hint, tbl, alias, smp, hint));
+            // Inline view.
+            ParsesOk(String.format("select * from (select 1 from %s %s) v %s %s",
+                tbl, alias, smp, hint));
+
+          }
+        }
+      }
+    }
+
+    // Table alias most come before TABLESAMPLE.
+    ParserError("select * from t tablesample (10) a");
+    // Hints must come after TABLESAMPLE.
+    ParserError("select * from t [schedule_remote] tablesample (10)");
+    ParserError("select * from t /* +schedule_remote */ tablesample (10)");
+    // Missing SYSTEM.
+    ParserError("select * from t tablesample (10)");
+    // Missing parenthesis.
+    ParserError("select * from t tablesample system 10");
+    // Percent must be int literal.
+    ParserError("select * from t tablesample system (10 + 10");
+    // Missing random seed.
+    ParserError("select * from t tablesample system (10) repeatable");
+    // Random seed must be an int literal.
+    ParserError("select * from t tablesample system (10) repeatable (10 + 10)");
+    // Negative precent.
+    ParserError("select * from t tablesample system (-10)");
+    // Negative random seed.
+    ParserError("select * from t tablesample system (10) repeatable(-10)");
   }
 
   @Test
@@ -2266,6 +2320,13 @@ public class ParserTest extends FrontendTestBase {
   }
 
   @Test
+  public void TestAlterTableSortBy() {
+    ParsesOk("ALTER TABLE TEST SORT BY (int_col, id)");
+    ParsesOk("ALTER TABLE TEST SORT BY ()");
+    ParserError("ALTER TABLE TEST PARTITION (year=2009, month=4) SORT BY (int_col, id)");
+  }
+
+  @Test
   public void TestAlterTableOrViewRename() {
     for (String entity: Lists.newArrayList("TABLE", "VIEW")) {
       ParsesOk(String.format("ALTER %s TestDb.Foo RENAME TO TestDb.Foo2", entity));
@@ -2294,6 +2355,23 @@ public class ParserTest extends FrontendTestBase {
   }
 
   @Test
+  public void TestAlterTableAlterColumn() {
+    for (String column : Lists.newArrayList("", "COLUMN")) {
+      ParsesOk(String.format("ALTER TABLE foo ALTER %s bar SET default 0", column));
+      ParsesOk(String.format(
+          "ALTER TABLE foo ALTER %s bar SET default 0 block_size 0", column));
+      ParsesOk(String.format("ALTER TABLE foo ALTER %s bar DROP default", column));
+
+      ParserError(String.format("ALTER TABLE foo ALTER %s bar", column));
+      ParserError(String.format("ALTER TABLE foo ALTER %s bar SET default", column));
+      ParserError(String.format("ALTER TABLE foo ALTER %s bar SET error 0", column));
+      ParserError(
+          String.format("ALTER TABLE foo ALTER %s bar SET default 0 error 0", column));
+      ParserError(String.format("ALTER TABLE foo ALTER %s bar DROP comment", column));
+    }
+  }
+
+  @Test
   public void TestCreateTable() {
     // Support unqualified and fully-qualified table names
     ParsesOk("CREATE TABLE Foo (i int)");
@@ -2309,6 +2387,7 @@ public class ParserTest extends FrontendTestBase {
     ParsesOk("CREATE TABLE Foo2 LIKE Foo COMMENT 'tbl' " +
         "STORED AS PARQUETFILE LOCATION '/a/b'");
     ParsesOk("CREATE TABLE Foo2 LIKE Foo STORED AS TEXTFILE LOCATION '/a/b'");
+    ParsesOk("CREATE TABLE Foo LIKE PARQUET '/user/foo'");
 
     // Table and column names starting with digits.
     ParsesOk("CREATE TABLE 01_Foo (01_i int, 02_j string)");
@@ -2335,6 +2414,45 @@ public class ParserTest extends FrontendTestBase {
     ParserError("CREATE TABLE Foo (i int) PARTITIONED BY (int)");
     ParserError("CREATE TABLE Foo (i int) PARTITIONED BY ()");
     ParserError("CREATE TABLE Foo (i int) PARTITIONED BY");
+
+    // Sort by clause
+    ParsesOk("CREATE TABLE Foo (i int, j int) SORT BY ()");
+    ParsesOk("CREATE TABLE Foo (i int) SORT BY (i)");
+    ParsesOk("CREATE TABLE Foo (i int) SORT BY (j)");
+    ParsesOk("CREATE TABLE Foo (i int, j int) SORT BY (i,j)");
+    ParsesOk("CREATE EXTERNAL TABLE Foo (i int, s string) SORT BY (s) " +
+        "LOCATION '/test-warehouse/'");
+    ParsesOk("CREATE TABLE Foo (i int, s string) SORT BY (s) COMMENT 'hello' " +
+        "LOCATION '/a/b/' TBLPROPERTIES ('123'='1234')");
+
+    // SORT BY must be the first table option
+    ParserError("CREATE TABLE Foo (i int, s string) COMMENT 'hello' SORT BY (s) " +
+        "LOCATION '/a/b/' TBLPROPERTIES ('123'='1234')");
+    ParserError("CREATE TABLE Foo (i int, s string) COMMENT 'hello' LOCATION '/a/b/' " +
+        "SORT BY (s) TBLPROPERTIES ('123'='1234')");
+    ParserError("CREATE TABLE Foo (i int, s string) COMMENT 'hello' LOCATION '/a/b/' " +
+        "TBLPROPERTIES ('123'='1234') SORT BY (s)");
+
+    // Malformed SORT BY clauses
+    ParserError("CREATE TABLE Foo (i int, j int) SORT BY");
+    ParserError("CREATE TABLE Foo (i int, j int) SORT BY (i,)");
+    ParserError("CREATE TABLE Foo (i int, j int) SORT BY (int)");
+
+    // Create table like other table with sort columns
+    ParsesOk("CREATE TABLE Foo SORT BY(bar) LIKE Baz STORED AS TEXTFILE LOCATION '/a/b'");
+    ParserError("CREATE TABLE SORT BY(bar) Foo LIKE Baz STORED AS TEXTFILE " +
+        "LOCATION '/a/b'");
+    // SORT BY must be the first table option
+    ParserError("CREATE TABLE Foo LIKE Baz STORED AS TEXTFILE LOCATION '/a/b' " +
+        "SORT BY(bar)");
+
+    // CTAS with sort columns
+    ParsesOk("CREATE TABLE Foo SORT BY(bar) AS SELECT * FROM BAR");
+    ParserError("CREATE TABLE Foo AS SELECT * FROM BAR SORT BY(bar)");
+
+    // Create table like file with sort columns
+    ParsesOk("CREATE TABLE Foo LIKE PARQUET '/user/foo' SORT BY (id)");
+    ParserError("CREATE TABLE Foo SORT BY (id) LIKE PARQUET '/user/foo'");
 
     // Column comments
     ParsesOk("CREATE TABLE Foo (i int COMMENT 'hello', s string)");
@@ -2947,7 +3065,7 @@ public class ParserTest extends FrontendTestBase {
     // may have unquoted identifiers corresponding to keywords.
     for (String keyword: SqlScanner.keywordMap.keySet()) {
       // Skip keywords that are not valid field/column names in the Metastore.
-      if (!MetaStoreUtils.validateName(keyword)) continue;
+      if (!MetastoreShim.validateName(keyword)) continue;
       String structType = "STRUCT<" + keyword + ":INT>";
       TypeDefsParseOk(structType);
     }
@@ -2975,6 +3093,7 @@ public class ParserTest extends FrontendTestBase {
     ParsesOk("refresh Foo partition (col=2)");
     ParsesOk("refresh Foo.S partition (col=2)");
     ParsesOk("refresh Foo.S partition (col1 = 2, col2 = 3)");
+    ParsesOk("refresh functions Foo");
 
     ParserError("invalidate");
     ParserError("invalidate metadata Foo.S.S");
@@ -2984,6 +3103,7 @@ public class ParserTest extends FrontendTestBase {
     ParserError("refresh");
     ParserError("refresh Foo.S partition (col1 = 2, col2)");
     ParserError("refresh Foo.S partition ()");
+    ParserError("refresh functions Foo.S");
   }
 
   @Test
@@ -3106,7 +3226,7 @@ public class ParserTest extends FrontendTestBase {
         "                             ^\n" +
         "Encountered: IDENTIFIER\n" +
         "Expected: CROSS, FROM, FULL, GROUP, HAVING, INNER, JOIN, LEFT, LIMIT, OFFSET, " +
-        "ON, ORDER, RIGHT, STRAIGHT_JOIN, UNION, USING, WHERE, COMMA\n");
+        "ON, ORDER, RIGHT, STRAIGHT_JOIN, TABLESAMPLE, UNION, USING, WHERE, COMMA\n");
 
     // Long line: error close to the start
     ParserError("select a a a, b, c,c,c,c,c,c,c,c,c,c,c,c,c,c,c,c,cd,c,d,d,,c, from t",
@@ -3115,7 +3235,7 @@ public class ParserTest extends FrontendTestBase {
         "           ^\n" +
         "Encountered: IDENTIFIER\n" +
         "Expected: CROSS, FROM, FULL, GROUP, HAVING, INNER, JOIN, LEFT, LIMIT, OFFSET, " +
-        "ON, ORDER, RIGHT, STRAIGHT_JOIN, UNION, USING, WHERE, COMMA\n");
+        "ON, ORDER, RIGHT, STRAIGHT_JOIN, TABLESAMPLE, UNION, USING, WHERE, COMMA\n");
 
     // Long line: error close to the end
     ParserError("select a, b, c,c,c,c,c,c,c,c,c,c,c,c,c,c,c,c,cd,c,d,d, ,c, from t",
@@ -3400,6 +3520,10 @@ public class ParserTest extends FrontendTestBase {
 
     ParserError("GRANT ALL ON TABLE foo FROM myrole");
     ParserError("REVOKE ALL ON TABLE foo TO myrole");
+
+    ParserError("GRANT UPDATE ON TABLE foo TO myRole");
+    ParserError("GRANT DELETE ON TABLE foo TO myRole");
+    ParserError("GRANT UPSERT ON TABLE foo TO myRole");
   }
 
   @Test

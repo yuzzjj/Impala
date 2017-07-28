@@ -20,18 +20,16 @@
 
 #include "util/time.h"
 
-#ifndef NDEBUG
-  DECLARE_int32(fault_injection_rpc_delay_ms);
-  DECLARE_int32(fault_injection_rpc_type);
-#endif
-
 namespace impala {
 
 #ifndef NDEBUG
+
+class FaultInjectionUtil {
+ public:
   enum RpcCallType {
     RPC_NULL = 0,
-    RPC_EXECPLANFRAGMENT,
-    RPC_CANCELPLANFRAGMENT,
+    RPC_EXECQUERYFINSTANCES,
+    RPC_CANCELQUERYFINSTANCES,
     RPC_PUBLISHFILTER,
     RPC_UPDATEFILTER,
     RPC_TRANSMITDATA,
@@ -39,23 +37,51 @@ namespace impala {
     RPC_RANDOM    // This must be last.
   };
 
-  /// Test util function that can inject delay to specified RPC server handling
-  /// function so that RPC caller could hit the RPC recv timeout condition.
-  /// my_type specifies which RPC type the current function is.
-  /// rpc_type specifies which RPC function the delay should be enabled.
-  /// delay_ms specifies how long the delay should be.
-  static void InjectRpcDelay(RpcCallType my_type, int32_t rpc_type, int32_t delay_ms) {
-    std::random_device rd;
-    srand(rd());
-    if (delay_ms == 0) return;
-    if (rpc_type == RPC_RANDOM) rpc_type = rand() % RPC_RANDOM;
-    if (rpc_type == my_type) SleepForMs(delay_ms);
-  }
+  enum RpcExceptionType {
+    RPC_EXCEPTION_NONE = 0,
+    RPC_EXCEPTION_SEND_CLOSED_CONNECTION,
+    RPC_EXCEPTION_SEND_STALE_CONNECTION,
+    RPC_EXCEPTION_SEND_TIMEDOUT,
+    RPC_EXCEPTION_RECV_CLOSED_CONNECTION,
+    RPC_EXCEPTION_RECV_TIMEDOUT,
+    RPC_EXCEPTION_SSL_SEND_CLOSED_CONNECTION,
+    RPC_EXCEPTION_SSL_SEND_STALE_CONNECTION,
+    RPC_EXCEPTION_SSL_SEND_TIMEDOUT,
+    RPC_EXCEPTION_SSL_RECV_CLOSED_CONNECTION,
+    RPC_EXCEPTION_SSL_RECV_TIMEDOUT,
+  };
 
-  #define FAULT_INJECTION_RPC_DELAY(type) InjectRpcDelay(type, \
-      FLAGS_fault_injection_rpc_type, FLAGS_fault_injection_rpc_delay_ms)
-#else
-  #define FAULT_INJECTION_RPC_DELAY(type)
+  /// Test util function that injects delays to specified RPC server handling function
+  /// so that RPC caller could hit the RPC recv timeout condition.
+  /// 'my_type' specifies which RPC type of the current function.
+  /// FLAGS_fault_injection_rpc_type specifies which RPC function the delay should
+  /// be enabled. FLAGS_fault_injection_rpc_delay_ms specifies the delay in ms.
+  static void InjectRpcDelay(RpcCallType my_type);
+
+  /// Test util function that injects exceptions to RPC client functions.
+  /// 'is_send' indicates whether injected fault is at the send() or recv() of an RPC.
+  /// The exception specified in 'FLAGS_fault_injection_rpc_exception_type' is injected
+  /// on every 'freq' invocations of this function.
+  static void InjectRpcException(bool is_send, int freq);
+
+ private:
+  static int32_t GetTargetRPCType();
+
+};
+
+#define FAULT_INJECTION_RPC_DELAY(type)                          \
+    FaultInjectionUtil::InjectRpcDelay(FaultInjectionUtil::type)
+#define FAULT_INJECTION_SEND_RPC_EXCEPTION(freq)                 \
+    FaultInjectionUtil::InjectRpcException(true, freq)
+#define FAULT_INJECTION_RECV_RPC_EXCEPTION(freq)                 \
+    FaultInjectionUtil::InjectRpcException(false, freq)
+
+#else // NDEBUG
+
+#define FAULT_INJECTION_RPC_DELAY(type)
+#define FAULT_INJECTION_SEND_RPC_EXCEPTION(freq)
+#define FAULT_INJECTION_RECV_RPC_EXCEPTION(freq)
+
 #endif
 
 }

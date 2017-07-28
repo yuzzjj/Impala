@@ -78,6 +78,10 @@ inline int32_t GetInstanceIdx(const TUniqueId& fragment_instance_id) {
   return fragment_instance_id.lo & FRAGMENT_IDX_MASK;
 }
 
+inline bool IsValidFInstanceId(const TUniqueId& fragment_instance_id) {
+  return fragment_instance_id.hi != 0L;
+}
+
 inline TUniqueId CreateInstanceId(
     const TUniqueId& query_id, int32_t instance_idx) {
   DCHECK_EQ(GetInstanceIdx(query_id), 0);  // well-formed query id
@@ -107,8 +111,8 @@ inline string GenerateUUIDString() {
 inline TUniqueId GenerateUUID() {
   const string& u = GenerateUUIDString();
   TUniqueId uid;
-  memcpy(&uid.hi, &u[0], sizeof(int64_t));
-  memcpy(&uid.lo, &u[0] + sizeof(int64_t), sizeof(int64_t));
+  memcpy(&uid.hi, u.data(), sizeof(int64_t));
+  memcpy(&uid.lo, u.data() + sizeof(int64_t), sizeof(int64_t));
   return uid;
 }
 

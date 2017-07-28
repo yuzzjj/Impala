@@ -30,10 +30,10 @@ import java.util.UUID;
 
 import org.apache.hadoop.conf.Configuration;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTH_TO_LOCAL;
-import org.apache.hive.service.cli.thrift.TGetColumnsReq;
-import org.apache.hive.service.cli.thrift.TGetSchemasReq;
-import org.apache.hive.service.cli.thrift.TGetTablesReq;
 import org.apache.sentry.provider.common.ResourceAuthorizationProvider;
+import org.apache.hive.service.rpc.thrift.TGetColumnsReq;
+import org.apache.hive.service.rpc.thrift.TGetSchemasReq;
+import org.apache.hive.service.rpc.thrift.TGetTablesReq;
 import org.apache.sentry.provider.file.LocalGroupResourceAuthorizationProvider;
 import org.junit.After;
 import org.junit.AfterClass;
@@ -904,11 +904,14 @@ public class AuthorizationTest {
     AuthzError("create external table tpch.kudu_tbl stored as kudu " +
         "TBLPROPERTIES ('kudu.master_addresses'='127.0.0.1', 'kudu.table_name'='tbl')",
         "User '%s' does not have privileges to access: server1");
+    AuthzError("create table tpch.kudu_tbl (i int, j int, primary key (i))" +
+        " PARTITION BY HASH (i) PARTITIONS 9 stored as kudu TBLPROPERTIES " +
+        "('kudu.master_addresses'='127.0.0.1')",
+        "User '%s' does not have privileges to access: server1");
 
     // IMPALA-4000: ALL privileges on SERVER are not required to create managed tables.
     AuthzOk("create table tpch.kudu_tbl (i int, j int, primary key (i))" +
-        " PARTITION BY HASH (i) PARTITIONS 9 stored as kudu TBLPROPERTIES " +
-        "('kudu.master_addresses'='127.0.0.1')");
+        " PARTITION BY HASH (i) PARTITIONS 9 stored as kudu");
 
     // User does not have permission to create table at the specified location..
     AuthzError("create table tpch.new_table (i int) location " +
@@ -1722,10 +1725,11 @@ public class AuthorizationTest {
     }
 
     // Get all tables of tpcds
+    final int numTpcdsTables = 24;
     req.get_tables_req.setSchemaName("tpcds");
     req.get_tables_req.setTableName("%");
     resp = fe_.execHiveServer2MetadataOp(req);
-    assertEquals(11, resp.rows.size());
+    assertEquals(numTpcdsTables, resp.rows.size());
   }
 
   @Test

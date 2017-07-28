@@ -26,6 +26,7 @@
 #include <boost/bind.hpp>
 #include <gutil/strings/substitute.h>
 
+#include "catalog/catalog-service-client-wrapper.h"
 #include "runtime/client-cache-types.h"
 #include "util/metrics.h"
 #include "rpc/thrift-client.h"
@@ -200,6 +201,7 @@ class ClientConnection {
   ClientConnection(ClientCache<T>* client_cache, TNetworkAddress address, Status* status)
     : client_cache_(client_cache), client_(NULL), address_(address),
       client_is_unrecoverable_(false) {
+    // TODO: Inject fault here to exercise IMPALA-5576.
     *status = client_cache_->GetClient(address, &client_);
     if (status->ok()) DCHECK(client_ != NULL);
   }
@@ -224,57 +226,38 @@ class ClientConnection {
   /// TCP connection underpinning this client has been closed unexpectedly. Note that
   /// this can lead to f() being called twice, as this method may retry f() once,
   /// depending on the error received from the first attempt.
-  /// TODO: Detect already-closed cnxns and only retry in that case.
-  ///
-  /// retry_is_safe is an output parameter. In case of connection failure,
-  /// '*retry_is_safe' is set to true because the send never occurred and it's
-  /// safe to retry the RPC. Otherwise, it's set to false to indicate that the RPC was
-  /// in progress when it failed or the RPC was completed, therefore retrying the RPC
-  /// is not safe.
   ///
   /// Returns RPC_RECV_TIMEOUT if a timeout occurred while waiting for a response,
   /// RPC_CLIENT_CONNECT_FAILURE if the client failed to connect, and RPC_GENERAL_ERROR
   /// if the RPC could not be completed for any other reason (except for an unexpectedly
-  /// closed cnxn, see TODO).
+  /// closed cnxn).
   /// Application-level failures should be signalled through the response type.
-  ///
-  /// TODO: Use TTransportException::TTransportExceptionType to distinguish between
-  /// failure modes.
   template <class F, class Request, class Response>
-  Status DoRpc(const F& f, const Request& request, Response* response,
-      bool* retry_is_safe = NULL) {
-    DCHECK(response != NULL);
+  Status DoRpc(const F& f, const Request& request, Response* response) {
+    DCHECK(response != nullptr);
     client_is_unrecoverable_ = true;
-    if (retry_is_safe != NULL) *retry_is_safe = false;
+    bool send_done = false;
     try {
-      (client_->*f)(*response, request);
-    } catch (const apache::thrift::TApplicationException& e) {
-      // TApplicationException only happens in recv RPC call.
-      // which means send RPC call is done, should not retry.
-      return Status(TErrorCode::RPC_GENERAL_ERROR, e.what());
-    } catch (const apache::thrift::TException& e) {
-      if (IsRecvTimeoutTException(e)) {
+      (client_->*f)(*response, request, &send_done);
+    } catch (const apache::thrift::transport::TTransportException& e) {
+      if (send_done && IsRecvTimeoutTException(e)) {
         return Status(TErrorCode::RPC_RECV_TIMEOUT, strings::Substitute(
             "Client $0 timed-out during recv call.", TNetworkAddressToString(address_)));
       }
-      VLOG(1) << "client " << client_ << " unexpected exception: "
-              << e.what() << ", type=" << typeid(e).name();
 
-      // Client may have unexpectedly been closed, so re-open and retry.
-      // TODO: ThriftClient should return proper error codes.
-      const Status& status = Reopen();
-      if (!status.ok()) {
-        if (retry_is_safe != NULL) *retry_is_safe = true;
-        return Status(TErrorCode::RPC_CLIENT_CONNECT_FAILURE, status.GetDetail());
+      // Client may have unexpectedly been closed, so re-open and retry once if we didn't
+      // successfully send the payload yet or if the exception indicates the connection
+      // was closed on the other end. Note that TCP can have a half-open connection so
+      // send() may still succeed even after the other end already closed the socket.
+      // The payload can just be buffered in the kernel.
+      if (!send_done || IsConnResetTException(e)) {
+        return RetryRpc(f, request, response);
       }
-      try {
-        (client_->*f)(*response, request);
-      } catch (apache::thrift::TException& e) {
-        // By this point the RPC really has failed.
-        // TODO: Revisit this logic later. It's possible that the new connection
-        // works but we hit timeout here.
-        return Status(TErrorCode::RPC_GENERAL_ERROR, e.what());
-      }
+
+      // Payload was sent and failure wasn't a timeout waiting for response. Fail the RPC.
+      return Status(TErrorCode::RPC_GENERAL_ERROR, ExceptionMsg(e, send_done));
+    } catch (const apache::thrift::TException& e) {
+      return Status(TErrorCode::RPC_GENERAL_ERROR, ExceptionMsg(e, send_done));
     }
     client_is_unrecoverable_ = false;
     return Status::OK();
@@ -289,12 +272,14 @@ class ClientConnection {
     DCHECK(client_is_unrecoverable_);
     try {
       (client_->*recv_func)(*response);
-    } catch (const apache::thrift::TException& e) {
+    } catch (const apache::thrift::transport::TTransportException& e) {
       if (IsRecvTimeoutTException(e)) {
         return Status(TErrorCode::RPC_RECV_TIMEOUT, strings::Substitute(
             "Client $0 timed-out during recv call.", TNetworkAddressToString(address_)));
       }
       // If it's not timeout exception, then the connection is broken, stop retrying.
+      return Status(TErrorCode::RPC_GENERAL_ERROR, e.what());
+    } catch (const apache::thrift::TException& e) {
       return Status(TErrorCode::RPC_GENERAL_ERROR, e.what());
     }
     client_is_unrecoverable_ = false;
@@ -310,6 +295,38 @@ class ClientConnection {
   /// fails for any reason, the connection could be left in a bad state and cannot be
   /// recovered.
   bool client_is_unrecoverable_;
+
+  std::string ExceptionMsg(const apache::thrift::TException& e, bool send_done) {
+    return strings::Substitute("Client for $0 hits an unexpected exception: $1, type: $2"
+        " rpc send completed: $3", TNetworkAddressToString(address_), e.what(),
+        typeid(e).name(), send_done ? "true" : "false");
+  }
+
+  /// Retry the RPC if TCP connection underpinning this client has been closed
+  /// unexpectedly. Called only when we didn't succeed in sending all the payload
+  /// in the first invocation of RPC call. Returns RPC_CLIENT_CONNECT_FAILURE
+  /// on connection failure or RPC_GENERAL_ERROR for all other RPC failures.
+  template <class F, class Request, class Response>
+  Status RetryRpc(const F& f, const Request& request, Response* response) {
+    DCHECK(client_is_unrecoverable_);
+    // Client may have unexpectedly been closed, so re-open and retry.
+    // TODO: ThriftClient should return proper error codes.
+    Status status = Reopen();
+    if (!status.ok()) {
+      return Status(TErrorCode::RPC_CLIENT_CONNECT_FAILURE, status.GetDetail());
+    }
+    bool send_done = false;
+    try {
+      (client_->*f)(*response, request, &send_done);
+    } catch (const apache::thrift::TException& e) {
+      // By this point the RPC really has failed.
+      // TODO: Revisit this logic later. It's possible that the new connection
+      // works but we hit timeout here.
+      return Status(TErrorCode::RPC_GENERAL_ERROR, ExceptionMsg(e, send_done));
+    }
+    client_is_unrecoverable_ = false;
+    return Status::OK();
+  }
 };
 
 /// Generic cache of Thrift clients for a given service type.

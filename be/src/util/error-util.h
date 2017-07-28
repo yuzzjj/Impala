@@ -83,9 +83,6 @@ class ErrorMsg {
       const ArgType& arg5, const ArgType& arg6, const ArgType& arg7,
       const ArgType& arg8, const ArgType& arg9);
 
-  ErrorMsg(TErrorCode::type error, const std::vector<string>& detail)
-      : error_(error), details_(detail) {}
-
   /// Static initializer that is needed to avoid issues with static initialization order
   /// and the point in time when the string list generated via thrift becomes
   /// available. This method should not be used if no static initialization is needed as
@@ -111,8 +108,13 @@ class ErrorMsg {
   }
 
   /// Set a specific error code.
-  void SetError(TErrorCode::type e) {
+  void SetErrorCode(TErrorCode::type e) {
     error_ = e;
+  }
+
+  /// Set a specific error message.
+  void SetErrorMsg(const std::string& msg) {
+    message_ = msg;
   }
 
   /// Return the formatted error string.
@@ -137,11 +139,11 @@ private:
 /// Track log messages per error code.
 typedef std::map<TErrorCode::type, TErrorLogEntry> ErrorLogMap;
 
-/// Merge error maps. Merging of error maps occurs, when the errors from multiple backends
-/// are merged into a single error map.  General log messages are simply appended,
-/// specific errors are deduplicated by either appending a new instance or incrementing
-/// the count of an existing one.
-void MergeErrorMaps(ErrorLogMap* left, const ErrorLogMap& right);
+/// Merge error map m1 into m2. Merging of error maps occurs when the errors from
+/// multiple backends are merged into a single error map.  General log messages are
+/// simply appended, specific errors are deduplicated by either appending a new
+/// instance or incrementing the count of an existing one.
+void MergeErrorMaps(const ErrorLogMap& m1, ErrorLogMap* m2);
 
 /// Append an error to the error map. Performs the aggregation as follows: GENERAL errors
 /// are appended to the list of GENERAL errors, to keep one item each in the map, while

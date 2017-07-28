@@ -37,16 +37,20 @@ class RowBatch;
 /// The client API for Sorter is as follows:
 /// AddBatch() is used to add input rows to be sorted. Multiple tuples in an input row are
 /// materialized into a row with a single tuple (the sort tuple) using the materialization
-/// exprs in sort_tuple_slot_expr_ctxs_. The sort tuples are sorted according to the sort
-/// parameters and output by the sorter.
-/// AddBatch() can be called multiple times.
+/// exprs in sort_tuple_exprs_. The sort tuples are sorted according to the sort
+/// parameters and output by the sorter. AddBatch() can be called multiple times.
+//
+/// Callers that don't want to spill can use AddBatchNoSpill() instead, which only adds
+/// rows up to the memory limit and then returns the number of rows that were added.
+/// For this use case, 'enable_spill' should be set to false so that the sorter can reduce
+/// the number of buffers requested from the block mgr since there won't be merges.
 //
 /// InputDone() is called to indicate the end of input. If multiple sorted runs were
 /// created, it triggers intermediate merge steps (if necessary) and creates the final
 /// merger that returns results via GetNext().
 //
 /// GetNext() is used to retrieve sorted rows. It can be called multiple times.
-/// AddBatch(), InputDone() and GetNext() must be called in that order.
+/// AddBatch()/AddBatchNoSpill(), InputDone() and GetNext() must be called in that order.
 //
 /// Batches of input rows are collected into a sequence of pinned BufferedBlockMgr blocks
 /// called a run. The maximum size of a run is determined by the number of blocks that
@@ -89,38 +93,55 @@ class RowBatch;
 /// tuples in place.
 class Sorter {
  public:
-  /// sort_tuple_slot_exprs are the slot exprs used to materialize the tuple to be sorted.
-  /// compare_less_than is a comparator for the sort tuples (returns true if lhs < rhs).
-  /// merge_batch_size_ is the size of the batches created to provide rows to the merger
-  /// and retrieve rows from an intermediate merger.
+  /// 'sort_tuple_exprs' are the slot exprs used to materialize the tuples to be
+  /// sorted. 'compare_less_than' is a comparator for the sort tuples (returns true if
+  /// lhs < rhs). 'merge_batch_size_' is the size of the batches created to provide rows
+  /// to the merger and retrieve rows from an intermediate merger. 'enable_spilling'
+  /// should be set to false to reduce the number of requested buffers if the caller will
+  /// use AddBatchNoSpill().
   Sorter(const TupleRowComparator& compare_less_than,
-      const std::vector<ExprContext*>& sort_tuple_slot_expr_ctxs,
-      RowDescriptor* output_row_desc, MemTracker* mem_tracker,
-      RuntimeProfile* profile, RuntimeState* state);
+      const std::vector<ScalarExpr*>& sort_tuple_exprs, RowDescriptor* output_row_desc,
+      MemTracker* mem_tracker, RuntimeProfile* profile, RuntimeState* state,
+      bool enable_spilling = true);
 
   ~Sorter();
 
-  /// Initialization code, including registration to the block_mgr and the initialization
-  /// of the unsorted_run_, both of these may fail.
-  Status Init();
+  /// Initial set-up of the sorter for execution. Registers with the block mgr.
+  /// The evaluators for 'sort_tuple_exprs_' will be created and stored in 'obj_pool'.
+  /// All allocation from the evaluators will be from 'expr_mem_pool'.
+  Status Prepare(ObjectPool* obj_pool, MemPool* expr_mem_pool) WARN_UNUSED_RESULT;
 
-  /// Adds a batch of input rows to the current unsorted run.
-  Status AddBatch(RowBatch* batch);
+  /// Opens the sorter for adding rows and initializes the evaluators for materializing
+  /// the tuples. Must be called after Prepare() or Reset() and before calling AddBatch().
+  Status Open() WARN_UNUSED_RESULT;
+
+  /// Adds the entire batch of input rows to the sorter. If the current unsorted run fills
+  /// up, it is sorted and a new unsorted run is created. Cannot be called if
+  /// 'enable_spill' is false.
+  Status AddBatch(RowBatch* batch) WARN_UNUSED_RESULT;
+
+  /// Adds input rows to the current unsorted run, starting from 'start_index' up to the
+  /// memory limit. Returns the number of rows added in 'num_processed'.
+  Status AddBatchNoSpill(
+      RowBatch* batch, int start_index, int* num_processed) WARN_UNUSED_RESULT;
 
   /// Called to indicate there is no more input. Triggers the creation of merger(s) if
   /// necessary.
-  Status InputDone();
+  Status InputDone() WARN_UNUSED_RESULT;
 
   /// Get the next batch of sorted output rows from the sorter.
-  Status GetNext(RowBatch* batch, bool* eos);
+  Status GetNext(RowBatch* batch, bool* eos) WARN_UNUSED_RESULT;
+
+  /// Free any local allocations made when materializing and sorting the tuples.
+  void FreeLocalAllocations();
 
   /// Resets all internal state like ExecNode::Reset().
   /// Init() must have been called, AddBatch()/GetNext()/InputDone()
   /// may or may not have been called.
-  Status Reset();
+  void Reset();
 
   /// Close the Sorter and free resources.
-  void Close();
+  void Close(RuntimeState* state);
 
  private:
   class Run;
@@ -134,7 +155,7 @@ class Sorter {
   /// 'sorted_runs_'.  The Sorter sets the 'deep_copy_input' flag to true for the
   /// merger, since the blocks containing input run data will be deleted as input
   /// runs are read.
-  Status CreateMerger(int max_num_runs);
+  Status CreateMerger(int max_num_runs) WARN_UNUSED_RESULT;
 
   /// Repeatedly replaces multiple smaller runs in sorted_runs_ with a single larger
   /// merged run until there are few enough runs to be merged with a single merger.
@@ -143,15 +164,15 @@ class Sorter {
   /// a merge. If the number of sorted runs is too large, merge sets of smaller runs
   /// into large runs until a final merge can be performed. An intermediate row batch
   /// containing deep copied rows is used for the output of each intermediate merge.
-  Status MergeIntermediateRuns();
+  Status MergeIntermediateRuns() WARN_UNUSED_RESULT;
 
   /// Execute a single step of the intermediate merge, pulling rows from 'merger_'
   /// and adding them to 'merged_run'.
-  Status ExecuteIntermediateMerge(Sorter::Run* merged_run);
+  Status ExecuteIntermediateMerge(Sorter::Run* merged_run) WARN_UNUSED_RESULT;
 
   /// Called once there no more rows to be added to 'unsorted_run_'. Sorts
   /// 'unsorted_run_' and appends it to the list of sorted runs.
-  Status SortCurrentInputRun();
+  Status SortCurrentInputRun() WARN_UNUSED_RESULT;
 
   /// Helper that cleans up all runs in the sorter.
   void CleanupAllRuns();
@@ -172,9 +193,9 @@ class Sorter {
   /// True if the tuples to be sorted have var-length slots.
   bool has_var_len_slots_;
 
-  /// Expressions used to materialize the sort tuple. Contains one expr per slot in the
-  /// tuple.
-  std::vector<ExprContext*> sort_tuple_slot_expr_ctxs_;
+  /// Expressions used to materialize the sort tuple. One expr per slot in the tuple.
+  const std::vector<ScalarExpr*>& sort_tuple_exprs_;
+  std::vector<ScalarExprEvaluator*> sort_tuple_expr_evals_;
 
   /// Mem tracker for batches created during merge. Not owned by Sorter.
   MemTracker* mem_tracker_;
@@ -182,6 +203,9 @@ class Sorter {
   /// Descriptor for the sort tuple. Input rows are materialized into 1 tuple before
   /// sorting. Not owned by the Sorter.
   RowDescriptor* output_row_desc_;
+
+  /// True if this sorter can spill. Used to determine the number of buffers to reserve.
+  bool enable_spilling_;
 
   /////////////////////////////////////////
   /// BEGIN: Members that must be Reset()
@@ -234,6 +258,9 @@ class Sorter {
 
   /// Total size of the initial runs in bytes.
   RuntimeProfile::Counter* sorted_data_size_;
+
+  /// Min, max, and avg size of runs in number of tuples.
+  RuntimeProfile::SummaryStatsCounter* run_sizes_;
 };
 
 } // namespace impala

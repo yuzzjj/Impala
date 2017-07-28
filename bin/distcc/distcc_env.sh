@@ -97,8 +97,8 @@ function disable_distcc {
 }
 
 function enable_distcc {
+  export IMPALA_DISTCC_ENABLED=true
   switch_compiler distcc
-  export IMPALA_BUILD_THREADS=$(distcc -j)
   if ! clean_cmake_files; then
     echo Failed to clean cmake files. 1>&2
     return 1
@@ -114,14 +114,12 @@ function clean_cmake_files {
     echo IMPALA_HOME=$IMPALA_HOME is not valid. 1>&2
     return 1
   fi
-  # Copied from $IMPALA_HOME/bin/clean.sh.
-  FIND_ARGS=("$IMPALA_HOME" -iname '*cmake*' -not -name CMakeLists.txt \
-      -not -path "$IMPALA_HOME/cmake_modules*" \
-      -not -path "$IMPALA_HOME/thirdparty*")
-  if [[ -n "$IMPALA_TOOLCHAIN" ]]; then
-    FIND_ARGS+=(-not -path "$IMPALA_TOOLCHAIN/*")
-  fi
-  find "${FIND_ARGS[@]}" -exec rm -Rf {} +
+  ROOT_DIR=${IMPALA_HOME%%/}
+  for loc in "${ROOT_DIR}/ -maxdepth 1" "$ROOT_DIR/be/" "$ROOT_DIR/fe/" \
+             "$ROOT_DIR/common/" "$ROOT_DIR/ext-data-source/"; do
+    find $loc \( -iname CMakeCache.txt -o -iname CMakeFiles \
+         -o -iname CTestTestfile.cmake -o -iname cmake_install.cmake \) -exec rm -Rf {} +
+  done
 }
 
 function switch_compiler {

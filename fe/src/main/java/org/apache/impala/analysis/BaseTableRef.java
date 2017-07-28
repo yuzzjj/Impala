@@ -53,7 +53,8 @@ public class BaseTableRef extends TableRef {
   }
 
   /**
-   * Register this table ref and then analyze the Join clause.
+   * Register this table ref and then analyze any table hints, the Join clause, and the
+   * 'skip.header.line.count' table property.
    */
   @Override
   public void analyze(Analyzer analyzer) throws AnalysisException {
@@ -61,6 +62,7 @@ public class BaseTableRef extends TableRef {
     analyzer.registerAuthAndAuditEvent(resolvedPath_.getRootTable(), priv_);
     desc_ = analyzer.registerTableRef(this);
     isAnalyzed_ = true;
+    analyzeTableSample(analyzer);
     analyzeHints(analyzer);
     analyzeJoin(analyzer);
     analyzeSkipHeaderLineCount();
@@ -70,13 +72,13 @@ public class BaseTableRef extends TableRef {
   protected String tableRefToSql() {
     // Enclose the alias in quotes if Hive cannot parse it without quotes.
     // This is needed for view compatibility between Impala and Hive.
-    String aliasSql = null;
+    String aliasSql = "";
     String alias = getExplicitAlias();
-    if (alias != null) aliasSql = ToSqlUtils.getIdentSql(alias);
+    if (alias != null) aliasSql = " " + ToSqlUtils.getIdentSql(alias);
+    String tableSampleSql = "";
+    if (sampleParams_ != null) tableSampleSql = " " + sampleParams_.toSql();
     String tableHintsSql = ToSqlUtils.getPlanHintsSql(tableHints_);
-    return getTable().getTableName().toSql() +
-        ((aliasSql != null) ? " " + aliasSql : "") +
-        (tableHintsSql != "" ? " " + tableHintsSql : "");
+    return getTable().getTableName().toSql() + aliasSql + tableSampleSql + tableHintsSql;
   }
 
   public String debugString() { return tableRefToSql(); }

@@ -56,6 +56,7 @@ typedef sig_t sighandler_t;
 #endif
 
 using boost::algorithm::is_any_of;
+using boost::algorithm::join;
 using boost::algorithm::split;
 using boost::algorithm::trim_right;
 using boost::algorithm::to_lower;
@@ -173,30 +174,6 @@ Webserver::Webserver(const int port)
 
 Webserver::~Webserver() {
   Stop();
-}
-
-void Webserver::RootHandler(const ArgumentMap& args, Document* document) {
-  Value version(GetVersionString().c_str(), document->GetAllocator());
-  document->AddMember("version", version, document->GetAllocator());
-  Value cpu_info(CpuInfo::DebugString().c_str(), document->GetAllocator());
-  document->AddMember("cpu_info", cpu_info, document->GetAllocator());
-  Value mem_info(MemInfo::DebugString().c_str(), document->GetAllocator());
-  document->AddMember("mem_info", mem_info, document->GetAllocator());
-  Value disk_info(DiskInfo::DebugString().c_str(), document->GetAllocator());
-  document->AddMember("disk_info", disk_info, document->GetAllocator());
-  Value os_info(OsInfo::DebugString().c_str(), document->GetAllocator());
-  document->AddMember("os_info", os_info, document->GetAllocator());
-  Value process_state_info(ProcessStateInfo().DebugString().c_str(),
-    document->GetAllocator());
-  document->AddMember("process_state_info", process_state_info,
-    document->GetAllocator());
-
-  ExecEnv* env = ExecEnv::GetInstance();
-  if (env == nullptr || env->impala_server() == nullptr) return;
-  string mode = (env->impala_server()->IsCoordinator()) ?
-      "Coordinator + Executor" : "Executor";
-  Value impala_server_mode(mode.c_str(), document->GetAllocator());
-  document->AddMember("impala_server_mode", impala_server_mode, document->GetAllocator());
 }
 
 void Webserver::ErrorHandler(const ArgumentMap& args, Document* document) {
@@ -327,7 +304,7 @@ Status Webserver::Start() {
   // pointer to this server in the per-server state, and register a static method as the
   // default callback. That method unpacks the pointer to this and calls the real
   // callback.
-  context_ = sq_start(&callbacks, reinterpret_cast<void*>(this), &options[0]);
+  context_ = sq_start(&callbacks, reinterpret_cast<void*>(this), options.data());
 
   // Restore the child signal handler so wait() works properly.
   signal(SIGCHLD, sig_chld);
@@ -337,11 +314,6 @@ Status Webserver::Start() {
     error_msg << "Webserver: Could not start on address " << http_address_;
     return Status(error_msg.str());
   }
-
-  UrlCallback default_callback =
-      bind<void>(mem_fn(&Webserver::RootHandler), this, _1, _2);
-
-  RegisterUrlCallback("/", "root.tmpl", default_callback, false);
 
   LOG(INFO) << "Webserver started";
   return Status::OK();

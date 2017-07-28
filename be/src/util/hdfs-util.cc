@@ -31,6 +31,10 @@ string GetHdfsErrorMsg(const string& prefix, const string& file) {
   string error_msg = GetStrErrMsg();
   stringstream ss;
   ss << prefix << file << "\n" << error_msg;
+  char* root_cause = hdfsGetLastExceptionRootCause();
+  if (root_cause != nullptr) {
+    ss << "\nRoot cause: " << root_cause;
+  }
   return ss.str();
 }
 
@@ -79,6 +83,13 @@ bool IsS3APath(const char* path) {
     return ExecEnv::GetInstance()->default_fs().compare(0, 6, "s3a://") == 0;
   }
   return strncmp(path, "s3a://", 6) == 0;
+}
+
+bool IsADLSPath(const char* path) {
+  if (strstr(path, ":/") == NULL) {
+    return ExecEnv::GetInstance()->default_fs().compare(0, 6, "adl://") == 0;
+  }
+  return strncmp(path, "adl://", 6) == 0;
 }
 
 // Returns the length of the filesystem name in 'path' which is the length of the

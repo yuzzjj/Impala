@@ -38,6 +38,7 @@ import org.apache.impala.analysis.SqlScanner;
 import org.apache.impala.authorization.AuthorizationConfig;
 import org.apache.impala.catalog.AggregateFunction;
 import org.apache.impala.catalog.Catalog;
+import org.apache.impala.catalog.CatalogException;
 import org.apache.impala.catalog.Column;
 import org.apache.impala.catalog.Db;
 import org.apache.impala.catalog.Function;
@@ -48,6 +49,7 @@ import org.apache.impala.catalog.ScalarType;
 import org.apache.impala.catalog.Table;
 import org.apache.impala.catalog.Type;
 import org.apache.impala.catalog.View;
+import org.apache.impala.service.CatalogOpExecutor;
 import org.apache.impala.service.Frontend;
 import org.apache.impala.testutil.ImpaladTestCatalog;
 import org.apache.impala.testutil.TestUtils;
@@ -56,6 +58,8 @@ import org.apache.impala.thrift.TQueryCtx;
 import org.apache.impala.thrift.TQueryOptions;
 import org.junit.After;
 import org.junit.Assert;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
@@ -74,6 +78,16 @@ public class FrontendTestBase {
   // Test-local list of test databases and tables. These are cleaned up in @After.
   protected final List<Db> testDbs_ = Lists.newArrayList();
   protected final List<Table> testTables_ = Lists.newArrayList();
+
+  @BeforeClass
+  public static void setUp() throws Exception {
+    RuntimeEnv.INSTANCE.setTestEnv(true);
+  }
+
+  @AfterClass
+  public static void cleanUp() throws Exception {
+    RuntimeEnv.INSTANCE.setTestEnv(false);
+  }
 
   protected Analyzer createAnalyzer(String defaultDb) {
     TQueryCtx queryCtx =
@@ -152,22 +166,32 @@ public class FrontendTestBase {
 
   /**
    * Add a new dummy table to the catalog based on the given CREATE TABLE sql.
-   * The dummy table only has the column definitions and no other metadata.
+   * The dummy table only has the column definitions and the metastore table set, but no
+   * other metadata.
    * Returns the new dummy table.
    * The test tables are registered in testTables_ and removed in the @After method.
    */
   protected Table addTestTable(String createTableSql) {
     CreateTableStmt createTableStmt = (CreateTableStmt) AnalyzesOk(createTableSql);
-    // Currently does not support partitioned tables.
-    Preconditions.checkState(createTableStmt.getPartitionColumnDefs().isEmpty());
     Db db = catalog_.getDb(createTableStmt.getDb());
     Preconditions.checkNotNull(db, "Test tables must be created in an existing db.");
-    HdfsTable dummyTable = new HdfsTable(null, db,
+    org.apache.hadoop.hive.metastore.api.Table msTbl =
+        CatalogOpExecutor.createMetaStoreTable(createTableStmt.toThrift());
+    HdfsTable dummyTable = new HdfsTable(msTbl, db,
         createTableStmt.getTbl(), createTableStmt.getOwner());
-    List<ColumnDef> columnDefs = createTableStmt.getColumnDefs();
+    List<ColumnDef> columnDefs = Lists.newArrayList(
+        createTableStmt.getPartitionColumnDefs());
+    dummyTable.setNumClusteringCols(columnDefs.size());
+    columnDefs.addAll(createTableStmt.getColumnDefs());
     for (int i = 0; i < columnDefs.size(); ++i) {
       ColumnDef colDef = columnDefs.get(i);
       dummyTable.addColumn(new Column(colDef.getColName(), colDef.getType(), i));
+    }
+    try {
+    dummyTable.addDefaultPartition(msTbl.getSd());
+    } catch (CatalogException e) {
+      e.printStackTrace();
+      fail("Failed to add test table:\n" + createTableSql);
     }
     db.addTable(dummyTable);
     testTables_.add(dummyTable);

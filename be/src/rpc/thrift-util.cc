@@ -18,6 +18,7 @@
 #include "rpc/thrift-util.h"
 
 #include <boost/thread.hpp>
+#include <thrift/config.h>
 
 #include "util/hash-util.h"
 #include "util/time.h"
@@ -39,6 +40,7 @@
 // TODO: get thrift to fix this.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wstring-plus-int"
+#include <gutil/strings/substitute.h>
 #include <thrift/Thrift.h>
 #include <thrift/transport/TSocket.h>
 #include <thrift/transport/TServerSocket.h>
@@ -54,6 +56,16 @@ using namespace apache::thrift::transport;
 using namespace apache::thrift::server;
 using namespace apache::thrift::protocol;
 using namespace apache::thrift::concurrency;
+
+// IsRecvTimeoutTException() and IsSendFailTException() make assumption about the
+// implementation of read(), write() and write_partial() in TSocket.cpp and those
+// functions may change between different versions of Thrift.
+static_assert(PACKAGE_VERSION[0] == '0', "");
+static_assert(PACKAGE_VERSION[1] == '.', "");
+static_assert(PACKAGE_VERSION[2] == '9', "");
+static_assert(PACKAGE_VERSION[3] == '.', "");
+static_assert(PACKAGE_VERSION[4] == '0', "");
+static_assert(PACKAGE_VERSION[5] == '\0', "");
 
 // Thrift defines operator< but does not implement it. This is a stub
 // implementation so we can link.
@@ -174,9 +186,23 @@ bool TNetworkAddressComparator(const TNetworkAddress& a, const TNetworkAddress& 
   return false;
 }
 
-bool IsRecvTimeoutTException(const TException& e) {
-  // String taken from Thrift's TSocket.cpp, this only happens in TSocket::read()
-  return strstr(e.what(), "EAGAIN (timed out)") != NULL;
+bool IsRecvTimeoutTException(const TTransportException& e) {
+  // String taken from TSocket::read() Thrift's TSocket.cpp.
+  return (e.getType() == TTransportException::TIMED_OUT &&
+             strstr(e.what(), "EAGAIN (timed out)") != nullptr) ||
+         (e.getType() == TTransportException::INTERNAL_ERROR &&
+             strstr(e.what(), "SSL_read: Resource temporarily unavailable") != nullptr);
+}
+
+bool IsConnResetTException(const TTransportException& e) {
+  // Strings taken from TTransport::readAll(). This happens iff TSocket::read() returns 0.
+  // As readAll() is reading non-zero length payload, this can only mean recv() called
+  // by read() returns 0. According to man page of recv(), this implies a stream socket
+  // peer has performed an orderly shutdown.
+  return (e.getType() == TTransportException::END_OF_FILE &&
+             strstr(e.what(), "No more data to read.") != nullptr) ||
+         (e.getType() == TTransportException::INTERNAL_ERROR &&
+             strstr(e.what(), "SSL_read: Connection reset by peer") != nullptr);
 }
 
 }

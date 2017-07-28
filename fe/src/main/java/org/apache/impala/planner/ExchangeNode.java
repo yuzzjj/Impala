@@ -17,9 +17,6 @@
 
 package org.apache.impala.planner;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import org.apache.impala.analysis.Analyzer;
 import org.apache.impala.analysis.Expr;
 import org.apache.impala.analysis.SortInfo;
@@ -93,7 +90,7 @@ public class ExchangeNode extends PlanNode {
         cardinality_ = -1;
         break;
       }
-      cardinality_ = addCardinalities(cardinality_, child.getCardinality());
+      cardinality_ = checkedAdd(cardinality_, child.getCardinality());
     }
 
     if (hasLimit()) {
@@ -185,9 +182,16 @@ public class ExchangeNode extends PlanNode {
   }
 
   @Override
-  public void computeResourceProfile(TQueryOptions queryOptions) {
+  public void computeNodeResourceProfile(TQueryOptions queryOptions) {
     // TODO: add an estimate
-    resourceProfile_ =  new ResourceProfile(0, 0);
+    nodeResourceProfile_ =  new ResourceProfile(0, 0);
+  }
+
+  @Override
+  public ExecPhaseResourceProfiles computeTreeResourceProfiles(
+      TQueryOptions queryOptions) {
+    // Don't include resources of child in different plan fragment.
+    return new ExecPhaseResourceProfiles(nodeResourceProfile_, nodeResourceProfile_);
   }
 
   @Override

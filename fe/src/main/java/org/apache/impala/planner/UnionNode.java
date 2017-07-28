@@ -115,7 +115,7 @@ public class UnionNode extends PlanNode {
       // ignore missing child cardinality info in the hope it won't matter enough
       // to change the planning outcome
       if (child.cardinality_ > 0) {
-        cardinality_ = addCardinalities(cardinality_, child.cardinality_);
+        cardinality_ = checkedAdd(cardinality_, child.cardinality_);
       }
     }
     // The number of nodes of a union node is -1 (invalid) if all the referenced tables
@@ -129,9 +129,26 @@ public class UnionNode extends PlanNode {
   }
 
   @Override
-  public void computeResourceProfile(TQueryOptions queryOptions) {
+  public void computeNodeResourceProfile(TQueryOptions queryOptions) {
     // TODO: add an estimate
-    resourceProfile_ = new ResourceProfile(0, 0);
+    nodeResourceProfile_ = new ResourceProfile(0, 0);
+  }
+
+  @Override
+  public ExecPhaseResourceProfiles computeTreeResourceProfiles(
+      TQueryOptions queryOptions) {
+    // The union executes concurrently with Open() and GetNext() on each of it's
+    // children.
+    ResourceProfile maxProfile = ResourceProfile.invalid();
+    for (PlanNode child : children_) {
+      // Children are opened either during Open() or GetNext() of the union.
+      ExecPhaseResourceProfiles childResources =
+          child.computeTreeResourceProfiles(queryOptions);
+      maxProfile = maxProfile.max(childResources.duringOpenProfile);
+      maxProfile = maxProfile.max(childResources.postOpenProfile);
+    }
+    ResourceProfile peakResources = nodeResourceProfile_.sum(maxProfile);
+    return new ExecPhaseResourceProfiles(peakResources, peakResources);
   }
 
   /**

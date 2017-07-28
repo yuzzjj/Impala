@@ -53,18 +53,18 @@ public class HdfsTableSink extends TableSink {
   protected final boolean inputIsClustered_;
 
   // Stores the indices into the list of non-clustering columns of the target table that
-  // are mentioned in the 'sortby()' hint. This is sent to the backend to populate the
-  // RowGroup::sorting_columns list in parquet files.
-  private List<Integer> sortByColumns_ = Lists.newArrayList();
+  // are stored in the 'sort.columns' table property. This is sent to the backend to
+  // populate the RowGroup::sorting_columns list in parquet files.
+  private List<Integer> sortColumns_ = Lists.newArrayList();
 
   public HdfsTableSink(Table targetTable, List<Expr> partitionKeyExprs,
-      boolean overwrite, boolean inputIsClustered, List<Integer> sortByColumns) {
+      boolean overwrite, boolean inputIsClustered, List<Integer> sortColumns) {
     super(targetTable, Op.INSERT);
     Preconditions.checkState(targetTable instanceof HdfsTable);
     partitionKeyExprs_ = partitionKeyExprs;
     overwrite_ = overwrite;
     inputIsClustered_ = inputIsClustered;
-    sortByColumns_ = sortByColumns;
+    sortColumns_ = sortColumns;
   }
 
   @Override
@@ -95,8 +95,9 @@ public class HdfsTableSink extends TableSink {
           Math.max(1L, inputNode.getCardinality() / numInstances);
       long perInstanceInputBytes =
           (long) Math.ceil(perInstanceInputCardinality * inputNode.getAvgRowSize());
-      perInstanceMemEstimate =
-          Math.min(perInstanceInputBytes, numPartitionsPerInstance * perPartitionMemReq);
+      long perInstanceMemReq =
+          PlanNode.checkedMultiply(numPartitionsPerInstance, perPartitionMemReq);
+      perInstanceMemEstimate = Math.min(perInstanceInputBytes, perInstanceMemReq);
     }
     resourceProfile_ = new ResourceProfile(perInstanceMemEstimate, 0);
   }
@@ -170,7 +171,7 @@ public class HdfsTableSink extends TableSink {
     if (skipHeaderLineCount > 0) {
       hdfsTableSink.setSkip_header_line_count(skipHeaderLineCount);
     }
-    hdfsTableSink.setSort_by_columns(sortByColumns_);
+    hdfsTableSink.setSort_columns(sortColumns_);
     TTableSink tTableSink = new TTableSink(DescriptorTable.TABLE_SINK_ID,
         TTableSinkType.HDFS, sinkOp_.toThrift());
     tTableSink.hdfs_table_sink = hdfsTableSink;

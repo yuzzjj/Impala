@@ -46,6 +46,47 @@ under the License.
 
   </conbody>
 
+<!-- All 2.9.x new features go under here -->
+
+  <concept rev="2.9.0" id="new_features_290">
+
+    <title>New Features in <keyword keyref="impala29_full"/></title>
+
+    <conbody>
+
+      <p>
+        For the full list of issues closed in this release, including the issues
+        marked as <q>new features</q>, see the
+        <xref keyref="changelog_29">changelog for <keyword keyref="impala29"/></xref>.
+      </p>
+
+      <p>
+        The following are some of the most significant new features in this release:
+      </p>
+
+      <ul id="feature_list">
+        <li>
+          <p rev="IMPALA-4729">
+            A new function, <codeph>replace()</codeph>, which is faster than
+            <codeph>regexp_replace()</codeph> for simple string substitutions.
+            See <xref keyref="string_functions"/> for details.
+          </p>
+        </li>
+        <li>
+          <p rev="2.9.0 IMPALA-3807 IMPALA-5147 IMPALA-5503">
+            Startup flags for the <cmdname>impalad</cmdname> daemon, <codeph>is_executor</codeph>
+            and <codeph>is_coordinator</codeph>, let you divide the work on a large, busy cluster
+            between a small number of hosts acting as query coordinators, and a larger number of
+            hosts acting as query executors. By default, each host can act in both roles,
+            potentially introducing bottlenecks during heavily concurrent workloads.
+            See <xref keyref="scalability_coordinator"/> for details.
+          </p>
+        </li>
+      </ul>
+
+    </conbody>
+  </concept>
+
 <!-- All 2.8.x new features go under here -->
 
   <concept rev="2.8.0" id="new_features_280">
@@ -131,14 +172,6 @@ under the License.
                 partition key columns, and each partition is only written
                 by a single host, reducing the amount of memory needed to buffer
                 Parquet data while the data blocks are being constructed.
-              </p>
-            </li>
-            <li>
-              <p rev="IMPALA-4163">
-                A new hint, <codeph>SORTBY(<varname>cols</varname>)</codeph>,
-                allows Impala <codeph>INSERT</codeph> operations on a Parquet table
-                to produce optimized output files with better compressibility
-                and a more compact range of min/max values within each data file.
               </p>
             </li>
             <li>

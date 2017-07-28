@@ -26,7 +26,7 @@
 #include <boost/static_assert.hpp>
 
 #include "exprs/anyval-util.h"
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
 #include "runtime/string-value.inline.h"
 #include "runtime/tuple-row.h"
 #include "util/bit-util.h"
@@ -236,7 +236,8 @@ void StringFunctions::ReplaceClose(FunctionContext* context,
   if (scope != FunctionContext::FRAGMENT_LOCAL) return;
   ReplaceContext* rptr = reinterpret_cast<ReplaceContext*>
       (context->GetFunctionState(FunctionContext::FRAGMENT_LOCAL));
-  if (rptr != nullptr) context->Free(reinterpret_cast<uint8_t*>(rptr));
+  context->Free(reinterpret_cast<uint8_t*>(rptr));
+  context->SetFunctionState(scope, nullptr);
 }
 
 StringVal StringFunctions::Replace(FunctionContext* context, const StringVal& str,
@@ -612,6 +613,7 @@ void StringFunctions::RegexpClose(
   if (scope != FunctionContext::FRAGMENT_LOCAL) return;
   re2::RE2* re = reinterpret_cast<re2::RE2*>(context->GetFunctionState(scope));
   delete re;
+  context->SetFunctionState(scope, nullptr);
 }
 
 StringVal StringFunctions::RegexpExtract(FunctionContext* context, const StringVal& str,
@@ -640,7 +642,7 @@ StringVal StringFunctions::RegexpExtract(FunctionContext* context, const StringV
   // TODO: fix this
   vector<re2::StringPiece> matches(max_matches);
   bool success =
-      re->Match(str_sp, 0, str.len, re2::RE2::UNANCHORED, &matches[0], max_matches);
+      re->Match(str_sp, 0, str.len, re2::RE2::UNANCHORED, matches.data(), max_matches);
   if (!success) return StringVal();
   // matches[0] is the whole string, matches[1] the first group, etc.
   const re2::StringPiece& match = matches[index.val];
@@ -879,8 +881,8 @@ void StringFunctions::ParseUrlClose(
   if (scope != FunctionContext::FRAGMENT_LOCAL) return;
   UrlParser::UrlPart* url_part =
       reinterpret_cast<UrlParser::UrlPart*>(ctx->GetFunctionState(scope));
-  if (url_part == NULL) return;
   delete url_part;
+  ctx->SetFunctionState(scope, nullptr);
 }
 
 StringVal StringFunctions::ParseUrlKey(FunctionContext* ctx, const StringVal& url,
@@ -941,7 +943,8 @@ void StringFunctions::BTrimClose(
   if (scope != FunctionContext::THREAD_LOCAL) return;
   bitset<256>* unique_chars = reinterpret_cast<bitset<256>*>(
       context->GetFunctionState(scope));
-  if (unique_chars != NULL) delete unique_chars;
+  delete unique_chars;
+  context->SetFunctionState(scope, nullptr);
 }
 
 StringVal StringFunctions::BTrimString(FunctionContext* ctx,
@@ -976,7 +979,8 @@ StringVal StringFunctions::BTrimString(FunctionContext* ctx,
 // Similar to strstr() except that the strings are not null-terminated
 static char* LocateSubstring(char* haystack, int hay_len, const char* needle, int needle_len) {
   DCHECK_GT(needle_len, 0);
-  DCHECK(haystack != NULL && needle != NULL);
+  DCHECK(needle != NULL);
+  DCHECK(hay_len == 0 || haystack != NULL);
   for (int i = 0; i < hay_len - needle_len + 1; ++i) {
     char* possible_needle = haystack + i;
     if (strncmp(possible_needle, needle, needle_len) == 0) return possible_needle;

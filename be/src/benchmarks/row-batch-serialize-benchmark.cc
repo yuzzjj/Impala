@@ -23,6 +23,7 @@
 #include "runtime/mem-tracker.h"
 #include "runtime/raw-value.h"
 #include "runtime/row-batch.h"
+#include "runtime/string-value.h"
 #include "runtime/tuple-row.h"
 #include "service/fe-support.h"
 #include "service/frontend.h"
@@ -31,6 +32,7 @@
 #include "util/compress.h"
 #include "util/cpu-info.h"
 #include "util/decompress.h"
+#include "util/scope-exit-trigger.h"
 
 #include "common/names.h"
 
@@ -106,7 +108,7 @@ class RowBatchSerializeBaseline {
     output_batch->compression_type = THdfsCompression::NONE;
 
     output_batch->num_rows = batch->num_rows_;
-    batch->row_desc_.ToThrift(&output_batch->row_tuples);
+    batch->row_desc_->ToThrift(&output_batch->row_tuples);
     output_batch->tuple_offsets.reserve(batch->num_rows_ * batch->num_tuples_per_row_);
 
     int64_t size = TotalByteSize(batch);
@@ -115,18 +117,21 @@ class RowBatchSerializeBaseline {
     if (size > 0) {
       // Try compressing tuple_data to compression_scratch_, swap if compressed data is
       // smaller
-      scoped_ptr<Codec> compressor;
-      Status status = Codec::CreateCompressor(NULL, false, THdfsCompression::LZ4,
-                                              &compressor);
+      Lz4Compressor compressor(nullptr, false);
+      Status status = compressor.Init();
       DCHECK(status.ok()) << status.GetDetail();
+      auto compressor_cleanup =
+          MakeScopeExitTrigger([&compressor]() { compressor.Close(); });
 
-      int64_t compressed_size = compressor->MaxOutputLen(size);
+      int64_t compressed_size = compressor.MaxOutputLen(size);
       if (batch->compression_scratch_.size() < compressed_size) {
         batch->compression_scratch_.resize(compressed_size);
       }
       uint8_t* input = (uint8_t*)output_batch->tuple_data.c_str();
       uint8_t* compressed_output = (uint8_t*)batch->compression_scratch_.c_str();
-      compressor->ProcessBlock(true, size, input, &compressed_size, &compressed_output);
+      status =
+          compressor.ProcessBlock(true, size, input, &compressed_size, &compressed_output);
+      DCHECK(status.ok()) << status.GetDetail();
       if (LIKELY(compressed_size < size)) {
         batch->compression_scratch_.resize(compressed_size);
         output_batch->tuple_data.swap(batch->compression_scratch_);
@@ -152,9 +157,9 @@ class RowBatchSerializeBaseline {
     char* tuple_data = const_cast<char*>(output_batch->tuple_data.c_str());
 
     for (int i = 0; i < batch->num_rows_; ++i) {
-       vector<TupleDescriptor*>::const_iterator desc =
-         batch->row_desc_.tuple_descriptors().begin();
-      for (int j = 0; desc != batch->row_desc_.tuple_descriptors().end(); ++desc, ++j) {
+      vector<TupleDescriptor*>::const_iterator desc =
+          batch->row_desc_->tuple_descriptors().begin();
+      for (int j = 0; desc != batch->row_desc_->tuple_descriptors().end(); ++desc, ++j) {
         Tuple* tuple = batch->GetRow(i)->GetTuple(j);
         if (tuple == NULL) {
           // NULLs are encoded as -1
@@ -177,7 +182,7 @@ class RowBatchSerializeBaseline {
       for (int j = 0; j < batch->num_tuples_per_row_; ++j) {
         Tuple* tuple = batch->GetRow(i)->GetTuple(j);
         if (tuple == NULL) continue;
-        result += tuple->TotalByteSize(*batch->row_desc_.tuple_descriptors()[j]);
+        result += tuple->TotalByteSize(*batch->row_desc_->tuple_descriptors()[j]);
       }
     }
     return result;
@@ -193,18 +198,18 @@ class RowBatchSerializeBaseline {
       uint8_t* compressed_data = (uint8_t*)input_batch.tuple_data.c_str();
       size_t compressed_size = input_batch.tuple_data.size();
 
-      scoped_ptr<Codec> decompressor;
-      Status status = Codec::CreateDecompressor(NULL, false, input_batch.compression_type,
-          &decompressor);
+      Lz4Decompressor decompressor(nullptr, false);
+      Status status = decompressor.Init();
       DCHECK(status.ok()) << status.GetDetail();
+      auto compressor_cleanup =
+          MakeScopeExitTrigger([&decompressor]() { decompressor.Close(); });
 
       int64_t uncompressed_size = input_batch.uncompressed_size;
       DCHECK_NE(uncompressed_size, -1) << "RowBatch decompression failed";
       tuple_data = batch->tuple_data_pool()->Allocate(uncompressed_size);
-      status = decompressor->ProcessBlock(true, compressed_size, compressed_data,
-          &uncompressed_size, &tuple_data);
+      status = decompressor.ProcessBlock(
+          true, compressed_size, compressed_data, &uncompressed_size, &tuple_data);
       DCHECK(status.ok()) << "RowBatch decompression failed.";
-      decompressor->Close();
     } else {
       // Tuple data uncompressed, copy directly into data pool
       tuple_data = batch->tuple_data_pool()->Allocate(input_batch.tuple_data.size());
@@ -223,11 +228,11 @@ class RowBatchSerializeBaseline {
     }
 
     // Check whether we have slots that require offset-to-pointer conversion.
-    if (!batch->row_desc_.HasVarlenSlots()) return;
+    if (!batch->row_desc_->HasVarlenSlots()) return;
 
     for (int i = 0; i < batch->num_rows_; ++i) {
       for (int j = 0; j < batch->num_tuples_per_row_; ++j) {
-        const TupleDescriptor* desc = batch->row_desc_.tuple_descriptors()[j];
+        const TupleDescriptor* desc = batch->row_desc_->tuple_descriptors()[j];
         if (!desc->HasVarlenSlots()) continue;
         Tuple* tuple = batch->GetRow(i)->GetTuple(j);
         if (tuple == NULL) continue;
@@ -244,7 +249,7 @@ class RowBatchSerializeBenchmark {
     srand(rand_seed);
     if (cycle <= 0) cycle = NUM_ROWS; // Negative means no repeats in cycle.
     MemPool* mem_pool = batch->tuple_data_pool();
-    const TupleDescriptor* tuple_desc = batch->row_desc().tuple_descriptors()[0];
+    const TupleDescriptor* tuple_desc = batch->row_desc()->tuple_descriptors()[0];
     int unique_tuples = (NUM_ROWS - 1) / repeats + 1;
     uint8_t* tuple_mem = mem_pool->Allocate(tuple_desc->byte_size() * unique_tuples);
     for (int i = 0; i < NUM_ROWS; ++i) {
@@ -307,22 +312,20 @@ class RowBatchSerializeBenchmark {
   static void TestDeserialize(int batch_size, void* data) {
     struct DeserializeArgs* args = reinterpret_cast<struct DeserializeArgs*>(data);
     for (int iter = 0; iter < batch_size; ++iter) {
-      RowBatch deserialized_batch(*args->row_desc, *args->trow_batch, args->tracker);
+      RowBatch deserialized_batch(args->row_desc, *args->trow_batch, args->tracker);
     }
   }
 
   static void TestDeserializeBaseline(int batch_size, void* data) {
     struct DeserializeArgs* args = reinterpret_cast<struct DeserializeArgs*>(data);
     for (int iter = 0; iter < batch_size; ++iter) {
-      RowBatch deserialized_batch(*args->row_desc, args->trow_batch->num_rows,
-          args->tracker);
+      RowBatch deserialized_batch(
+          args->row_desc, args->trow_batch->num_rows, args->tracker);
       RowBatchSerializeBaseline::Deserialize(&deserialized_batch, *args->trow_batch);
     }
   }
 
   static void Run() {
-    CpuInfo::Init();
-
     MemTracker tracker;
     MemPool mem_pool(&tracker);
     ObjectPool obj_pool;
@@ -334,19 +337,18 @@ class RowBatchSerializeBenchmark {
     vector<TTupleId> tuple_id(1, (TTupleId) 0);
     RowDescriptor row_desc(*desc_tbl, tuple_id, nullable_tuples);
 
-    RowBatch* no_dup_batch = obj_pool.Add(new RowBatch(row_desc, NUM_ROWS, &tracker));
+    RowBatch* no_dup_batch = obj_pool.Add(new RowBatch(&row_desc, NUM_ROWS, &tracker));
     FillBatch(no_dup_batch, 12345, 1, -1);
     TRowBatch no_dup_tbatch;
     no_dup_batch->Serialize(&no_dup_tbatch);
 
     RowBatch* adjacent_dup_batch =
-        obj_pool.Add(new RowBatch(row_desc, NUM_ROWS, &tracker));
+        obj_pool.Add(new RowBatch(&row_desc, NUM_ROWS, &tracker));
     FillBatch(adjacent_dup_batch, 12345, 5, -1);
     TRowBatch adjacent_dup_tbatch;
     adjacent_dup_batch->Serialize(&adjacent_dup_tbatch, false);
 
-    RowBatch* dup_batch =
-        obj_pool.Add(new RowBatch(row_desc, NUM_ROWS, &tracker));
+    RowBatch* dup_batch = obj_pool.Add(new RowBatch(&row_desc, NUM_ROWS, &tracker));
     // Non-adjacent duplicates.
     FillBatch(dup_batch, 12345, 1, NUM_ROWS / 5);
     TRowBatch dup_tbatch;

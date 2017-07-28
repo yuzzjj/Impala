@@ -33,6 +33,10 @@ under the License.
   </keydef>
 -->
 
+  <keydef href="https://kudu.apache.org/docs/security.html" scope="external" format="html" keys="kudu_security">
+    <topicmeta><linktext>Kudu Security</linktext></topicmeta>
+  </keydef>
+
   <keydef href="https://web.mit.edu/kerberos/krb5-latest/doc/admin/install_kdc.html" scope="external" format="html" keys="mit_install_kdc">
     <topicmeta><linktext>Kerberos Key Distribution Center (KDC)</linktext></topicmeta>
   </keydef>
@@ -108,7 +112,7 @@ under the License.
 
   <keydef href="https://code.google.com/p/re2/" scope="external" format="html" keys="re2"/>
   <keydef href="http://goog-perftools.sourceforge.net/doc/tcmalloc.html" scope="external" format="html" keys="tcmalloc"/>
-  <keydef href="http://google-glog.googlecode.com/svn/trunk/doc/glog.html" scope="external" format="html" keys="glog"/>
+  <keydef href="https://github.com/google/glog" scope="external" format="html" keys="glog.html"/>
 
   <keydef href="https://issues.apache.org/jira/browse/HIVE-656" scope="external" format="html" keys="HIVE-656"/>
 
@@ -10573,6 +10577,10 @@ under the License.
   <keydef keys="impala14_full"><topicmeta><keywords><keyword>Impala 1.4</keyword></keywords></topicmeta></keydef>
   <keydef keys="impala13_full"><topicmeta><keywords><keyword>Impala 1.3</keyword></keywords></topicmeta></keydef>
 
+<!-- Pointers to changelog pages -->
+  <keydef keys="changelog_29" href="https://impala.incubator.apache.org/docs/changelog-2.9.html" scope="external" format="html"/>
+  <keydef keys="changelog_28" href="https://impala.incubator.apache.org/docs/changelog-2.8.html" scope="external" format="html"/>
+
 <!-- Indirect addresses for all the impala*.xml files. The key is the ID of the first topic within each file. -->
   <keydef href="topics/impala_concepts.xml" keys="concepts"/>
   <keydef href="topics/impala_components.xml" keys="intro_components"/>
@@ -10741,6 +10749,7 @@ under the License.
   <keydef href="topics/impala_batch_size.xml" keys="batch_size"/>
   <keydef href="topics/impala_compression_codec.xml" keys="compression_codec"/>
   <keydef href="topics/impala_debug_action.xml" keys="debug_action"/>
+  <keydef href="topics/impala_default_join_distribution_mode.xml" keys="default_join_distribution_mode"/>
   <keydef href="topics/impala_default_order_by_limit.xml" keys="default_order_by_limit"/>
   <keydef href="topics/impala_disable_cached_reads.xml" keys="disable_cached_reads"/>
   <keydef href="topics/impala_disable_codegen.xml" keys="disable_codegen"/>
@@ -10918,6 +10927,7 @@ under the License.
   <keydef href="topics/impala_scalability.xml" keys="scalability"/>
   <keydef audience="hidden" href="topics/impala_scalability.xml#scalability_memory" keys="scalability_memory"/>
   <keydef href="topics/impala_scalability.xml#scalability_catalog" keys="scalability_catalog"/>
+  <keydef href="topics/impala_scalability.xml#scalability_coordinator" keys="scalability_coordinator"/>
   <keydef href="topics/impala_scalability.xml#statestore_scalability" keys="statestore_scalability"/>
   <keydef audience="hidden" href="topics/impala_scalability.xml#scalability_cluster_size" keys="scalability_cluster_size"/>
   <keydef audience="hidden" href="topics/impala_scalability.xml#concurrent_connections" keys="concurrent_connections"/>

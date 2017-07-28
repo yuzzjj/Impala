@@ -18,6 +18,7 @@
 package org.apache.impala.analysis;
 
 import java.io.StringReader;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,14 +36,7 @@ import org.apache.impala.catalog.Type;
 import org.apache.impala.common.AnalysisException;
 import org.apache.impala.common.InternalException;
 import org.apache.impala.common.Pair;
-import org.apache.impala.rewrite.BetweenToCompoundRule;
-import org.apache.impala.rewrite.ExprRewriteRule;
 import org.apache.impala.rewrite.ExprRewriter;
-import org.apache.impala.rewrite.ExtractCommonConjunctRule;
-import org.apache.impala.rewrite.FoldConstantsRule;
-import org.apache.impala.rewrite.NormalizeBinaryPredicatesRule;
-import org.apache.impala.rewrite.NormalizeExprsRule;
-import org.apache.impala.rewrite.SimplifyConditionalsRule;
 import org.apache.impala.thrift.TAccessEvent;
 import org.apache.impala.thrift.TLineageGraph;
 import org.apache.impala.thrift.TQueryCtx;
@@ -51,6 +45,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
@@ -59,10 +54,10 @@ import com.google.common.collect.Maps;
  */
 public class AnalysisContext {
   private final static Logger LOG = LoggerFactory.getLogger(AnalysisContext.class);
-  private final ImpaladCatalog catalog_;
+  private ImpaladCatalog catalog_;
   private final TQueryCtx queryCtx_;
   private final AuthorizationConfig authzConfig_;
-  private final ExprRewriter rewriter_;
+  private final ExprRewriter customRewriter_;
 
   // Timeline of important events in the planning process, used for debugging
   // and profiling
@@ -73,25 +68,10 @@ public class AnalysisContext {
 
   public AnalysisContext(ImpaladCatalog catalog, TQueryCtx queryCtx,
       AuthorizationConfig authzConfig) {
-    catalog_ = catalog;
+    setCatalog(catalog);
     queryCtx_ = queryCtx;
     authzConfig_ = authzConfig;
-    List<ExprRewriteRule> rules = Lists.newArrayList();
-    // BetweenPredicates must be rewritten to be executable. Other non-essential
-    // expr rewrites can be disabled via a query option. When rewrites are enabled
-    // BetweenPredicates should be rewritten first to help trigger other rules.
-    rules.add(BetweenToCompoundRule.INSTANCE);
-    // Binary predicates must be rewritten to a canonical form for both Kudu predicate
-    // pushdown and Parquet row group pruning based on min/max statistics.
-    rules.add(NormalizeBinaryPredicatesRule.INSTANCE);
-    if (queryCtx.getClient_request().getQuery_options().enable_expr_rewrites) {
-      rules.add(FoldConstantsRule.INSTANCE);
-      rules.add(NormalizeExprsRule.INSTANCE);
-      rules.add(ExtractCommonConjunctRule.INSTANCE);
-      // Relies on FoldConstantsRule and NormalizeExprsRule.
-      rules.add(SimplifyConditionalsRule.INSTANCE);
-    }
-    rewriter_ = new ExprRewriter(rules);
+    customRewriter_ = null;
   }
 
   /**
@@ -99,16 +79,23 @@ public class AnalysisContext {
    */
   protected AnalysisContext(ImpaladCatalog catalog, TQueryCtx queryCtx,
       AuthorizationConfig authzConfig, ExprRewriter rewriter) {
-    catalog_ = catalog;
+    setCatalog(catalog);
     queryCtx_ = queryCtx;
     authzConfig_ = authzConfig;
-    rewriter_ = rewriter;
+    customRewriter_ = rewriter;
+  }
+
+  // Catalog may change between analysis attempts (e.g. when missing tables are loaded).
+  public void setCatalog(ImpaladCatalog catalog) {
+    Preconditions.checkNotNull(catalog);
+    catalog_ = catalog;
   }
 
   static public class AnalysisResult {
     private StatementBase stmt_;
     private Analyzer analyzer_;
     private EventSequence timeline_;
+    private boolean userHasProfileAccess_ = true;
 
     public boolean isAlterTableStmt() { return stmt_ instanceof AlterTableStmt; }
     public boolean isAlterViewStmt() { return stmt_ instanceof AlterViewStmt; }
@@ -361,6 +348,8 @@ public class AnalysisContext {
     public TLineageGraph getThriftLineageGraph() {
       return analyzer_.getThriftSerializedLineageGraph();
     }
+    public void setUserHasProfileAccess(boolean value) { userHasProfileAccess_ = value; }
+    public boolean userHasProfileAccess() { return userHasProfileAccess_; }
   }
 
   /**
@@ -401,10 +390,12 @@ public class AnalysisContext {
 
       // Apply expr and subquery rewrites.
       boolean reAnalyze = false;
+      ExprRewriter rewriter = (customRewriter_ != null) ? customRewriter_ :
+          analyzer.getExprRewriter();
       if (analysisResult_.requiresExprRewrite()) {
-        rewriter_.reset();
-        analysisResult_.stmt_.rewriteExprs(rewriter_);
-        reAnalyze = rewriter_.changed();
+        rewriter.reset();
+        analysisResult_.stmt_.rewriteExprs(rewriter);
+        reAnalyze = rewriter.changed();
       }
       if (analysisResult_.requiresSubqueryRewrite()) {
         StmtRewriter.rewrite(analysisResult_);
@@ -459,8 +450,10 @@ public class AnalysisContext {
         analysisResult_.isCreateTableAsSelectStmt() ||
         analysisResult_.isCreateViewStmt() || analysisResult_.isAlterViewStmt()) {
       // Map of table name to a list of privilege requests associated with that table.
-      // These include both table-level and column-level privilege requests.
-      Map<String, List<PrivilegeRequest>> tablePrivReqs = Maps.newHashMap();
+      // These include both table-level and column-level privilege requests. We use a
+      // LinkedHashMap to preserve the order in which requests are inserted.
+      LinkedHashMap<String, List<PrivilegeRequest>> tablePrivReqs =
+          Maps.newLinkedHashMap();
       // Privilege requests that are not column or table-level.
       List<PrivilegeRequest> otherPrivReqs = Lists.newArrayList();
       // Group the registered privilege requests based on the table they reference.
@@ -504,10 +497,18 @@ public class AnalysisContext {
       }
     }
 
-    // Check any masked requests.
+    // Check all masked requests. If a masked request has an associated error message,
+    // an AuthorizationException is thrown if authorization fails. Masked requests with no
+    // error message are used to check if the user can access the runtime profile.
+    // These checks don't result in an AuthorizationException but set the
+    // 'user_has_profile_access' flag in queryCtx_.
     for (Pair<PrivilegeRequest, String> maskedReq: analyzer.getMaskedPrivilegeReqs()) {
       if (!authzChecker.hasAccess(analyzer.getUser(), maskedReq.first)) {
-        throw new AuthorizationException(maskedReq.second);
+        analysisResult_.setUserHasProfileAccess(false);
+        if (!Strings.isNullOrEmpty(maskedReq.second)) {
+          throw new AuthorizationException(maskedReq.second);
+        }
+        break;
       }
     }
   }

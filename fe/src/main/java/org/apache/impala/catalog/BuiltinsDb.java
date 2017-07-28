@@ -880,6 +880,16 @@ public class BuiltinsDb extends Db {
         prefix + "16SumDecimalRemoveEPN10impala_udf15FunctionContextERKNS1_10DecimalValEPS4_",
         null, false, true, false));
 
+    // Sum that returns zero on an empty input.
+    db.addBuiltin(AggregateFunction.createBuiltin(db, "sum_init_zero",
+        Lists.<Type>newArrayList(Type.BIGINT), Type.BIGINT, Type.BIGINT,
+        prefix + "8InitZeroIN10impala_udf9BigIntValEEEvPNS2_15FunctionContextEPT_",
+        prefix + "9SumUpdateIN10impala_udf9BigIntValES3_EEvPNS2_15FunctionContextERKT_PT0_",
+        prefix + "9SumUpdateIN10impala_udf9BigIntValES3_EEvPNS2_15FunctionContextERKT_PT0_",
+        null, null,
+        prefix + "9SumRemoveIN10impala_udf9BigIntValES3_EEvPNS2_15FunctionContextERKT_PT0_",
+        null, false, true, true));
+
     // Avg
     // TODO: switch to CHAR(sizeof(AvgIntermediateType) when that becomes available
     db.addBuiltin(AggregateFunction.createBuiltin(db, "avg",
@@ -1030,7 +1040,9 @@ public class BuiltinsDb extends Db {
           db, "lag", Lists.newArrayList(t, Type.BIGINT, t), t, t,
           prefix + OFFSET_FN_INIT_SYMBOL.get(t),
           prefix + OFFSET_FN_UPDATE_SYMBOL.get(t),
-          null, null, null));
+          null,
+          t == Type.STRING ? stringValGetValue : null,
+          t == Type.STRING ? stringValSerializeOrFinalize : null));
       db.addBuiltin(AggregateFunction.createAnalyticBuiltin(
           db, "lead", Lists.newArrayList(t, Type.BIGINT, t), t, t,
           prefix + OFFSET_FN_INIT_SYMBOL.get(t),

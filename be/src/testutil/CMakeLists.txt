@@ -25,6 +25,7 @@ set(LIBRARY_OUTPUT_PATH "${BUILD_OUTPUT_ROOT_DIRECTORY}/testutil")
 set(EXECUTABLE_OUTPUT_PATH "${BUILD_OUTPUT_ROOT_DIRECTORY}/testutil")
 
 add_library(TestUtil
+  fault-injection-util.cc
   impalad-query-executor.cc
   in-process-servers.cc
   desc-tbl-builder.cc
@@ -41,9 +42,3 @@ add_dependencies(test-udfs-ir thrift-deps)
 
 add_library(TestUdas SHARED test-udas.cc)
 add_dependencies(TestUdas thrift-deps)
-
-add_executable(mini-impala-cluster
-  mini-impala-cluster.cc
-)
-
-target_link_libraries(mini-impala-cluster ${IMPALA_LINK_LIBS})

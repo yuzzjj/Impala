@@ -73,8 +73,15 @@ class DecompressorTest : public ::testing::Test {
       DecompressInsufficientOutputBuffer(compressor.get(), decompressor.get(),
           sizeof(input_), input_);
     } else {
-      CompressAndDecompress(compressor.get(), decompressor.get(), sizeof(input_),
+      CompressAndDecompress(compressor.get(), decompressor.get(), sizeof(input_), input_);
+      // Test with odd-length input (to test the calculation of block-sizes in
+      // SnappyBlockCompressor)
+      CompressAndDecompress(compressor.get(), decompressor.get(), sizeof(input_) - 1,
           input_);
+      // Test with input length of 1024 (to test SnappyBlockCompressor with a single
+      // block)
+      CompressAndDecompress(compressor.get(), decompressor.get(), 1024, input_);
+      // Test with empty input
       if (format != THdfsCompression::BZIP2) {
         CompressAndDecompress(compressor.get(), decompressor.get(), 0, NULL);
       } else {
@@ -393,7 +400,8 @@ TEST_F(DecompressorTest, Impala1506) {
   MemTracker trax;
   MemPool pool(&trax);
   scoped_ptr<Codec> compressor;
-  Codec::CreateCompressor(&pool, true, impala::THdfsCompression::GZIP, &compressor);
+  EXPECT_OK(
+      Codec::CreateCompressor(&pool, true, impala::THdfsCompression::GZIP, &compressor));
 
   int64_t input_len = 3;
   const uint8_t input[3] = {1, 2, 3};

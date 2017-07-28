@@ -19,11 +19,13 @@ package org.apache.impala.analysis;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
@@ -54,10 +56,43 @@ import org.apache.impala.util.KuduUtil;
  */
 public class ToSqlUtils {
   // Table properties to hide when generating the toSql() statement
-  // EXTERNAL and comment are hidden because they are part of the toSql result, e.g.,
-  // "CREATE EXTERNAL TABLE <name> ... COMMENT <comment> ..."
-  private static final ImmutableSet<String> HIDDEN_TABLE_PROPERTIES =
-      ImmutableSet.of("EXTERNAL", "comment");
+  // EXTERNAL, SORT BY, and comment are hidden because they are part of the toSql result,
+  // e.g., "CREATE EXTERNAL TABLE <name> ... SORT BY (...) ... COMMENT <comment> ..."
+  private static final ImmutableSet<String> HIDDEN_TABLE_PROPERTIES = ImmutableSet.of(
+      "EXTERNAL", "comment", AlterTableSortByStmt.TBL_PROP_SORT_COLUMNS);
+
+  /**
+   * Removes all hidden properties from the given 'tblProperties' map.
+   */
+  private static void removeHiddenTableProperties(Map<String, String> tblProperties) {
+    for (String key: HIDDEN_TABLE_PROPERTIES) tblProperties.remove(key);
+  }
+
+  /**
+   * Returns the list of sort columns from 'properties' or 'null' if 'properties' doesn't
+   * contain 'sort.columns'.
+   */
+  private static List<String> getSortColumns(Map<String, String> properties) {
+    String sortByKey = AlterTableSortByStmt.TBL_PROP_SORT_COLUMNS;
+    if (!properties.containsKey(sortByKey)) return null;
+    return Lists.newArrayList(Splitter.on(",").trimResults().omitEmptyStrings().split(
+        properties.get(sortByKey)));
+  }
+
+  /**
+   * Returns a comma-delimited string of Kudu 'partition by' parameters on a
+   * CreateTableStmt, or null if this isn't a CreateTableStmt for a Kudu table.
+   */
+  private static String getKuduPartitionByParams(CreateTableStmt stmt) {
+    List<KuduPartitionParam> partitionParams = stmt.getKuduPartitionParams();
+    Preconditions.checkNotNull(partitionParams);
+    if (partitionParams.isEmpty()) return null;
+    List<String> paramStrings = Lists.newArrayList();
+    for (KuduPartitionParam p : partitionParams) {
+      paramStrings.add(p.toSql());
+    }
+    return Joiner.on(", ").join(paramStrings);
+  }
 
   /**
    * Given an unquoted identifier string, returns an identifier lexable by
@@ -127,11 +162,12 @@ public class ToSqlUtils {
     for (ColumnDef col: stmt.getPartitionColumnDefs()) {
       partitionColsSql.add(col.toString());
     }
+    String kuduParamsSql = getKuduPartitionByParams(stmt);
     // TODO: Pass the correct compression, if applicable.
     return getCreateTableSql(stmt.getDb(), stmt.getTbl(), stmt.getComment(), colsSql,
-        partitionColsSql, stmt.getTblPrimaryKeyColumnNames(), null,
-        stmt.getTblProperties(), stmt.getSerdeProperties(), stmt.isExternal(),
-        stmt.getIfNotExists(), stmt.getRowFormat(),
+        partitionColsSql, stmt.getTblPrimaryKeyColumnNames(), kuduParamsSql,
+        stmt.getSortColumns(), stmt.getTblProperties(), stmt.getSerdeProperties(),
+        stmt.isExternal(), stmt.getIfNotExists(), stmt.getRowFormat(),
         HdfsFileFormat.fromThrift(stmt.getFileFormat()), HdfsCompression.NONE, null,
         stmt.getLocation());
   }
@@ -148,12 +184,17 @@ public class ToSqlUtils {
     for (ColumnDef col: innerStmt.getPartitionColumnDefs()) {
       partitionColsSql.add(col.getColName());
     }
+    // Use a LinkedHashMap to preserve the ordering of the table properties.
+    LinkedHashMap<String, String> properties =
+        Maps.newLinkedHashMap(innerStmt.getTblProperties());
+    removeHiddenTableProperties(properties);
+    String kuduParamsSql = getKuduPartitionByParams(innerStmt);
     // TODO: Pass the correct compression, if applicable.
     String createTableSql = getCreateTableSql(innerStmt.getDb(), innerStmt.getTbl(),
         innerStmt.getComment(), null, partitionColsSql,
-        innerStmt.getTblPrimaryKeyColumnNames(), null, innerStmt.getTblProperties(),
-        innerStmt.getSerdeProperties(), innerStmt.isExternal(),
-        innerStmt.getIfNotExists(), innerStmt.getRowFormat(),
+        innerStmt.getTblPrimaryKeyColumnNames(), kuduParamsSql,
+        innerStmt.getSortColumns(), properties, innerStmt.getSerdeProperties(),
+        innerStmt.isExternal(), innerStmt.getIfNotExists(), innerStmt.getRowFormat(),
         HdfsFileFormat.fromThrift(innerStmt.getFileFormat()), HdfsCompression.NONE, null,
         innerStmt.getLocation());
     return createTableSql + " AS " + stmt.getQueryStmt().toSql();
@@ -167,16 +208,16 @@ public class ToSqlUtils {
     Preconditions.checkNotNull(table);
     if (table instanceof View) return getCreateViewSql((View)table);
     org.apache.hadoop.hive.metastore.api.Table msTable = table.getMetaStoreTable();
-    HashMap<String, String> properties = Maps.newHashMap(msTable.getParameters());
+    // Use a LinkedHashMap to preserve the ordering of the table properties.
+    LinkedHashMap<String, String> properties = Maps.newLinkedHashMap(msTable.getParameters());
     if (properties.containsKey("transient_lastDdlTime")) {
       properties.remove("transient_lastDdlTime");
     }
     boolean isExternal = msTable.getTableType() != null &&
         msTable.getTableType().equals(TableType.EXTERNAL_TABLE.toString());
+    List<String> sortColsSql = getSortColumns(properties);
     String comment = properties.get("comment");
-    for (String hiddenProperty: HIDDEN_TABLE_PROPERTIES) {
-      properties.remove(hiddenProperty);
-    }
+    removeHiddenTableProperties(properties);
     ArrayList<String> colsSql = Lists.newArrayList();
     ArrayList<String> partitionColsSql = Lists.newArrayList();
     boolean isHbaseTable = table instanceof HBaseTable;
@@ -230,7 +271,7 @@ public class ToSqlUtils {
     }
     HdfsUri tableLocation = location == null ? null : new HdfsUri(location);
     return getCreateTableSql(table.getDb().getName(), table.getName(), comment, colsSql,
-        partitionColsSql, primaryKeySql, kuduPartitionByParams, properties,
+        partitionColsSql, primaryKeySql, kuduPartitionByParams, sortColsSql, properties,
         serdeParameters, isExternal, false, rowFormat, format, compression,
         storageHandlerClassName, tableLocation);
   }
@@ -243,10 +284,10 @@ public class ToSqlUtils {
   public static String getCreateTableSql(String dbName, String tableName,
       String tableComment, List<String> columnsSql, List<String> partitionColumnsSql,
       List<String> primaryKeysSql, String kuduPartitionByParams,
-      Map<String, String> tblProperties, Map<String, String> serdeParameters,
-      boolean isExternal, boolean ifNotExists, RowFormat rowFormat,
-      HdfsFileFormat fileFormat, HdfsCompression compression, String storageHandlerClass,
-      HdfsUri location) {
+      List<String> sortColsSql, Map<String, String> tblProperties,
+      Map<String, String> serdeParameters, boolean isExternal, boolean ifNotExists,
+      RowFormat rowFormat, HdfsFileFormat fileFormat, HdfsCompression compression,
+      String storageHandlerClass, HdfsUri location) {
     Preconditions.checkNotNull(tableName);
     StringBuilder sb = new StringBuilder("CREATE ");
     if (isExternal) sb.append("EXTERNAL ");
@@ -254,14 +295,20 @@ public class ToSqlUtils {
     if (ifNotExists) sb.append("IF NOT EXISTS ");
     if (dbName != null) sb.append(dbName + ".");
     sb.append(tableName);
-    if (columnsSql != null) {
+    if (columnsSql != null && !columnsSql.isEmpty()) {
       sb.append(" (\n  ");
       sb.append(Joiner.on(",\n  ").join(columnsSql));
-      if (!primaryKeysSql.isEmpty()) {
+      if (primaryKeysSql != null && !primaryKeysSql.isEmpty()) {
         sb.append(",\n  PRIMARY KEY (");
         Joiner.on(", ").appendTo(sb, primaryKeysSql).append(")");
       }
       sb.append("\n)");
+    } else {
+      // CTAS for Kudu tables still print the primary key
+      if (primaryKeysSql != null && !primaryKeysSql.isEmpty()) {
+        sb.append("\n PRIMARY KEY (");
+        Joiner.on(", ").appendTo(sb, primaryKeysSql).append(")");
+      }
     }
     sb.append("\n");
 
@@ -272,6 +319,11 @@ public class ToSqlUtils {
 
     if (kuduPartitionByParams != null) {
       sb.append("PARTITION BY " + kuduPartitionByParams + "\n");
+    }
+
+    if (sortColsSql != null) {
+      sb.append(String.format("SORT BY (\n  %s\n)\n",
+          Joiner.on(", \n  ").join(sortColsSql)));
     }
 
     if (tableComment != null) sb.append(" COMMENT '" + tableComment + "'\n");
@@ -359,8 +411,8 @@ public class ToSqlUtils {
       if (kuduCol.getCompression() != null) {
         sb.append(" COMPRESSION " + kuduCol.getCompression());
       }
-      if (kuduCol.getDefaultValue() != null) {
-        sb.append(" DEFAULT " + kuduCol.getDefaultValue().toSql());
+      if (kuduCol.hasDefaultValue()) {
+        sb.append(" DEFAULT " + kuduCol.getDefaultValueSql());
       }
       if (kuduCol.getBlockSize() != 0) {
         sb.append(String.format(" BLOCK_SIZE %d", kuduCol.getBlockSize()));

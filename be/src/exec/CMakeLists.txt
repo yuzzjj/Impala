@@ -73,6 +73,7 @@ add_library(Exec
   parquet-column-readers.cc
   parquet-column-stats.cc
   parquet-metadata-utils.cc
+  partial-sort-node.cc
   partitioned-aggregation-node.cc
   partitioned-aggregation-node-ir.cc
   partitioned-hash-join-builder.cc
@@ -91,13 +92,13 @@ add_library(Exec
   scanner-context.cc
   select-node.cc
   singular-row-src-node.cc
-  sort-exec-exprs.cc
   sort-node.cc
   subplan-node.cc
   text-converter.cc
   topn-node.cc
   topn-node-ir.cc
   union-node.cc
+  union-node-ir.cc
   unnest-node.cc
 )
 

@@ -22,19 +22,22 @@
 #include <sstream>
 #include <string>
 
+#include "common/status.h"
 #include "exec/hdfs-table-writer.h"
+#include "runtime/mem-pool.h"
 #include "util/codec.h"
 #include "exec/write-stream.h"
 
 namespace impala {
 
-class Expr;
+struct ColumnType;
+class HdfsTableSink;
+class RuntimeState;
+class ScalarExprEvaluator;
 class TupleDescriptor;
 class TupleRow;
-class RuntimeState;
-class HdfsTableSink;
-struct StringValue;
 struct OutputPartition;
+struct StringValue;
 
 /// Consumes rows and outputs the rows into an Avro file in HDFS
 /// Each Avro file contains a block of records (rows). The file metadata specifies the
@@ -61,22 +64,21 @@ class HdfsAvroTableWriter : public HdfsTableWriter {
   HdfsAvroTableWriter(HdfsTableSink* parent,
                       RuntimeState* state, OutputPartition* output,
                       const HdfsPartitionDescriptor* partition,
-                      const HdfsTableDescriptor* table_desc,
-                      const std::vector<ExprContext*>& output_exprs);
+                      const HdfsTableDescriptor* table_desc);
 
   virtual ~HdfsAvroTableWriter() { }
 
-  virtual Status Init();
-  virtual Status Finalize() { return Flush(); }
-  virtual Status InitNewFile() { return WriteFileHeader(); }
-  virtual void Close();
-  virtual uint64_t default_block_size() const { return 0; }
-  virtual std::string file_extension() const { return "avro"; }
+  virtual Status Init() override;
+  virtual Status Finalize() override { return Flush(); }
+  virtual Status InitNewFile() override { return WriteFileHeader(); }
+  virtual void Close() override;
+  virtual uint64_t default_block_size() const override { return 0; }
+  virtual std::string file_extension() const override { return "avro"; }
 
   /// Outputs the given rows into an HDFS sequence file. The rows are buffered
   /// to fill a sequence file block.
-  virtual Status AppendRows(
-      RowBatch* rows, const std::vector<int32_t>& row_group_indices, bool* new_file);
+  virtual Status AppendRows(RowBatch* rows,
+      const std::vector<int32_t>& row_group_indices, bool* new_file) override;
 
  private:
   /// Processes a single row, appending to out_
@@ -86,11 +88,11 @@ class HdfsAvroTableWriter : public HdfsTableWriter {
   inline void AppendField(const ColumnType& type, const void* value);
 
   /// Writes the Avro file header to HDFS
-  Status WriteFileHeader();
+  Status WriteFileHeader() WARN_UNUSED_RESULT;
 
   /// Writes the contents of out_ to HDFS as a single Avro file block.
   /// Returns an error if write to HDFS fails.
-  Status Flush();
+  Status Flush() WARN_UNUSED_RESULT;
 
   /// Buffer which holds accumulated output
   WriteStream out_;

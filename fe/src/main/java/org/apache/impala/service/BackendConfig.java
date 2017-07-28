@@ -49,6 +49,9 @@ public class BackendConfig {
     return !Strings.isNullOrEmpty(backendCfg_.lineage_event_log_dir);
   }
   public long getIncStatsMaxSize() { return backendCfg_.inc_stats_size_limit_bytes; }
+  public boolean enableStatsExtrapolation() {
+    return backendCfg_.enable_stats_extrapolation;
+  }
   public boolean isAuthToLocalEnabled() {
     return backendCfg_.load_auth_to_local_rules &&
         !Strings.isNullOrEmpty(backendCfg_.principal);
@@ -57,6 +60,13 @@ public class BackendConfig {
 
   public int getImpalaLogLevel() { return backendCfg_.impala_log_lvl; }
   public int getNonImpalaJavaVlogLevel() { return backendCfg_.non_impala_java_vlog; }
+  public long getSentryCatalogPollingFrequency() {
+    return backendCfg_.sentry_catalog_polling_frequency_s;
+  }
+
+  public boolean isPartitionedHashJoinEnabled() {
+    return backendCfg_.enable_partitioned_hash_join;
+  }
 
   // Inits the auth_to_local configuration in the static KerberosName class.
   private static void initAuthToLocal() {

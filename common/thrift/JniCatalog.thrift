@@ -59,7 +59,7 @@ enum TAlterTableType {
   ADD_REPLACE_COLUMNS,
   ADD_PARTITION,
   ADD_DROP_RANGE_PARTITION,
-  CHANGE_COLUMN,
+  ALTER_COLUMN,
   DROP_COLUMN,
   DROP_PARTITION,
   RENAME_TABLE,
@@ -231,8 +231,8 @@ struct TAlterTableDropPartitionParams {
   3: required bool purge
 }
 
-// Parameters for ALTER TABLE CHANGE COLUMN commands
-struct TAlterTableChangeColParams {
+// Parameters for ALTER TABLE ALTER/CHANGE COLUMN commands
+struct TAlterTableAlterColParams {
   // Target column to change.
   1: required string col_name
 
@@ -323,8 +323,8 @@ struct TAlterTableParams {
   // Parameters for ALTER TABLE ADD PARTITION
   5: optional TAlterTableAddPartitionParams add_partition_params
 
-  // Parameters for ALTER TABLE CHANGE COLUMN
-  6: optional TAlterTableChangeColParams change_col_params
+  // Parameters for ALTER TABLE ALTER/CHANGE COLUMN
+  6: optional TAlterTableAlterColParams alter_col_params
 
   // Parameters for ALTER TABLE DROP COLUMN
   7: optional TAlterTableDropColParams drop_col_params
@@ -378,6 +378,11 @@ struct TCreateTableLikeParams {
 
   // Optional storage location for the table
   8: optional string location
+
+  // Optional list of sort columns for the new table. If specified, these will override
+  // any such columns of the source table. If unspecified, the destination table will
+  // inherit the sort columns of the source table.
+  9: optional list<string> sort_columns
 }
 
 // Parameters of CREATE TABLE commands
@@ -429,6 +434,9 @@ struct TCreateTableParams {
 
   // Primary key column names (Kudu-only)
   15: optional list<string> primary_key_column_names;
+
+  // Optional list of sort columns for the new table.
+  16: optional list<string> sort_columns
 }
 
 // Parameters of a CREATE VIEW or ALTER VIEW AS SELECT command
@@ -489,6 +497,10 @@ struct TComputeStatsParams {
   // The number of partition columns for the target table. Only set if this is_incremental
   // is true.
   8: optional i32 num_partition_cols
+
+  // Sum of file sizes in the table. Only set for tables of type HDFS_TABLE and if
+  // is_incremental is false.
+  9: optional i64 total_file_bytes
 }
 
 // Parameters for CREATE/DROP ROLE

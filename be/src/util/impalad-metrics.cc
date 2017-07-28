@@ -26,8 +26,6 @@ namespace impala {
 
 // Naming convention: Components should be separated by '.' and words should
 // be separated by '-'.
-const char* ImpaladMetricKeys::IMPALA_SERVER_START_TIME =
-    "impala-server.start-time";
 const char* ImpaladMetricKeys::IMPALA_SERVER_VERSION =
     "impala-server.version";
 const char* ImpaladMetricKeys::IMPALA_SERVER_READY =
@@ -100,6 +98,10 @@ const char* ImpaladMetricKeys::QUERY_DURATIONS =
     "impala-server.query-durations-ms";
 const char* ImpaladMetricKeys::DDL_DURATIONS =
     "impala-server.ddl-durations-ms";
+const char* ImpaladMetricKeys::HEDGED_READ_OPS =
+    "impala-server.hedged-read-ops";
+const char* ImpaladMetricKeys::HEDGED_READ_OPS_WIN =
+    "impala-server.hedged-read-ops-win";
 
 // These are created by impala-server during startup.
 // =======
@@ -118,6 +120,8 @@ IntCounter* ImpaladMetrics::IO_MGR_LOCAL_BYTES_READ = NULL;
 IntCounter* ImpaladMetrics::IO_MGR_SHORT_CIRCUIT_BYTES_READ = NULL;
 IntCounter* ImpaladMetrics::IO_MGR_CACHED_BYTES_READ = NULL;
 IntCounter* ImpaladMetrics::IO_MGR_BYTES_WRITTEN = NULL;
+IntCounter* ImpaladMetrics::HEDGED_READ_OPS = NULL;
+IntCounter* ImpaladMetrics::HEDGED_READ_OPS_WIN = NULL;
 
 // Gauges
 IntGauge* ImpaladMetrics::CATALOG_NUM_DBS = NULL;
@@ -140,7 +144,6 @@ IntGauge* ImpaladMetrics::RESULTSET_CACHE_TOTAL_BYTES = NULL;
 // Properties
 BooleanProperty* ImpaladMetrics::CATALOG_READY = NULL;
 BooleanProperty* ImpaladMetrics::IMPALA_SERVER_READY = NULL;
-StringProperty* ImpaladMetrics::IMPALA_SERVER_START_TIME = NULL;
 StringProperty* ImpaladMetrics::IMPALA_SERVER_VERSION = NULL;
 
 // Histograms
@@ -153,8 +156,6 @@ ImpaladMetrics::IO_MGR_CACHED_FILE_HANDLES_HIT_RATIO = NULL;
 
 void ImpaladMetrics::CreateMetrics(MetricGroup* m) {
   // Initialize impalad metrics
-  IMPALA_SERVER_START_TIME = m->AddProperty<string>(
-      ImpaladMetricKeys::IMPALA_SERVER_START_TIME, "");
   IMPALA_SERVER_VERSION = m->AddProperty<string>(
       ImpaladMetricKeys::IMPALA_SERVER_VERSION, GetVersionString(true));
   IMPALA_SERVER_READY = m->AddProperty<bool>(
@@ -243,6 +244,11 @@ void ImpaladMetrics::CreateMetrics(MetricGroup* m) {
       MetricDefs::Get(ImpaladMetricKeys::QUERY_DURATIONS), FIVE_HOURS_IN_MS, 3));
   DDL_DURATIONS = m->RegisterMetric(new HistogramMetric(
       MetricDefs::Get(ImpaladMetricKeys::DDL_DURATIONS), FIVE_HOURS_IN_MS, 3));
+
+  // Initialize Hedged read metrics
+  HEDGED_READ_OPS = m->AddCounter<int64_t>(ImpaladMetricKeys::HEDGED_READ_OPS, 0);
+  HEDGED_READ_OPS_WIN = m->AddCounter<int64_t>(ImpaladMetricKeys::HEDGED_READ_OPS_WIN, 0);
+
 }
 
 }

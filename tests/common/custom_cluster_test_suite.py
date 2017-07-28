@@ -48,6 +48,14 @@ class CustomClusterTestSuite(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(CustomClusterTestSuite, cls).add_test_dimensions()
+    cls.add_custom_cluster_constraints()
+
+  @classmethod
+  def add_custom_cluster_constraints(cls):
+    # Defines constraints for custom cluster tests, called by add_test_dimensions.
+    # By default, custom cluster tests only run on text/none and with a limited set of
+    # exec options. Subclasses may override this to relax these default constraints.
+    super(CustomClusterTestSuite, cls).add_test_dimensions()
     cls.ImpalaTestMatrix.add_constraint(lambda v:
         v.get_value('table_format').file_format == 'text' and
         v.get_value('table_format').compression_codec == 'none')
@@ -108,13 +116,15 @@ class CustomClusterTestSuite(ImpalaTestSuite):
 
   @classmethod
   def _start_impala_cluster(cls, options, log_dir=os.getenv('LOG_DIR', "/tmp/"),
-      cluster_size=CLUSTER_SIZE, num_coordinators=NUM_COORDINATORS, log_level=1):
+      cluster_size=CLUSTER_SIZE, num_coordinators=NUM_COORDINATORS,
+      use_exclusive_coordinators=False, log_level=1):
     cls.impala_log_dir = log_dir
     cmd = [os.path.join(IMPALA_HOME, 'bin/start-impala-cluster.py'),
            '--cluster_size=%d' % cluster_size,
            '--num_coordinators=%d' % num_coordinators,
            '--log_dir=%s' % log_dir,
            '--log_level=%s' % log_level]
+    if use_exclusive_coordinators: cmd.append("--use_exclusive_coordinators")
     try:
       check_call(cmd + options, close_fds=True)
     finally:
@@ -125,8 +135,7 @@ class CustomClusterTestSuite(ImpalaTestSuite):
       raise Exception("statestored was not found")
     statestored.service.wait_for_live_subscribers(NUM_SUBSCRIBERS, timeout=60)
     for impalad in cls.cluster.impalads:
-      if impalad._get_arg_value('is_coordinator', default='true') == 'true':
-        impalad.service.wait_for_num_known_live_backends(CLUSTER_SIZE, timeout=60)
+      impalad.service.wait_for_num_known_live_backends(CLUSTER_SIZE, timeout=60)
 
   def assert_impalad_log_contains(self, level, line_regex, expected_count=1):
     """

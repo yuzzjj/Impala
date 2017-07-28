@@ -58,7 +58,10 @@ class TQueryOptions;
 /// tally maintained by Consume() and Release(). A tcmalloc metric is used to track
 /// process memory consumption, since the process memory usage may be higher than the
 /// computed total memory (tcmalloc does not release deallocated memory immediately).
-//
+/// Other consumption metrics are used in trackers below the process level to account
+/// for memory (such as free buffer pool buffers) that is not tracked by Consume() and
+/// Release().
+///
 /// GcFunctions can be attached to a MemTracker in order to free up memory if the limit is
 /// reached. If LimitExceeded() is called and the limit is exceeded, it will first call
 /// the GcFunctions to try to free memory and recheck the limit. For example, the process
@@ -84,9 +87,11 @@ class MemTracker {
       const std::string& label = std::string(), MemTracker* parent = NULL);
 
   /// C'tor for tracker that uses consumption_metric as the consumption value.
-  /// Consume()/Release() can still be called. This is used for the process tracker.
+  /// Consume()/Release() can still be called. This is used for the root process tracker
+  /// (if 'parent' is NULL). It is also to report on other categories of memory under the
+  /// process tracker, e.g. buffer pool free buffers (if 'parent - non-NULL).
   MemTracker(UIntGauge* consumption_metric, int64_t byte_limit = -1,
-      const std::string& label = std::string());
+      const std::string& label = std::string(), MemTracker* parent = NULL);
 
   ~MemTracker();
 
@@ -195,13 +200,8 @@ class MemTracker {
       return;
     }
 
-    if (UNLIKELY(released_memory_since_gc_.Add(bytes) > GC_RELEASE_SIZE)) {
-      GcTcmalloc();
-    }
-
     if (consumption_metric_ != NULL) {
-      DCHECK(parent_ == NULL);
-      consumption_->Set(consumption_metric_->value());
+      RefreshConsumptionFromMetric();
       return;
     }
     for (std::vector<MemTracker*>::iterator tracker = all_trackers_.begin();
@@ -258,9 +258,12 @@ class MemTracker {
     return result;
   }
 
-  /// Refresh the value of consumption_. Only valid to call if consumption_metric_ is not
-  /// null.
-  void RefreshConsumptionFromMetric();
+  /// Refresh the memory consumption value from the consumption metric. Only valid to
+  /// call if this tracker has a consumption metric.
+  void RefreshConsumptionFromMetric() {
+    DCHECK(consumption_metric_ != nullptr);
+    consumption_->Set(consumption_metric_->value());
+  }
 
   int64_t limit() const { return limit_; }
   bool has_limit() const { return limit_ >= 0; }
@@ -282,7 +285,7 @@ class MemTracker {
   /// of the memory reserved by the queries in it (i.e. its child trackers). The mem
   /// reserved for a query is its limit_, if set (which should be the common case with
   /// admission control). Otherwise the current consumption is used.
-  int64_t GetPoolMemReserved() const;
+  int64_t GetPoolMemReserved();
 
   /// Returns the memory consumed in bytes.
   int64_t consumption() const { return consumption_->current_value(); }
@@ -311,9 +314,11 @@ class MemTracker {
   void RegisterMetrics(MetricGroup* metrics, const std::string& prefix);
 
   /// Logs the usage of this tracker and all of its children (recursively).
+  /// If 'logged_consumption' is non-NULL, sets the consumption value logged.
   /// TODO: once all memory is accounted in ReservationTracker hierarchy, move
   /// reporting there.
-  std::string LogUsage(const std::string& prefix = "") const;
+  std::string LogUsage(
+      const std::string& prefix = "", int64_t* logged_consumption = nullptr);
 
   /// Log the memory usage when memory limit is exceeded and return a status object with
   /// details of the allocation which caused the limit to be exceeded.
@@ -334,12 +339,6 @@ class MemTracker {
   /// gc_lock. Updates metrics if initialized.
   bool GcMemory(int64_t max_consumption);
 
-  /// Called when the total release memory is larger than GC_RELEASE_SIZE.
-  /// TcMalloc holds onto released memory and very slowly (if ever) releases it back to
-  /// the OS. This is problematic since it is memory we are not constantly tracking which
-  /// can cause us to go way over mem limits.
-  void GcTcmalloc();
-
   /// Walks the MemTracker hierarchy and populates all_trackers_ and
   /// limit_trackers_
   void Init();
@@ -347,19 +346,10 @@ class MemTracker {
   /// Adds tracker to child_trackers_
   void AddChildTracker(MemTracker* tracker);
 
+  /// Log consumption of all the trackers provided. Returns the sum of consumption in
+  /// 'logged_consumption'.
   static std::string LogUsage(const std::string& prefix,
-      const std::list<MemTracker*>& trackers);
-
-  /// Size, in bytes, that is considered a large value for Release() (or Consume() with
-  /// a negative value). If tcmalloc is used, this can trigger it to GC.
-  /// A higher value will make us call into tcmalloc less often (and therefore more
-  /// efficient). A lower value will mean our memory overhead is lower.
-  /// TODO: this is a stopgap.
-  static const int64_t GC_RELEASE_SIZE = 128 * 1024L * 1024L;
-
-  /// Total amount of memory from calls to Release() since the last GC. If this
-  /// is greater than GC_RELEASE_SIZE, this will trigger a tcmalloc gc.
-  static AtomicInt64 released_memory_since_gc_;
+      const std::list<MemTracker*>& trackers, int64_t* logged_consumption);
 
   /// Lock to protect GcMemory(). This prevents many GCs from occurring at once.
   boost::mutex gc_lock_;
@@ -399,7 +389,7 @@ class MemTracker {
   /// All the child trackers of this tracker. Used only for computing resource pool mem
   /// reserved and error reporting, i.e., updating a parent tracker does not update its
   /// children.
-  mutable SpinLock child_trackers_lock_;
+  SpinLock child_trackers_lock_;
   std::list<MemTracker*> child_trackers_;
 
   /// Iterator into parent_->child_trackers_ for this object. Stored to have O(1)
@@ -446,7 +436,7 @@ class PoolMemTrackerRegistry {
   /// All per-request pool MemTracker objects. It is assumed that request pools will live
   /// for the entire duration of the process lifetime so MemTrackers are never removed
   /// from this map. Protected by 'pool_to_mem_trackers_lock_'
-  typedef boost::unordered_map<std::string, MemTracker*> PoolTrackersMap;
+  typedef boost::unordered_map<std::string, std::unique_ptr<MemTracker>> PoolTrackersMap;
   PoolTrackersMap pool_to_mem_trackers_;
   /// IMPALA-3068: Use SpinLock instead of boost::mutex so that the lock won't
   /// automatically destroy itself as part of process teardown, which could cause races.

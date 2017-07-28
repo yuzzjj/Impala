@@ -278,7 +278,7 @@ class ParquetColumnReader {
       def_level_(HdfsParquetScanner::INVALID_LEVEL),
       max_def_level_(node_.max_def_level),
       tuple_offset_(slot_desc == NULL ? -1 : slot_desc->tuple_offset()),
-      null_indicator_offset_(slot_desc == NULL ? NullIndicatorOffset(-1, -1) :
+      null_indicator_offset_(slot_desc == NULL ? NullIndicatorOffset() :
           slot_desc->null_indicator_offset()) {
     DCHECK_GE(node_.max_rep_level, 0);
     DCHECK_LE(node_.max_rep_level, std::numeric_limits<int16_t>::max());
@@ -288,10 +288,13 @@ class ParquetColumnReader {
     if (max_rep_level() == 0) rep_level_ = 0;
   }
 
-  /// Trigger debug action. Returns false if the debug action deems that the
-  /// parquet column reader should halt execution. In which case, 'parse_status_'
-  /// is also updated.
-  bool TriggerDebugAction();
+  /// Called in the middle of creating a scratch tuple batch to simulate failures
+  /// such as exceeding memory limit or cancellation. Returns false if the debug
+  /// action deems that the parquet column reader should halt execution. 'val_count'
+  /// is the counter which the column reader uses to track the number of tuples
+  /// produced so far. If the column reader should halt execution, 'parse_status_'
+  /// is updated with the error status and 'val_count' is set to 0.
+  bool ColReaderDebugAction(int* val_count);
 };
 
 /// Reader for a single column from the parquet file.  It's associated with a
@@ -343,7 +346,7 @@ class BaseScalarColumnReader : public ParquetColumnReader {
   }
 
   virtual void Close(RowBatch* row_batch) {
-    if (row_batch != nullptr) {
+    if (row_batch != nullptr && CurrentPageContainsTupleData()) {
       row_batch->tuple_data_pool()->AcquireData(decompressed_data_pool_.get(), false);
     } else {
       decompressed_data_pool_->FreeAll();
@@ -357,7 +360,6 @@ class BaseScalarColumnReader : public ParquetColumnReader {
     if (metadata_ == NULL) return THdfsCompression::NONE;
     return PARQUET_TO_IMPALA_CODEC[metadata_->codec];
   }
-  MemPool* decompressed_data_pool() const { return decompressed_data_pool_.get(); }
 
   /// Reads the next definition and repetition levels for this column. Initializes the
   /// next data page if necessary.
@@ -465,6 +467,14 @@ class BaseScalarColumnReader : public ParquetColumnReader {
   /// 'size' bytes remaining.
   virtual Status InitDataPage(uint8_t* data, int size) = 0;
 
+  /// Returns true if the current data page may contain strings referenced by returned
+  /// batches. Cases where this is not true are:
+  /// * Dictionary-compressed pages, where any string data lives in 'dictionary_pool_'.
+  /// * Fixed-length slots, where there is no string data.
+  bool CurrentPageContainsTupleData() {
+    return page_encoding_ != parquet::Encoding::PLAIN_DICTIONARY
+        && slot_desc_ != nullptr && slot_desc_->type().IsStringType();
+  }
 };
 
 /// Collections are not materialized directly in parquet files; only scalar values appear

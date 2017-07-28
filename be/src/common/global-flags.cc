@@ -106,6 +106,9 @@ DEFINE_int32(fault_injection_rpc_delay_ms, 0, "A fault injection option that cau
     "Effective in debug builds only.");
 DEFINE_int32(fault_injection_rpc_type, 0, "A fault injection option that specifies "
     "which rpc call will be injected with the delay. Effective in debug builds only.");
+DEFINE_int32(fault_injection_rpc_exception_type, 0, "A fault injection option that "
+    "specifies the exception to be thrown in the caller side of an RPC call. Effective "
+    "in debug builds only");
 DEFINE_int32(stress_scratch_write_delay_ms, 0, "A stress option which causes writes to "
     "scratch files to be to be delayed to simulate slow writes.");
 #endif
@@ -131,3 +134,7 @@ DEFINE_int64(inc_stats_size_limit_bytes, 200 * (1LL<<20), "Maximum size of "
     "This limit is set as a safety check, to prevent the JVM from "
     "hitting a maximum array limit of 1GB (or OOM) while building "
     "the thrift objects to send to impalads. By default, it's set to 200MB");
+
+DEFINE_bool(enable_stats_extrapolation, false,
+    "If true, uses table statistics computed with COMPUTE STATS "
+    "to extrapolate the row counts of partitions.");

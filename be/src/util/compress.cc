@@ -16,18 +16,17 @@
 // under the License.
 
 #include "util/compress.h"
-#include "exec/read-write-util.h"
-#include "runtime/runtime-state.h"
 
-// Codec libraries
-#include <zlib.h>
 #include <bzlib.h>
+#include <zlib.h>
+#include <boost/crc.hpp>
+#include <gutil/strings/substitute.h>
 #undef DISALLOW_COPY_AND_ASSIGN // Snappy redefines this.
 #include <snappy.h>
 #include <lz4.h>
 
-#include <boost/crc.hpp>
-#include <gutil/strings/substitute.h>
+#include "exec/read-write-util.h"
+#include "runtime/mem-pool.h"
 
 #include "common/names.h"
 
@@ -95,8 +94,8 @@ Status GzipCompressor::Compress(int64_t input_length, const uint8_t* input,
   if ((ret = deflate(&stream_, Z_FINISH)) != Z_STREAM_END) {
     if (ret == Z_OK) {
       // will return Z_OK (and stream_.msg NOT set) if stream_.avail_out is too small
-      return Status(Substitute("zlib deflate failed: output buffer ($0) is too small.",
-                    output_length).c_str());
+      return Status(Substitute(
+          "zlib deflate failed: output buffer ($0) is too small.", output_length));
     }
     stringstream ss;
     ss << "zlib deflate failed: " << stream_.msg;
@@ -118,8 +117,8 @@ Status GzipCompressor::ProcessBlock(bool output_preallocated,
   DCHECK(!output_preallocated || (output_preallocated && *output_length > 0));
   int64_t max_compressed_len = MaxOutputLen(input_length);
   if (!output_preallocated) {
-    if (!reuse_buffer_ || buffer_length_ < max_compressed_len || out_buffer_ == NULL) {
-      DCHECK(memory_pool_ != NULL) << "Can't allocate without passing in a mem pool";
+    if (!reuse_buffer_ || buffer_length_ < max_compressed_len || out_buffer_ == nullptr) {
+      DCHECK(memory_pool_ != nullptr) << "Can't allocate without passing in a mem pool";
       buffer_length_ = max_compressed_len;
       out_buffer_ = memory_pool_->Allocate(buffer_length_);
     }
@@ -144,15 +143,15 @@ int64_t BzipCompressor::MaxOutputLen(int64_t input_len, const uint8_t* input) {
 
 Status BzipCompressor::ProcessBlock(bool output_preallocated, int64_t input_length,
     const uint8_t* input, int64_t *output_length, uint8_t** output) {
-  // The bz2 library does not allow input to be NULL, even when input_length is 0. This
+  // The bz2 library does not allow input to be nullptr, even when input_length is 0. This
   // should be OK because we do not write any file formats that support bzip compression.
-  DCHECK(input != NULL);
+  DCHECK(input != nullptr);
   DCHECK_GE(input_length, 0);
 
   if (output_preallocated) {
     buffer_length_ = *output_length;
     out_buffer_ = *output;
-  } else if (!reuse_buffer_ || out_buffer_ == NULL) {
+  } else if (!reuse_buffer_ || out_buffer_ == nullptr) {
     // guess that we will need no more the input length.
     buffer_length_ = input_length;
     out_buffer_ = temp_memory_pool_->Allocate(buffer_length_);
@@ -161,7 +160,7 @@ Status BzipCompressor::ProcessBlock(bool output_preallocated, int64_t input_leng
   unsigned int outlen = static_cast<unsigned int>(buffer_length_);
   int ret = BZ_OUTBUFF_FULL;
   while (ret == BZ_OUTBUFF_FULL) {
-    if (out_buffer_ == NULL) {
+    if (out_buffer_ == nullptr) {
       DCHECK(!output_preallocated);
       temp_memory_pool_->Clear();
       buffer_length_ = buffer_length_ * 2;
@@ -174,7 +173,7 @@ Status BzipCompressor::ProcessBlock(bool output_preallocated, int64_t input_leng
       if (output_preallocated) {
         return Status("Too small buffer passed to BzipCompressor");
       }
-      out_buffer_ = NULL;
+      out_buffer_ = nullptr;
     }
   }
   if (ret !=  BZ_OK) {
@@ -204,31 +203,44 @@ Status SnappyBlockCompressor::ProcessBlock(bool output_preallocated,
     int64_t input_length, const uint8_t* input, int64_t *output_length,
     uint8_t** output) {
   DCHECK_GE(input_length, 0);
-  // Hadoop uses a block compression scheme on top of snappy.  First there is
-  // an integer which is the size of the decompressed data followed by a
-  // sequence of compressed blocks each preceded with an integer size.
-  // For testing purposes we are going to generate two blocks.
-  int64_t block_size = input_length / 2;
-  size_t length = snappy::MaxCompressedLength(block_size) * 2;
-  length += 3 * sizeof (int32_t);
+  // Hadoop uses a block compression scheme on top of snappy. The layout is as follows:
+  // - size of the entire decompressed data (4 bytes)
+  // - size of the 1st compressed block (4 bytes)
+  // - 1st compressed block
+  // - size of the 2nd compressed block (4 bytes)
+  // - 2nd compressed block
+  // ...
+  // For testing purposes we are going to generate two blocks if input_length >= 4K.
+  vector<int64_t> block_sizes;
+  size_t length;
+  if (input_length == 0) {
+    length = sizeof (int32_t);
+  } else if (input_length < 4 * 1024) {
+    block_sizes.push_back(input_length);
+    length = snappy::MaxCompressedLength(block_sizes[0]) + 2 * sizeof (int32_t);
+  } else {
+    block_sizes.push_back(input_length / 2);
+    block_sizes.push_back(input_length - block_sizes[0]);
+    length = snappy::MaxCompressedLength(block_sizes[0]) +
+        snappy::MaxCompressedLength(block_sizes[1]) + 3 * sizeof (int32_t);
+  }
   DCHECK(!output_preallocated || length <= *output_length);
 
   if (output_preallocated) {
     buffer_length_ = *output_length;
     out_buffer_ = *output;
-  } else if (!reuse_buffer_ || out_buffer_ == NULL || buffer_length_ < length) {
+  } else if (!reuse_buffer_ || out_buffer_ == nullptr || buffer_length_ < length) {
     buffer_length_ = length;
     out_buffer_ = memory_pool_->Allocate(buffer_length_);
   }
 
   uint8_t* outp = out_buffer_;
-  uint8_t* sizep;
   ReadWriteUtil::PutInt(outp, static_cast<uint32_t>(input_length));
   outp += sizeof (int32_t);
-  while (input_length > 0) {
+  for (int64_t block_size: block_sizes) {
     // TODO: should this be a while or a do-while loop? Check what Hadoop does.
     // Point at the spot to store the compressed size.
-    sizep = outp;
+    uint8_t* sizep = outp;
     outp += sizeof (int32_t);
     size_t size;
     snappy::RawCompress(reinterpret_cast<const char*>(input),
@@ -236,8 +248,8 @@ Status SnappyBlockCompressor::ProcessBlock(bool output_preallocated,
 
     ReadWriteUtil::PutInt(sizep, static_cast<uint32_t>(size));
     input += block_size;
-    input_length -= block_size;
     outp += size;
+    DCHECK_LE(outp - out_buffer_, length);
   }
 
   *output = out_buffer_;
@@ -263,7 +275,7 @@ Status SnappyCompressor::ProcessBlock(bool output_preallocated, int64_t input_le
 
   if (!output_preallocated) {
       if ((!reuse_buffer_ || buffer_length_ < max_compressed_len)) {
-        DCHECK(memory_pool_ != NULL) << "Can't allocate without passing in a mem pool";
+        DCHECK(memory_pool_ != nullptr) << "Can't allocate without passing in a mem pool";
         buffer_length_ = max_compressed_len;
         out_buffer_ = memory_pool_->Allocate(buffer_length_);
       }

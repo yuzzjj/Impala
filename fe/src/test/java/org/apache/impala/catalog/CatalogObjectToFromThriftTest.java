@@ -87,7 +87,7 @@ public class CatalogObjectToFromThriftTest {
       Assert.assertEquals(newTable.name_, thriftTable.tbl_name);
       Assert.assertEquals(newTable.numClusteringCols_, 2);
       // Currently only have table stats on "functional.alltypes"
-      if (dbName.equals("functional")) Assert.assertEquals(7300, newTable.numRows_);
+      if (dbName.equals("functional")) Assert.assertEquals(7300, newTable.getNumRows());
 
       HdfsTable newHdfsTable = (HdfsTable) newTable;
       Assert.assertEquals(newHdfsTable.getPartitions().size(), 25);
@@ -99,7 +99,7 @@ public class CatalogObjectToFromThriftTest {
         } else {
           Assert.assertEquals(hdfsPart.getFileDescriptors().size(), 1);
           Assert.assertTrue(
-              hdfsPart.getFileDescriptors().get(0).getFileBlocks().size() > 0);
+              hdfsPart.getFileDescriptors().get(0).getNumFileBlocks() > 0);
 
           // Verify the partition access level is getting set properly. The alltypes_seq
           // table has two partitions that are read_only.

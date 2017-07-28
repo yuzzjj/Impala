@@ -27,6 +27,8 @@
 #include "common/logging.h"
 #include "common/names.h"
 #include "common/status.h"
+#include "runtime/timestamp-value.h"
+#include "runtime/timestamp-value.inline.h"
 
 using kudu::client::KuduSchema;
 using kudu::client::KuduClient;
@@ -107,4 +109,72 @@ void InitKuduLogging() {
   kudu::client::SetVerboseLogLevel(std::max(0, FLAGS_v - 1));
 }
 
+Status WriteKuduTimestampValue(int col, const TimestampValue* tv,
+    kudu::KuduPartialRow* row) {
+  int64_t ts_micros;
+  bool success = tv->UtcToUnixTimeMicros(&ts_micros);
+  DCHECK(success); // If the value was invalid the slot should've been null.
+  if (UNLIKELY(!success)) {
+    return Status(TErrorCode::RUNTIME_ERROR,
+        "Invalid TimestampValue: " + tv->ToString());
+  }
+  KUDU_RETURN_IF_ERROR(row->SetUnixTimeMicros(col, ts_micros),
+      "Could not add Kudu WriteOp.");
+  return Status::OK();
+}
+
+Status WriteKuduValue(int col, PrimitiveType type, const void* value,
+    bool copy_strings, kudu::KuduPartialRow* row) {
+  // TODO: codegen this to eliminate braching on type.
+  switch (type) {
+    case TYPE_VARCHAR:
+    case TYPE_STRING: {
+      const StringValue* sv = reinterpret_cast<const StringValue*>(value);
+      kudu::Slice slice(reinterpret_cast<uint8_t*>(sv->ptr), sv->len);
+      if (copy_strings) {
+        KUDU_RETURN_IF_ERROR(row->SetString(col, slice), "Could not set Kudu row value.");
+      } else {
+        KUDU_RETURN_IF_ERROR(
+            row->SetStringNoCopy(col, slice), "Could not set Kudu row value.");
+      }
+      break;
+    }
+    case TYPE_FLOAT:
+      KUDU_RETURN_IF_ERROR(row->SetFloat(col, *reinterpret_cast<const float*>(value)),
+          "Could not set Kudu row value.");
+      break;
+    case TYPE_DOUBLE:
+      KUDU_RETURN_IF_ERROR(row->SetDouble(col, *reinterpret_cast<const double*>(value)),
+          "Could not set Kudu row value.");
+      break;
+    case TYPE_BOOLEAN:
+      KUDU_RETURN_IF_ERROR(row->SetBool(col, *reinterpret_cast<const bool*>(value)),
+          "Could not set Kudu row value.");
+      break;
+    case TYPE_TINYINT:
+      KUDU_RETURN_IF_ERROR(row->SetInt8(col, *reinterpret_cast<const int8_t*>(value)),
+          "Could not set Kudu row value.");
+      break;
+    case TYPE_SMALLINT:
+      KUDU_RETURN_IF_ERROR(row->SetInt16(col, *reinterpret_cast<const int16_t*>(value)),
+          "Could not set Kudu row value.");
+      break;
+    case TYPE_INT:
+      KUDU_RETURN_IF_ERROR(row->SetInt32(col, *reinterpret_cast<const int32_t*>(value)),
+          "Could not set Kudu row value.");
+      break;
+    case TYPE_BIGINT:
+      KUDU_RETURN_IF_ERROR(row->SetInt64(col, *reinterpret_cast<const int64_t*>(value)),
+          "Could not set Kudu row value.");
+      break;
+    case TYPE_TIMESTAMP:
+      RETURN_IF_ERROR(WriteKuduTimestampValue(col,
+          reinterpret_cast<const TimestampValue*>(value), row));
+      break;
+    default:
+      return Status(TErrorCode::IMPALA_KUDU_TYPE_MISSING, TypeToString(type));
+  }
+
+  return Status::OK();
+}
 }  // namespace impala

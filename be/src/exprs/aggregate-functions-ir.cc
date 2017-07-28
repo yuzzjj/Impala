@@ -32,8 +32,8 @@
 #include "runtime/runtime-state.h"
 #include "runtime/string-value.inline.h"
 #include "runtime/timestamp-value.h"
+#include "runtime/timestamp-value.inline.h"
 #include "exprs/anyval-util.h"
-#include "exprs/expr.h"
 #include "exprs/hll-bias.h"
 
 #include "common/names.h"
@@ -324,7 +324,7 @@ void AggregateFunctions::TimestampAvgUpdate(FunctionContext* ctx,
   DCHECK(dst->ptr != NULL);
   DCHECK_EQ(sizeof(AvgState), dst->len);
   AvgState* avg = reinterpret_cast<AvgState*>(dst->ptr);
-  TimestampValue tm_src = TimestampValue::FromTimestampVal(src);
+  const TimestampValue& tm_src = TimestampValue::FromTimestampVal(src);
   double val;
   if (tm_src.ToSubsecondUnixTime(&val)) {
     avg->sum += val;
@@ -338,7 +338,7 @@ void AggregateFunctions::TimestampAvgRemove(FunctionContext* ctx,
   DCHECK(dst->ptr != NULL);
   DCHECK_EQ(sizeof(AvgState), dst->len);
   AvgState* avg = reinterpret_cast<AvgState*>(dst->ptr);
-  TimestampValue tm_src = TimestampValue::FromTimestampVal(src);
+  const TimestampValue& tm_src = TimestampValue::FromTimestampVal(src);
   double val;
   if (tm_src.ToSubsecondUnixTime(&val)) {
     avg->sum -= val;
@@ -351,7 +351,8 @@ TimestampVal AggregateFunctions::TimestampAvgGetValue(FunctionContext* ctx,
     const StringVal& src) {
   AvgState* val_struct = reinterpret_cast<AvgState*>(src.ptr);
   if (val_struct->count == 0) return TimestampVal::null();
-  TimestampValue tv(val_struct->sum / val_struct->count);
+  const TimestampValue& tv = TimestampValue::FromSubsecondUnixTime(
+      val_struct->sum / val_struct->count);
   if (tv.HasDate()) {
     TimestampVal result;
     tv.ToTimestampVal(&result);
@@ -1275,7 +1276,7 @@ void PrintSample(const ReservoirSample<DecimalVal>& v, ostream* os) {
 
 template <>
 void PrintSample(const ReservoirSample<TimestampVal>& v, ostream* os) {
-  *os << TimestampValue::FromTimestampVal(v.val).DebugString();
+  *os << TimestampValue::FromTimestampVal(v.val).ToString();
 }
 
 template <typename T>
@@ -1291,10 +1292,8 @@ StringVal AggregateFunctions::ReservoirSampleFinalize(FunctionContext* ctx,
     if (i < (src_state->num_samples() - 1)) out << ", ";
   }
   const string& out_str = out.str();
-  StringVal result_str(ctx, out_str.size());
-  if (LIKELY(!result_str.is_null)) {
-    memcpy(result_str.ptr, out_str.c_str(), result_str.len);
-  }
+  StringVal result_str = StringVal::CopyFrom(ctx,
+      reinterpret_cast<const uint8_t*>(out_str.c_str()), out_str.size());
   src_state->Delete(ctx);
   return result_str;
 }

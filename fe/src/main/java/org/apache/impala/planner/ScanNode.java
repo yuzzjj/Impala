@@ -22,11 +22,16 @@ import java.util.List;
 import org.apache.impala.analysis.SlotDescriptor;
 import org.apache.impala.analysis.TupleDescriptor;
 import org.apache.impala.catalog.HdfsFileFormat;
+import org.apache.impala.catalog.Table;
+import org.apache.impala.catalog.HdfsTable;
 import org.apache.impala.catalog.Type;
 import org.apache.impala.common.NotImplementedException;
+import org.apache.impala.common.PrintUtils;
 import org.apache.impala.thrift.TExplainLevel;
 import org.apache.impala.thrift.TNetworkAddress;
 import org.apache.impala.thrift.TScanRangeLocationList;
+import org.apache.impala.thrift.TTableStats;
+
 import com.google.common.base.Joiner;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
@@ -106,14 +111,17 @@ abstract public class ScanNode extends PlanNode {
   protected String getStatsExplainString(String prefix, TExplainLevel detailLevel) {
     StringBuilder output = new StringBuilder();
     // Table stats.
-    if (desc_.getTable().getNumRows() == -1) {
-      output.append(prefix + "table stats: unavailable");
-    } else {
-      output.append(prefix + "table stats: " + desc_.getTable().getNumRows() +
-          " rows total");
-      if (numPartitionsMissingStats_ > 0) {
-        output.append(" (" + numPartitionsMissingStats_ + " partition(s) missing stats)");
-      }
+    TTableStats tblStats = desc_.getTable().getTTableStats();
+    String numRows = String.valueOf(tblStats.num_rows);
+    if (tblStats.num_rows == -1) numRows = "unavailable";
+    output.append(prefix + "table stats: rows=" + numRows);
+    if (desc_.getTable() instanceof HdfsTable) {
+      String totalBytes = PrintUtils.printBytes(tblStats.total_file_bytes);
+      if (tblStats.total_file_bytes == -1) totalBytes = "unavailable";
+      output.append(" size=" + totalBytes);
+    }
+    if (tblStats.num_rows != -1 && numPartitionsMissingStats_ > 0) {
+      output.append(" (" + numPartitionsMissingStats_ + " partition(s) missing stats)");
     }
     output.append("\n");
 
@@ -160,7 +168,7 @@ abstract public class ScanNode extends PlanNode {
 
   public boolean isTableMissingColumnStats() {
     for (SlotDescriptor slot: desc_.getSlots()) {
-      if (!slot.getStats().hasStats()) return true;
+      if (slot.getColumn() != null && !slot.getStats().hasStats()) return true;
     }
     return false;
   }
@@ -187,5 +195,19 @@ abstract public class ScanNode extends PlanNode {
   public long getInputCardinality() {
     if (getConjuncts().isEmpty() && hasLimit()) return getLimit();
     return inputCardinality_;
+  }
+
+  @Override
+  protected String getDisplayLabelDetail() {
+    Table table = desc_.getTable();
+    List<String> path = Lists.newArrayList();
+    path.add(table.getDb().getName());
+    path.add(table.getName());
+    Preconditions.checkNotNull(desc_.getPath());
+    if (desc_.hasExplicitAlias()) {
+      return desc_.getPath().toString() + " " + desc_.getAlias();
+    } else {
+      return desc_.getPath().toString();
+    }
   }
 }

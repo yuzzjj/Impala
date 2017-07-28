@@ -27,8 +27,10 @@
 #include "runtime/exec-env.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/query-state.h"
+#include "runtime/timestamp-value.h"
+#include "runtime/timestamp-value.inline.h"
 #include "service/impala-server.h"
-#include "service/query-exec-state.h"
+#include "service/client-request-state.h"
 #include "thrift/protocol/TDebugProtocol.h"
 #include "util/coding-util.h"
 #include "util/logging-support.h"
@@ -39,7 +41,6 @@
 
 #include "common/names.h"
 
-using boost::adopt_lock_t;
 using namespace apache::thrift;
 using namespace beeswax;
 using namespace impala;
@@ -75,6 +76,9 @@ static Status ParseIdFromArguments(const Webserver::ArgumentMap& args, TUniqueId
 
 void ImpalaHttpHandler::RegisterHandlers(Webserver* webserver) {
   DCHECK(webserver != NULL);
+
+  webserver->RegisterUrlCallback("/backends", "backends.tmpl",
+      MakeCallback(this, &ImpalaHttpHandler::BackendsHandler));
 
   webserver->RegisterUrlCallback("/hadoop-varz", "hadoop-varz.tmpl",
       MakeCallback(this, &ImpalaHttpHandler::HadoopVarzHandler));
@@ -200,7 +204,7 @@ void ImpalaHttpHandler::QueryProfileHandler(const Webserver::ArgumentMap& args,
   }
 
   stringstream ss;
-  Status status = server_->GetRuntimeProfileStr(unique_id, false, &ss);
+  Status status = server_->GetRuntimeProfileStr(unique_id, "", false, &ss);
   if (!status.ok()) {
     Value error(status.GetDetail().c_str(), document->GetAllocator());
     document->AddMember("error", error, document->GetAllocator());
@@ -221,12 +225,11 @@ void ImpalaHttpHandler::QueryProfileEncodedHandler(const Webserver::ArgumentMap&
   if (!status.ok()) {
     ss << status.GetDetail();
   } else {
-    Status status = server_->GetRuntimeProfileStr(unique_id, true, &ss);
+    Status status = server_->GetRuntimeProfileStr(unique_id, "", true, &ss);
     if (!status.ok()) {
       ss.str(Substitute("Could not obtain runtime profile: $0", status.GetDetail()));
     }
   }
-
   document->AddMember(Webserver::ENABLE_RAW_JSON_KEY, true, document->GetAllocator());
   Value profile(ss.str().c_str(), document->GetAllocator());
   document->AddMember("contents", profile, document->GetAllocator());
@@ -234,11 +237,11 @@ void ImpalaHttpHandler::QueryProfileEncodedHandler(const Webserver::ArgumentMap&
 
 void ImpalaHttpHandler::InflightQueryIdsHandler(const Webserver::ArgumentMap& args,
     Document* document) {
-  lock_guard<mutex> l(server_->query_exec_state_map_lock_);
+  lock_guard<mutex> l(server_->client_request_state_map_lock_);
   stringstream ss;
-  for (const ImpalaServer::QueryExecStateMap::value_type& exec_state:
-       server_->query_exec_state_map_) {
-    ss << exec_state.second->query_id() << "\n";
+  for (const ImpalaServer::ClientRequestStateMap::value_type& request_state:
+       server_->client_request_state_map_) {
+    ss << request_state.second->query_id() << "\n";
   }
   document->AddMember(Webserver::ENABLE_RAW_JSON_KEY, true, document->GetAllocator());
   Value query_ids(ss.str().c_str(), document->GetAllocator());
@@ -286,10 +289,10 @@ void ImpalaHttpHandler::QueryStateToJson(const ImpalaServer::QueryStateRecord& r
       document->GetAllocator());
   value->AddMember("stmt_type", stmt_type, document->GetAllocator());
 
-  Value start_time(record.start_time.DebugString().c_str(), document->GetAllocator());
+  Value start_time(record.start_time.ToString().c_str(), document->GetAllocator());
   value->AddMember("start_time", start_time, document->GetAllocator());
 
-  Value end_time(record.end_time.DebugString().c_str(), document->GetAllocator());
+  Value end_time(record.end_time.ToString().c_str(), document->GetAllocator());
   value->AddMember("end_time", end_time, document->GetAllocator());
 
   const TimestampValue& end_timestamp =
@@ -358,11 +361,11 @@ void ImpalaHttpHandler::QueryStateHandler(const Webserver::ArgumentMap& args,
   set<ImpalaServer::QueryStateRecord, ImpalaServer::QueryStateRecordLessThan>
       sorted_query_records;
   {
-    lock_guard<mutex> l(server_->query_exec_state_map_lock_);
-    for (const ImpalaServer::QueryExecStateMap::value_type& exec_state:
-         server_->query_exec_state_map_) {
+    lock_guard<mutex> l(server_->client_request_state_map_lock_);
+    for (const ImpalaServer::ClientRequestStateMap::value_type& request_state:
+         server_->client_request_state_map_) {
       // TODO: Do this in the browser so that sorts on other keys are possible.
-      sorted_query_records.insert(ImpalaServer::QueryStateRecord(*exec_state.second));
+      sorted_query_records.insert(ImpalaServer::QueryStateRecord(*request_state.second));
     }
   }
 
@@ -457,17 +460,19 @@ void ImpalaHttpHandler::SessionsHandler(const Webserver::ArgumentMap& args,
     Value default_db(state->database.c_str(), document->GetAllocator());
     session_json.AddMember("default_database", default_db, document->GetAllocator());
 
-    TimestampValue local_start_time(session.second->start_time_ms / 1000);
+    TimestampValue local_start_time = TimestampValue::FromUnixTime(
+        session.second->start_time_ms / 1000);
     local_start_time.UtcToLocal();
-    Value start_time(local_start_time.DebugString().c_str(), document->GetAllocator());
+    Value start_time(local_start_time.ToString().c_str(), document->GetAllocator());
     session_json.AddMember("start_time", start_time, document->GetAllocator());
     session_json.AddMember(
         "start_time_sort", session.second->start_time_ms, document->GetAllocator());
 
-    TimestampValue local_last_accessed(session.second->last_accessed_ms / 1000);
+    TimestampValue local_last_accessed = TimestampValue::FromUnixTime(
+        session.second->last_accessed_ms / 1000);
     local_last_accessed.UtcToLocal();
     Value last_accessed(
-        local_last_accessed.DebugString().c_str(), document->GetAllocator());
+        local_last_accessed.ToString().c_str(), document->GetAllocator());
     session_json.AddMember("last_accessed", last_accessed, document->GetAllocator());
     session_json.AddMember(
         "last_accessed_sort", session.second->last_accessed_ms, document->GetAllocator());
@@ -689,6 +694,8 @@ void ImpalaHttpHandler::QuerySummaryHandler(bool include_json_plan, bool include
     const Webserver::ArgumentMap& args, Document* document) {
   TUniqueId query_id;
   Status status = ParseIdFromArguments(args, &query_id, "query_id");
+  Value query_id_val(PrintId(query_id).c_str(), document->GetAllocator());
+  document->AddMember("query_id", query_id_val, document->GetAllocator());
   if (!status.ok()) {
     // Redact the error message, it may contain part or all of the query.
     Value json_error(RedactCopy(status.GetDetail()).c_str(), document->GetAllocator());
@@ -705,27 +712,35 @@ void ImpalaHttpHandler::QuerySummaryHandler(bool include_json_plan, bool include
 
   // Search the in-flight queries first, followed by the archived ones.
   {
-    shared_ptr<ImpalaServer::QueryExecState> exec_state =
-        server_->GetQueryExecState(query_id, true);
-    if (exec_state != NULL) {
+    shared_ptr<ClientRequestState> request_state =
+        server_->GetClientRequestState(query_id);
+    if (request_state != NULL) {
       found = true;
-      lock_guard<mutex> l(*exec_state->lock(), adopt_lock_t());
-      if (exec_state->coord() == NULL) {
+      // If the query plan isn't generated, avoid waiting for the request
+      // state lock to be acquired, since it could potentially be an expensive
+      // call, if the table Catalog metadata loading is in progress. Instead
+      // update the caller that the plan information is unavailable.
+      if (request_state->query_state() == beeswax::QueryState::CREATED) {
+        document->AddMember(
+            "plan_metadata_unavailable", "true", document->GetAllocator());
+        return;
+      }
+      lock_guard<mutex> l(*request_state->lock());
+      if (request_state->coord() == NULL) {
         const string& err = Substitute("Invalid query id: $0", PrintId(query_id));
         Value json_error(err.c_str(), document->GetAllocator());
         document->AddMember("error", json_error, document->GetAllocator());
         return;
       }
-      query_status = exec_state->query_status();
-      stmt = exec_state->sql_stmt();
-      plan = exec_state->exec_request().query_exec_request.query_plan;
+      query_status = request_state->query_status();
+      stmt = request_state->sql_stmt();
+      plan = request_state->exec_request().query_exec_request.query_plan;
       if (include_json_plan || include_summary) {
-        lock_guard<SpinLock> lock(exec_state->coord()->GetExecSummaryLock());
-        summary = exec_state->coord()->exec_summary();
+        request_state->coord()->GetTExecSummary(&summary);
       }
       if (include_json_plan) {
         for (const TPlanExecInfo& plan_exec_info:
-            exec_state->exec_request().query_exec_request.plan_exec_info) {
+            request_state->exec_request().query_exec_request.plan_exec_info) {
           for (const TPlanFragment& fragment: plan_exec_info.fragments) {
             fragments.push_back(fragment);
           }
@@ -774,6 +789,20 @@ void ImpalaHttpHandler::QuerySummaryHandler(bool include_json_plan, bool include
   Value json_status(query_status.ok() ? "OK" :
       RedactCopy(query_status.GetDetail()).c_str(), document->GetAllocator());
   document->AddMember("status", json_status, document->GetAllocator());
-  Value json_id(PrintId(query_id).c_str(), document->GetAllocator());
-  document->AddMember("query_id", json_id, document->GetAllocator());
+}
+
+void ImpalaHttpHandler::BackendsHandler(const Webserver::ArgumentMap& args,
+    Document* document) {
+  Value backends_list(kArrayType);
+  for (const auto& entry : server_->GetKnownBackends()) {
+    TBackendDescriptor backend = entry.second;
+    Value backend_obj(kObjectType);
+    Value str(TNetworkAddressToString(backend.address).c_str(), document->GetAllocator());
+    backend_obj.AddMember("address", str, document->GetAllocator());
+    backend_obj.AddMember("is_coordinator", backend.is_coordinator,
+        document->GetAllocator());
+    backend_obj.AddMember("is_executor", backend.is_executor, document->GetAllocator());
+    backends_list.PushBack(backend_obj, document->GetAllocator());
+  }
+  document->AddMember("backends", backends_list, document->GetAllocator());
 }

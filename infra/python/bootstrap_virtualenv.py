@@ -60,6 +60,10 @@ COMPILED_REQS_PATH = os.path.join(DEPS_DIR, "compiled-requirements.txt")
 # by the compiled requirements step.
 KUDU_REQS_PATH = os.path.join(DEPS_DIR, "kudu-requirements.txt")
 
+# Requirements for the ADLS test client step, which depends on Cffi (C Foreign Function
+# Interface) being installed by the compiled requirements step.
+ADLS_REQS_PATH = os.path.join(DEPS_DIR, "adls-requirements.txt")
+
 def delete_virtualenv_if_exist():
   if os.path.exists(ENV_DIR):
     shutil.rmtree(ENV_DIR)
@@ -213,6 +217,20 @@ def install_compiled_deps_if_possible():
   mark_reqs_installed(COMPILED_REQS_PATH)
   return True
 
+def install_adls_deps():
+  # The ADLS dependencies require that the OS is at least CentOS 6.7 or above,
+  # which is why we break this into a seperate step. If the target filesystem is
+  # ADLS, the expectation is that the dev environment is running at least CentOS 6.7.
+  if os.environ.get('TARGET_FILESYSTEM') == "adls":
+    if reqs_are_installed(ADLS_REQS_PATH):
+      LOG.debug("Skipping ADLS deps: matching adls-installed-requirements.txt found")
+      return True
+    cc = select_cc()
+    assert cc is not None
+    LOG.info("Installing ADLS packages into the virtualenv")
+    exec_pip_install(["-r", ADLS_REQS_PATH], cc=cc)
+    mark_reqs_installed(ADLS_REQS_PATH)
+
 def install_kudu_client_if_possible():
   '''Installs the Kudu python module if possible, which depends on the toolchain and
   the compiled requirements in compiled-requirements.txt. If the toolchain isn't
@@ -348,3 +366,4 @@ if __name__ == "__main__":
   setup_virtualenv_if_not_exists()
   if install_compiled_deps_if_possible():
     install_kudu_client_if_possible()
+    install_adls_deps()

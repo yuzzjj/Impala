@@ -22,8 +22,8 @@
 #include <boost/bind.hpp>
 
 #include "common/atomic.h"
-#include "gutil/bits.h"
 #include "runtime/bufferpool/system-allocator.h"
+#include "util/bit-util.h"
 #include "util/cpu-info.h"
 #include "util/pretty-printer.h"
 #include "util/runtime-profile-counters.h"
@@ -43,7 +43,7 @@ class BufferPool::FreeBufferArena : public CacheLineAligned {
 
   /// Add a free buffer to the free lists. May free buffers to the system allocator
   /// if the list becomes full. Caller should not hold 'lock_'
-  void AddFreeBuffer(BufferHandle buffer);
+  void AddFreeBuffer(BufferHandle&& buffer);
 
   /// Try to get a free buffer of 'buffer_len' bytes from this arena. Returns true and
   /// sets 'buffer' if found or false if not found. Caller should not hold 'lock_'.
@@ -84,6 +84,22 @@ class BufferPool::FreeBufferArena : public CacheLineAligned {
   /// on core 'core'.
   int GetFreeListSize(int64_t len);
 
+  /// Return the total number of free buffers in the arena. May be approximate since
+  /// it doesn't acquire the arena lock.
+  int64_t GetNumFreeBuffers();
+
+  /// Return the total bytes of free buffers in the arena. May be approximate since
+  /// it doesn't acquire the arena lock.
+  int64_t GetFreeBufferBytes();
+
+  /// Return the total number of clean pages in the arena. May be approximate since
+  /// it doesn't acquire the arena lock.
+  int64_t GetNumCleanPages();
+
+  /// Return the total bytes of clean pages in the arena. May be approximate since
+  /// it doesn't acquire the arena lock.
+  int64_t GetCleanPageBytes();
+
   string DebugString();
 
  private:
@@ -122,10 +138,14 @@ class BufferPool::FreeBufferArena : public CacheLineAligned {
   /// Return the lists of buffers for buffers of the given length.
   PerSizeLists* GetListsForSize(int64_t buffer_len) {
     DCHECK(BitUtil::IsPowerOf2(buffer_len));
-    int idx = Bits::Log2Ceiling64(buffer_len) - parent_->log_min_buffer_len_;
+    int idx = BitUtil::Log2Ceiling64(buffer_len) - parent_->log_min_buffer_len_;
     DCHECK_LT(idx, NumBufferSizes());
     return &buffer_sizes_[idx];
   }
+
+  /// Compute a sum over all the lists in the arena. Does not lock the arena.
+  int64_t SumOverSizes(
+      std::function<int64_t(PerSizeLists* lists, int64_t buffer_size)> compute_fn);
 
   BufferAllocator* const parent_;
 
@@ -142,7 +162,7 @@ int64_t BufferPool::BufferAllocator::CalcMaxBufferLen(
     int64_t min_buffer_len, int64_t system_bytes_limit) {
   // Find largest power of 2 smaller than 'system_bytes_limit'.
   int64_t upper_bound = system_bytes_limit == 0 ? 1L : 1L
-          << Bits::Log2Floor64(system_bytes_limit);
+          << BitUtil::Log2Floor64(system_bytes_limit);
   upper_bound = min(MAX_BUFFER_BYTES, upper_bound);
   return max(min_buffer_len, upper_bound); // Can't be < min_buffer_len.
 }
@@ -153,8 +173,8 @@ BufferPool::BufferAllocator::BufferAllocator(
     system_allocator_(new SystemAllocator(min_buffer_len)),
     min_buffer_len_(min_buffer_len),
     max_buffer_len_(CalcMaxBufferLen(min_buffer_len, system_bytes_limit)),
-    log_min_buffer_len_(Bits::Log2Ceiling64(min_buffer_len_)),
-    log_max_buffer_len_(Bits::Log2Ceiling64(max_buffer_len_)),
+    log_min_buffer_len_(BitUtil::Log2Ceiling64(min_buffer_len_)),
+    log_max_buffer_len_(BitUtil::Log2Ceiling64(max_buffer_len_)),
     system_bytes_limit_(system_bytes_limit),
     system_bytes_remaining_(system_bytes_limit),
     per_core_arenas_(CpuInfo::GetMaxNumCores()),
@@ -180,8 +200,8 @@ BufferPool::BufferAllocator::~BufferAllocator() {
 Status BufferPool::BufferAllocator::Allocate(
     ClientHandle* client, int64_t len, BufferHandle* buffer) {
   SCOPED_TIMER(client->impl_->counters().alloc_time);
-  COUNTER_ADD(client->impl_->counters().bytes_alloced, len);
-  COUNTER_ADD(client->impl_->counters().num_allocations, 1);
+  COUNTER_ADD(client->impl_->counters().cumulative_bytes_alloced, len);
+  COUNTER_ADD(client->impl_->counters().cumulative_allocations, 1);
 
   RETURN_IF_ERROR(AllocateInternal(len, buffer));
   DCHECK(buffer->is_open());
@@ -381,6 +401,32 @@ int64_t BufferPool::BufferAllocator::FreeToSystem(vector<BufferHandle>&& buffers
   return bytes_freed;
 }
 
+int64_t BufferPool::BufferAllocator::SumOverArenas(
+    std::function<int64_t(FreeBufferArena* arena)> compute_fn) const {
+  int64_t total = 0;
+  for (const unique_ptr<FreeBufferArena>& arena : per_core_arenas_) {
+    total += compute_fn(arena.get());
+  }
+  return total;
+}
+
+int64_t BufferPool::BufferAllocator::GetNumFreeBuffers() const {
+  return SumOverArenas([](FreeBufferArena* arena) { return arena->GetNumFreeBuffers(); });
+}
+
+int64_t BufferPool::BufferAllocator::GetFreeBufferBytes() const {
+  return SumOverArenas(
+      [](FreeBufferArena* arena) { return arena->GetFreeBufferBytes(); });
+}
+
+int64_t BufferPool::BufferAllocator::GetNumCleanPages() const {
+  return SumOverArenas([](FreeBufferArena* arena) { return arena->GetNumCleanPages(); });
+}
+
+int64_t BufferPool::BufferAllocator::GetCleanPageBytes() const {
+  return SumOverArenas([](FreeBufferArena* arena) { return arena->GetCleanPageBytes(); });
+}
+
 string BufferPool::BufferAllocator::DebugString() {
   stringstream ss;
   ss << "<BufferAllocator> " << this << " min_buffer_len: " << min_buffer_len_
@@ -406,7 +452,7 @@ BufferPool::FreeBufferArena::~FreeBufferArena() {
   }
 }
 
-void BufferPool::FreeBufferArena::AddFreeBuffer(BufferHandle buffer) {
+void BufferPool::FreeBufferArena::AddFreeBuffer(BufferHandle&& buffer) {
   lock_guard<SpinLock> al(lock_);
   PerSizeLists* lists = GetListsForSize(buffer.len());
   FreeList* list = &lists->free_buffers;
@@ -570,6 +616,40 @@ int BufferPool::FreeBufferArena::GetFreeListSize(int64_t len) {
   PerSizeLists* lists = GetListsForSize(len);
   DCHECK_EQ(lists->num_free_buffers.Load(), lists->free_buffers.Size());
   return lists->free_buffers.Size();
+}
+
+int64_t BufferPool::FreeBufferArena::SumOverSizes(
+    std::function<int64_t(PerSizeLists* lists, int64_t buffer_size)> compute_fn) {
+  int64_t total = 0;
+  for (int i = 0; i < NumBufferSizes(); ++i) {
+    int64_t buffer_size = (1L << i) * parent_->min_buffer_len_;
+    total += compute_fn(&buffer_sizes_[i], buffer_size);
+  }
+  return total;
+}
+
+int64_t BufferPool::FreeBufferArena::GetNumFreeBuffers() {
+  return SumOverSizes([](PerSizeLists* lists, int64_t buffer_size) {
+    return lists->num_free_buffers.Load();
+  });
+}
+
+int64_t BufferPool::FreeBufferArena::GetFreeBufferBytes() {
+  return SumOverSizes([](PerSizeLists* lists, int64_t buffer_size) {
+    return lists->num_free_buffers.Load() * buffer_size;
+  });
+}
+
+int64_t BufferPool::FreeBufferArena::GetNumCleanPages() {
+  return SumOverSizes([](PerSizeLists* lists, int64_t buffer_size) {
+    return lists->num_clean_pages.Load();
+  });
+}
+
+int64_t BufferPool::FreeBufferArena::GetCleanPageBytes() {
+  return SumOverSizes([](PerSizeLists* lists, int64_t buffer_size) {
+    return lists->num_clean_pages.Load() * buffer_size;
+  });
 }
 
 string BufferPool::FreeBufferArena::DebugString() {

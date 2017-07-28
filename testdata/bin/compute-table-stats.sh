@@ -24,8 +24,7 @@ trap 'echo Error in $0 at line $LINENO: $(cd "'$PWD'" && awk "NR == $LINENO" $0)
 
 . ${IMPALA_HOME}/bin/impala-config.sh > /dev/null 2>&1
 
-# TODO: We need a better way of managing how these get set. See:
-# https://issues.cloudera.org/browse/IMPALA-4346
+# TODO: We need a better way of managing how these get set. See IMPALA-4346
 IMPALAD=${IMPALAD:-localhost:21000}
 
 COMPUTE_STATS_SCRIPT="${IMPALA_HOME}/tests/util/compute_table_stats.py --impalad=${IMPALAD}"
@@ -43,7 +42,7 @@ fi
 ${COMPUTE_STATS_SCRIPT} --db_names=tpch,tpch_parquet \
     --table_names=customer,lineitem,nation,orders,part,partsupp,region,supplier
 ${COMPUTE_STATS_SCRIPT} --db_names=tpch_nested_parquet
-${COMPUTE_STATS_SCRIPT} --db_names=tpcds
+${COMPUTE_STATS_SCRIPT} --db_names=tpcds,tpcds_parquet
 
 if "$KUDU_IS_SUPPORTED"; then
   ${COMPUTE_STATS_SCRIPT} --db_names=functional_kudu

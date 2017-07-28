@@ -17,9 +17,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# Starts up an impalad or a mini-impala-cluster with the specified command line
-# arguments. An optional -build_type parameter can be passed to determine the build
-# type to use for the impalad instance.
+# Starts up an impalad with the specified command line arguments. An optional -build_type
+# parameter can be passed to determine the build type to use for the impalad instance.
 
 set -euo pipefail
 trap 'echo Error in $0 at line $LINENO: $(cd "'$PWD'" && awk "NR == $LINENO" $0)' ERR
@@ -28,7 +27,6 @@ BUILD_TYPE=latest
 IMPALAD_ARGS=""
 BINARY_BASE_DIR=${IMPALA_HOME}/be/build
 TOOL_PREFIX=""
-IN_PROCESS_BINARY=testutil/mini-impala-cluster
 IMPALAD_BINARY=service/impalad
 BINARY=${IMPALAD_BINARY}
 JVM_DEBUG_PORT=""
@@ -50,9 +48,6 @@ do
     -build_type=*)
       echo "Invalid build type. Valid values are: debug, release"
       exit 1
-      ;;
-    -in-process)
-      BINARY=${IN_PROCESS_BINARY}
       ;;
     -gdb)
       echo "Starting Impala under gdb..."
@@ -103,6 +98,7 @@ if ${CLUSTER_DIR}/admin is_kerberized; then
 fi
 
 . ${IMPALA_HOME}/bin/set-classpath.sh
+export ASAN_OPTIONS="handle_segv=0 detect_leaks=0 allocator_may_return_null=1"
 export UBSAN_OPTIONS="print_stacktrace=1"
 UBSAN_OPTIONS="${UBSAN_OPTIONS} suppressions=${IMPALA_HOME}/bin/ubsan-suppressions.txt"
 export PATH="${IMPALA_TOOLCHAIN}/llvm-${IMPALA_LLVM_VERSION}/bin:${PATH}"

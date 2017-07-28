@@ -46,7 +46,6 @@ from thrift.Thrift import TException
 
 VERSION_FORMAT = "Impala Shell v%(version)s (%(git_hash)s) built on %(build_date)s"
 VERSION_STRING = "build version not available"
-HISTORY_LENGTH = 100
 
 # Tarball / packaging build makes impala_build_version available
 try:
@@ -181,7 +180,12 @@ class ImpalaShell(cmd.Cmd):
       self.interactive = True
       try:
         self.readline = __import__('readline')
-        self.readline.set_history_length(HISTORY_LENGTH)
+        try:
+          self.readline.set_history_length(int(options.history_max))
+        except ValueError:
+          print_to_stderr("WARNING: history_max option malformed %s\n"
+            % options.history_max)
+          self.readline.set_history_length(1000)
       except ImportError:
         self._disable_readline()
 
@@ -507,10 +511,13 @@ class ImpalaShell(cmd.Cmd):
     summary = None
     try:
       summary = self.imp_client.get_summary(self.last_query_handle)
-    except RPCException:
-      pass
-    if summary is None:
-      print_to_stderr("Could not retrieve summary for query.")
+    except RPCException, e:
+      import re
+      error_pattern = re.compile("ERROR: Query id \d+:\d+ not found.")
+      if error_pattern.match(e.value):
+        print_to_stderr("Could not retrieve summary for query.")
+      else:
+        print_to_stderr(e)
       return CmdStatus.ERROR
     if summary.nodes is None:
       print_to_stderr("Summary not available")
@@ -705,6 +712,8 @@ class ImpalaShell(cmd.Cmd):
         self.prompt = self.DISCONNECTED_PROMPT
     except Exception, e:
       print_to_stderr("Error connecting: %s, %s" % (type(e).__name__, e))
+      # A secure connection may still be open. So we explicitly close it.
+      self.imp_client.close_connection()
       # If a connection to another impalad failed while already connected
       # reset the prompt to disconnected.
       self.server_version = self.UNKNOWN_SERVER_VERSION
@@ -910,6 +919,9 @@ class ImpalaShell(cmd.Cmd):
         num_rows = 0
 
         for rows in rows_fetched:
+          # IMPALA-4418: Break out of the loop to prevent printing an unnecessary empty line.
+          if len(rows) == 0:
+            break
           self.output_stream.write(rows)
           num_rows += len(rows)
 
@@ -937,9 +949,11 @@ class ImpalaShell(cmd.Cmd):
       if not is_dml:
         self.imp_client.close_query(self.last_query_handle, self.query_handle_closed)
       self.query_handle_closed = True
-
-      profile = self.imp_client.get_runtime_profile(self.last_query_handle)
-      self.print_runtime_profile(profile)
+      try:
+        profile = self.imp_client.get_runtime_profile(self.last_query_handle)
+        self.print_runtime_profile(profile)
+      except RPCException, e:
+        if self.show_profiles: raise e
       return CmdStatus.SUCCESS
     except RPCException, e:
       # could not complete the rpc successfully
@@ -1238,8 +1252,8 @@ def parse_variables(keyvals):
     for keyval in keyvals:
       match = re.match(kv_pattern, keyval)
       if not match:
-        print_to_stderr('Error: Could not parse key-value "%s". ' + \
-                        'It must follow the pattern "KEY=VALUE".' % (keyval,))
+        print_to_stderr('Error: Could not parse key-value "%s". ' % (keyval,) +
+                        'It must follow the pattern "KEY=VALUE".')
         parser.print_help()
         sys.exit(1)
       else:
@@ -1318,6 +1332,11 @@ if __name__ == "__main__":
                     "connections. Enable SSL or set --auth_creds_ok_in_clear")
     sys.exit(1)
 
+  if not options.use_ldap and options.ldap_password_cmd:
+    print_to_stderr("Option --ldap_password_cmd requires using LDAP authentication " +
+                    "mechanism (-l)")
+    sys.exit(1)
+
   if options.use_kerberos:
     print_to_stderr("Starting Impala Shell using Kerberos authentication")
     print_to_stderr("Using service name '%s'" % options.kerberos_service_name)
@@ -1377,7 +1396,7 @@ if __name__ == "__main__":
 
   intro = WELCOME_STRING
   if not options.ssl and options.creds_ok_in_clear and options.use_ldap:
-    intro += ("\n\\nLDAP authentication is enabled, but the connection to Impala is " +
+    intro += ("\n\nLDAP authentication is enabled, but the connection to Impala is "
               "not secured by TLS.\nALL PASSWORDS WILL BE SENT IN THE CLEAR TO IMPALA.\n")
 
   shell = ImpalaShell(options)

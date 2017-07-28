@@ -22,7 +22,7 @@
 #include <math.h>
 
 #include "exprs/anyval-util.h"
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
 #include "exprs/operators.h"
 #include "util/string-parser.h"
 #include "runtime/runtime-state.h"
@@ -180,6 +180,7 @@ void MathFunctions::RandClose(FunctionContext* ctx,
     uint8_t* seed = reinterpret_cast<uint8_t*>(
         ctx->GetFunctionState(FunctionContext::THREAD_LOCAL));
     ctx->Free(seed);
+    ctx->SetFunctionState(FunctionContext::THREAD_LOCAL, nullptr);
   }
 }
 

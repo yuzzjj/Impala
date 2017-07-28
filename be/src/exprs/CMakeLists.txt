@@ -23,7 +23,9 @@ set(LIBRARY_OUTPUT_PATH "${BUILD_OUTPUT_ROOT_DIRECTORY}/exprs")
 set(EXECUTABLE_OUTPUT_PATH "${BUILD_OUTPUT_ROOT_DIRECTORY}/exprs")
 
 add_library(Exprs
+  agg-fn.cc
   agg-fn-evaluator.cc
+  agg-fn-evaluator-ir.cc
   aggregate-functions-ir.cc
   anyval-util.cc
   bit-byte-functions-ir.cc
@@ -36,18 +38,20 @@ add_library(Exprs
   decimal-functions-ir.cc
   decimal-operators-ir.cc
   expr.cc
-  expr-context.cc
-  expr-ir.cc
   hive-udf-call.cc
   in-predicate-ir.cc
   is-not-empty-predicate.cc
   is-null-predicate-ir.cc
+  kudu-partition-expr.cc
   like-predicate.cc
   like-predicate-ir.cc
   literal.cc
   math-functions-ir.cc
   null-literal.cc
   operators-ir.cc
+  scalar-expr.cc
+  scalar-expr-evaluator.cc
+  scalar-expr-ir.cc
   slot-ref.cc
   string-functions-ir.cc
   timestamp-functions.cc
@@ -55,6 +59,7 @@ add_library(Exprs
   timezone_db.cc
   tuple-is-null-predicate.cc
   scalar-fn-call.cc
+  udf-builtins.cc
   udf-builtins-ir.cc
   utility-functions.cc
   utility-functions-ir.cc

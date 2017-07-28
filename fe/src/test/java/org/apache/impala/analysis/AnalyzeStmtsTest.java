@@ -27,11 +27,10 @@ import org.apache.impala.catalog.PrimitiveType;
 import org.apache.impala.catalog.ScalarType;
 import org.apache.impala.catalog.Type;
 import org.apache.impala.common.AnalysisException;
+import org.apache.impala.common.RuntimeEnv;
 import org.junit.Assert;
 import org.junit.Test;
 
-import org.apache.impala.common.RuntimeEnv;
-import org.apache.impala.testutil.TestUtils;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
@@ -314,6 +313,51 @@ public class AnalyzeStmtsTest extends AnalyzerTest {
         "on (alltypes.id = functional.alltypes.id)",
         createAnalyzer("functional"),
         "Duplicate table alias: 'functional.alltypes'");
+  }
+
+  @Test
+  public void TestTableSampleClause() {
+    long bytesPercVals[] = new long[] { 0, 10, 50, 100 };
+    long randomSeedVals[] = new long[] { 0, 10, 100, Integer.MAX_VALUE, Long.MAX_VALUE };
+    for (long bytesPerc: bytesPercVals) {
+      String tblSmpl = String.format("tablesample system (%s)", bytesPerc);
+      AnalyzesOk("select * from functional.alltypes  " + tblSmpl);
+      for (long randomSeed: randomSeedVals) {
+        String repTblSmpl = String.format("%s repeatable (%s)", tblSmpl, randomSeed);
+        AnalyzesOk("select * from functional.alltypes  " + repTblSmpl);
+      }
+    }
+
+    // Invalid bytes percent. Negative values do not parse.
+    AnalysisError("select * from functional.alltypes tablesample system (101)",
+        "Invalid percent of bytes value '101'. " +
+        "The percent of bytes to sample must be between 0 and 100.");
+    AnalysisError("select * from functional.alltypes tablesample system (1000)",
+        "Invalid percent of bytes value '1000'. " +
+        "The percent of bytes to sample must be between 0 and 100.");
+
+    // Only applicable to HDFS base table refs.
+    AnalysisError("select * from functional_kudu.alltypes tablesample system (10)",
+        "TABLESAMPLE is only supported on HDFS base tables: functional_kudu.alltypes");
+    AnalysisError("select * from functional_hbase.alltypes tablesample system (10)",
+        "TABLESAMPLE is only supported on HDFS base tables: functional_hbase.alltypes");
+    AnalysisError("select * from functional.alltypes_datasource tablesample system (10)",
+        "TABLESAMPLE is only supported on HDFS base tables: " +
+        "functional.alltypes_datasource");
+    AnalysisError("select * from (select * from functional.alltypes) v " +
+        "tablesample system (10)",
+        "TABLESAMPLE is only supported on HDFS base tables: v");
+    AnalysisError("with v as (select * from functional.alltypes) " +
+        "select * from v tablesample system (10)",
+        "TABLESAMPLE is only supported on HDFS base tables: v");
+    AnalysisError("select * from functional.alltypes_view tablesample system (10)",
+        "TABLESAMPLE is only supported on HDFS base tables: functional.alltypes_view");
+    AnalysisError("select * from functional.allcomplextypes.int_array_col " +
+        "tablesample system (10)",
+        "TABLESAMPLE is only supported on HDFS base tables: int_array_col");
+    AnalysisError("select * from functional.allcomplextypes a, a.int_array_col " +
+        "tablesample system (10)",
+        "TABLESAMPLE is only supported on HDFS base tables: int_array_col");
   }
 
   /**
@@ -1713,6 +1757,12 @@ public class AnalyzeStmtsTest extends AnalyzerTest {
 
   @Test
   public void TestInsertHints() throws AnalysisException {
+    // Test table to make sure that conflicting hints and table properties result in a
+    // warning.
+    addTestDb("test_sort_by", "Test DB for SORT BY clause.");
+    addTestTable("create table test_sort_by.alltypes (id int, int_col int, " +
+        "bool_col boolean) partitioned by (year int, month int) " +
+        "sort by (int_col, bool_col) location '/'");
     for (String[] hintStyle: getHintStyles()) {
       String prefix = hintStyle[0];
       String suffix = hintStyle[1];
@@ -1732,6 +1782,10 @@ public class AnalyzeStmtsTest extends AnalyzerTest {
       AnalyzesOk(String.format(
           "insert into table functional.alltypesnopart %sshuffle%s " +
           "select * from functional.alltypesnopart", prefix, suffix));
+      // Insert hints are ok for Kudu tables.
+      AnalyzesOk(String.format(
+          "insert into table functional_kudu.alltypes %sshuffle%s " +
+          "select * from functional_kudu.alltypes", prefix, suffix));
       // Plan hints do not make sense for inserting into HBase tables.
       AnalysisError(String.format(
           "insert into table functional_hbase.alltypes %sshuffle%s " +
@@ -1760,45 +1814,13 @@ public class AnalyzeStmtsTest extends AnalyzerTest {
           "/* +clustered,noclustered */ select * from functional.alltypes", prefix,
           suffix), "Conflicting INSERT hints: clustered and noclustered");
 
-      // Below are tests for hints that are not supported by the legacy syntax.
-      if (prefix == "[") continue;
-
-      // Tests for sortby hint
-      AnalyzesOk(String.format("insert into functional.alltypessmall " +
-          "partition (year, month) %ssortby(int_col)%s select * from functional.alltypes",
-          prefix, suffix));
-      AnalyzesOk(String.format("insert into functional.alltypessmall " +
-          "partition (year, month) %sshuffle,clustered,sortby(int_col)%s select * from " +
-          "functional.alltypes", prefix, suffix));
-      AnalyzesOk(String.format("insert into functional.alltypessmall " +
-          "partition (year, month) %ssortby(int_col, bool_col)%s select * from " +
-          "functional.alltypes", prefix, suffix));
-      AnalyzesOk(String.format("insert into functional.alltypessmall " +
-          "partition (year, month) %sshuffle,clustered,sortby(int_col,bool_col)%s " +
-          "select * from functional.alltypes", prefix, suffix));
-      AnalyzesOk(String.format("insert into functional.alltypessmall " +
-          "partition (year, month) %sshuffle,sortby(int_col,bool_col),clustered%s " +
-          "select * from functional.alltypes", prefix, suffix));
-      AnalyzesOk(String.format("insert into functional.alltypessmall " +
-          "partition (year, month) %ssortby(int_col,bool_col),shuffle,clustered%s " +
-          "select * from functional.alltypes", prefix, suffix));
-      // Column in sortby hint must exist.
-      AnalysisError(String.format("insert into functional.alltypessmall " +
-          "partition (year, month) %ssortby(foo)%s select * from functional.alltypes",
-          prefix, suffix), "Could not find SORTBY hint column 'foo' in table.");
-      // Column in sortby hint must not be a Hdfs partition column.
-      AnalysisError(String.format("insert into functional.alltypessmall " +
-          "partition (year, month) %ssortby(year)%s select * from " +
+      // noclustered hint on a table with sort.columns issues a warning.
+      AnalyzesOk(String.format(
+          "insert into test_sort_by.alltypes partition (year, month) " +
+          "%snoclustered%s select id, int_col, bool_col, year, month from " +
           "functional.alltypes", prefix, suffix),
-          "SORTBY hint column list must not contain Hdfs partition column: 'year'");
-      // Column in sortby hint must not be a Kudu primary key column.
-      AnalysisError(String.format("insert into functional_kudu.alltypessmall " +
-          "%ssortby(id)%s select * from functional_kudu.alltypes", prefix, suffix),
-          "SORTBY hint column list must not contain Kudu primary key column: 'id'");
-      // sortby() hint is not supported in UPSERT queries
-      AnalysisError(String.format("upsert into functional_kudu.alltypessmall " +
-          "%ssortby(id)%s select * from functional_kudu.alltypes", prefix, suffix),
-          "SORTBY hint is not supported in UPSERT statements.");
+          "Insert statement has 'noclustered' hint, but table has 'sort.columns' " +
+          "property. The 'noclustered' hint will be ignored.");
     }
 
     // Multiple non-conflicting hints and case insensitivity of hints.
@@ -2966,11 +2988,11 @@ public class AnalyzeStmtsTest extends AnalyzerTest {
       AnalysisError(String.format("load data inpath '%s' %s into table " +
           "tpch.lineitem", "file:///test-warehouse/test.out", overwrite),
           "INPATH location 'file:/test-warehouse/test.out' must point to an " +
-          "HDFS or S3A filesystem");
+          "HDFS, S3A or ADL filesystem.");
       AnalysisError(String.format("load data inpath '%s' %s into table " +
           "tpch.lineitem", "s3n://bucket/test-warehouse/test.out", overwrite),
           "INPATH location 's3n://bucket/test-warehouse/test.out' must point to an " +
-          "HDFS or S3A filesystem");
+          "HDFS, S3A or ADL filesystem.");
 
       // File type / table type mismatch.
       AnalyzesOk(String.format("load data inpath '%s' %s into table " +
@@ -3515,7 +3537,7 @@ public class AnalyzeStmtsTest extends AnalyzerTest {
     testNumberOfMembers(ValuesStmt.class, 0);
 
     // Also check TableRefs.
-    testNumberOfMembers(TableRef.class, 19);
+    testNumberOfMembers(TableRef.class, 20);
     testNumberOfMembers(BaseTableRef.class, 0);
     testNumberOfMembers(InlineViewRef.class, 8);
   }

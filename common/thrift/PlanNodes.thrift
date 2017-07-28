@@ -56,6 +56,7 @@ enum TExecNodePhase {
   PREPARE_SCANNER,
   OPEN,
   GETNEXT,
+  GETNEXT_SCANNER,
   CLOSE,
   INVALID
 }
@@ -215,6 +216,10 @@ struct THdfsScanNode {
   // Map from SlotIds to the indices in TPlanNode.conjuncts that are eligible
   // for dictionary filtering.
   9: optional map<Types.TSlotId, list<i32>> dictionary_filter_conjuncts
+
+  // The byte offset of the slot for Parquet metadata if Parquet count star optimization
+  // is enabled.
+  10: optional i32 parquet_count_star_slot_offset
 }
 
 struct TDataSourceScanNode {
@@ -341,11 +346,22 @@ struct TSortInfo {
   4: optional list<Exprs.TExpr> sort_tuple_slot_exprs
 }
 
+enum TSortType {
+  // Sort the entire input.
+  TOTAL,
+
+  // Return the first N sorted elements.
+  TOPN,
+
+  // Divide the input into batches, each of which is sorted individually.
+  PARTIAL
+}
+
 struct TSortNode {
   1: required TSortInfo sort_info
-  // Indicates whether the backend service should use topn vs. sorting
-  2: required bool use_top_n;
-  // This is the number of rows to skip before returning results
+  2: required TSortType type
+  // This is the number of rows to skip before returning results.
+  // Not used with TSortType::PARTIAL.
   3: optional i64 offset
 }
 

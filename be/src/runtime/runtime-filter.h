@@ -60,7 +60,8 @@ class RuntimeFilter {
   /// not in that 'bloom_filter_'. Otherwise returns true. Is safe to call concurrently
   /// with SetBloomFilter(). 'val' is a value derived from evaluating a tuple row against
   /// the expression of the owning filter context. 'col_type' is the value's type.
-  bool Eval(void* val, const ColumnType& col_type) const noexcept;
+  /// Inlined in IR so that the constant 'col_type' can be propagated.
+  bool IR_ALWAYS_INLINE Eval(void* val, const ColumnType& col_type) const noexcept;
 
   /// Returns the amount of time waited since registration for the filter to
   /// arrive. Returns 0 if filter has not yet arrived.
@@ -89,8 +90,8 @@ class RuntimeFilter {
   /// compact way of representing a full Bloom filter that contains every element.
   BloomFilter* bloom_filter_;
 
-  /// Descriptor of the filter.
-  TRuntimeFilterDesc filter_desc_;
+  /// Reference to the filter's thrift descriptor in the thrift Plan tree.
+  const TRuntimeFilterDesc& filter_desc_;
 
   /// Time, in ms, that the filter was registered.
   int64_t registration_time_;

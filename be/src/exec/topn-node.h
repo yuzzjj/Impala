@@ -24,7 +24,6 @@
 
 #include "codegen/impala-ir.h"
 #include "exec/exec-node.h"
-#include "exec/sort-exec-exprs.h"
 #include "runtime/descriptors.h"  // for TupleId
 #include "util/tuple-row-compare.h"
 
@@ -52,6 +51,7 @@ class TopNNode : public ExecNode {
   virtual void Close(RuntimeState* state);
 
  protected:
+  virtual Status QueryMaintenance(RuntimeState* state);
   virtual void DebugString(int indentation_level, std::stringstream* out) const;
 
  private:
@@ -68,17 +68,39 @@ class TopNNode : public ExecNode {
   /// Flatten and reverse the priority queue.
   void PrepareForOutput();
 
+  // Re-materialize the elements in the priority queue into a new tuple pool, and release
+  // the previous pool.
+  Status ReclaimTuplePool(RuntimeState* state);
+
+  /// Helper methods for modifying priority_queue while maintaining ordered heap
+  /// invariants
+  inline static void PushHeap(std::vector<Tuple*>* priority_queue,
+      const ComparatorWrapper<TupleRowComparator>& comparator, Tuple* const insert_row) {
+    priority_queue->push_back(insert_row);
+    std::push_heap(priority_queue->begin(), priority_queue->end(), comparator);
+  }
+
+  inline static void PopHeap(std::vector<Tuple*>* priority_queue,
+      const ComparatorWrapper<TupleRowComparator>& comparator) {
+    std::pop_heap(priority_queue->begin(), priority_queue->end(), comparator);
+    priority_queue->pop_back();
+  }
+
   /// Number of rows to skip.
   int64_t offset_;
 
-  /// sort_exec_exprs_ contains the ordering expressions used for tuple comparison and
-  /// the materialization exprs for the output tuple.
-  SortExecExprs sort_exec_exprs_;
+  /// Ordering expressions used for tuple comparison.
+  std::vector<ScalarExpr*> ordering_exprs_;
+
+  /// Materialization exprs for the output tuple and their evaluators.
+  std::vector<ScalarExpr*> output_tuple_exprs_;
+  std::vector<ScalarExprEvaluator*> output_tuple_expr_evals_;
+
   std::vector<bool> is_asc_order_;
   std::vector<bool> nulls_first_;
 
   /// Cached descriptor for the materialized tuple. Assigned in Prepare().
-  TupleDescriptor* materialized_tuple_desc_;
+  TupleDescriptor* output_tuple_desc_;
 
   /// Comparator for priority_queue_.
   boost::scoped_ptr<TupleRowComparator> tuple_row_less_than_;
@@ -103,18 +125,24 @@ class TopNNode : public ExecNode {
   /// Timer for time spent in InsertBatch() function (or codegen'd version)
   RuntimeProfile::Counter* insert_batch_timer_;
 
+  /// Number of rows to be reclaimed since tuple_pool_ was last created/reclaimed
+  int64_t rows_to_reclaim_;
+
+  /// Number of times tuple pool memory was reclaimed
+  RuntimeProfile::Counter* tuple_pool_reclaim_counter_;
+
   /////////////////////////////////////////
   /// BEGIN: Members that must be Reset()
 
   /// Number of rows skipped. Used for adhering to offset_.
   int64_t num_rows_skipped_;
 
-  /// The priority queue will never have more elements in it than the LIMIT + OFFSET.
-  /// The stl priority queue doesn't support a max size, so to get that functionality,
-  /// the order of the queue is the opposite of what the ORDER BY clause specifies, such
-  /// that the top of the queue is the last sorted element.
-  boost::scoped_ptr<std::priority_queue<Tuple*, std::vector<Tuple*>,
-      ComparatorWrapper<TupleRowComparator>>> priority_queue_;
+  /// The priority queue (represented by a vector and modified using
+  /// push_heap()/pop_heap() to maintain ordered heap invariants) will never have more
+  /// elements in it than the LIMIT + OFFSET. The order of the queue is the opposite of
+  /// what the ORDER BY clause specifies, such that the top of the queue is the last
+  /// sorted element.
+  std::vector<Tuple*> priority_queue_;
 
   /// END: Members that must be Reset()
   /////////////////////////////////////////

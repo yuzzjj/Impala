@@ -22,9 +22,20 @@
 #include "common/status.h"
 #include "udf/udf.h"
 
-using namespace impala_udf;
-
 namespace impala {
+
+using impala_udf::FunctionContext;
+using impala_udf::AnyVal;
+using impala_udf::BooleanVal;
+using impala_udf::TinyIntVal;
+using impala_udf::SmallIntVal;
+using impala_udf::IntVal;
+using impala_udf::BigIntVal;
+using impala_udf::FloatVal;
+using impala_udf::DoubleVal;
+using impala_udf::TimestampVal;
+using impala_udf::StringVal;
+using impala_udf::DecimalVal;
 
 class Expr;
 class OpcodeRegistry;
@@ -61,12 +72,26 @@ class TimestampFunctions {
       FunctionContext::FunctionStateScope scope);
 
   /// Parses 'string_val' based on the format 'fmt'.
+  /// The time zone interpretation of the parsed timestamp is determined by
+  /// FLAGS_use_local_tz_for_unix_timestamp_conversions. If the flag is true, the
+  /// instance is interpreted as a local value. If the flag is false, UTC is assumed.
   static BigIntVal Unix(FunctionContext* context, const StringVal& string_val,
       const StringVal& fmt);
-  /// Converts 'tv_val' to a unix time_t
+
+  /// Converts 'tv_val' to a unix time_t.
+  /// The time zone interpretation of the specified timestamp is determined by
+  /// FLAGS_use_local_tz_for_unix_timestamp_conversions. If the flag is true, the
+  /// instance is interpreted as a local value. If the flag is false, UTC is assumed.
   static BigIntVal Unix(FunctionContext* context, const TimestampVal& tv_val);
+
   /// Returns the current time.
+  /// The time zone interpretation of the current time is determined by
+  /// FLAGS_use_local_tz_for_unix_timestamp_conversions. If the flag is true, the
+  /// instance is interpreted as a local value. If the flag is false, UTC is assumed.
   static BigIntVal Unix(FunctionContext* context);
+
+  /// Interpret 'tv_val' as a timestamp in UTC and convert to unix time in microseconds.
+  static BigIntVal UtcToUnixMicros(FunctionContext* context, const TimestampVal& tv_val);
 
   // Functions to convert to and from TimestampVal type
   static TimestampVal ToTimestamp(FunctionContext* context, const BigIntVal& bigint_val);
@@ -87,6 +112,10 @@ class TimestampFunctions {
   template <class TIME>
   static StringVal FromUnix(FunctionContext* context, const TIME& unix_time,
       const StringVal& fmt);
+
+  /// Return a timestamp in UTC from a unix time in microseconds.
+  static TimestampVal UnixMicrosToUtcTimestamp(FunctionContext* context,
+      const BigIntVal& unix_time_micros);
 
   /// Convert a timestamp to or from a particular timezone based time.
   static TimestampVal FromUtc(FunctionContext* context,
@@ -111,6 +140,7 @@ class TimestampFunctions {
 
   /// Date/time functions.
   static TimestampVal Now(FunctionContext* context);
+  static TimestampVal UtcTimestamp(FunctionContext* context);
   static StringVal ToDate(FunctionContext* context, const TimestampVal& ts_val);
   static IntVal DateDiff(FunctionContext* context, const TimestampVal& ts_val1,
       const TimestampVal& ts_val2);
@@ -180,6 +210,15 @@ class TimestampFunctions {
       bool is_add_months_keep_last_day>
   static TimestampVal AddSub(FunctionContext* context, const TimestampVal& timestamp,
       const AnyIntVal& num_interval_units);
+
+  /// Return the last date in the month of a specified input date.
+  /// The TIMESTAMP argument requires a date component,
+  /// it may or may not have a time component.
+  /// The function will return a NULL TimestampVal when:
+  ///   1) The TIMESTAMP argument is missing a date component.
+  ///   2) The TIMESTAMP argument is outside of the supported range:
+  ///         between 1400-01-31 00:00:00 and 9999-12-31 23:59:59
+  static TimestampVal LastDay(FunctionContext* context, const TimestampVal& ts);
 
   /// Helper function to check date/time format strings.
   /// TODO: eventually return format converted from Java to Boost.

@@ -51,7 +51,13 @@ from tests.common.test_vector import ImpalaTestDimension
 from tests.performance.query import Query
 from tests.performance.query_exec_functions import execute_using_jdbc
 from tests.performance.query_executor import JdbcQueryExecConfig
-from tests.util.filesystem_utils import IS_S3, S3_BUCKET_NAME, FILESYSTEM_PREFIX
+from tests.util.filesystem_utils import (
+    IS_S3,
+    IS_ADLS,
+    S3_BUCKET_NAME,
+    ADLS_STORE_NAME,
+    FILESYSTEM_PREFIX)
+
 from tests.util.hdfs_util import (
   HdfsConfig,
   get_hdfs_client,
@@ -68,8 +74,18 @@ from tests.util.thrift_util import create_transport
 from hive_metastore import ThriftHiveMetastore
 from thrift.protocol import TBinaryProtocol
 
+# Initializing the logger before conditional imports, since we will need it
+# for them.
 logging.basicConfig(level=logging.INFO, format='-- %(message)s')
 LOG = logging.getLogger('impala_test_suite')
+
+# The ADLS python client isn't downloaded when ADLS isn't the target FS, so do a
+# conditional import.
+if IS_ADLS:
+  try:
+    from tests.util.adls_util import ADLSClient
+  except ImportError:
+    LOG.error("Need the ADLSClient for testing with ADLS")
 
 IMPALAD_HOST_PORT_LIST = pytest.config.option.impalad.split(',')
 assert len(IMPALAD_HOST_PORT_LIST) > 0, 'Must specify at least 1 impalad to target'
@@ -126,8 +142,11 @@ class ImpalaTestSuite(BaseTestSuite):
 
     cls.impalad_test_service = cls.create_impala_service()
     cls.hdfs_client = cls.create_hdfs_client()
-    cls.s3_client = S3Client(S3_BUCKET_NAME)
-    cls.filesystem_client = cls.s3_client if IS_S3 else cls.hdfs_client
+    cls.filesystem_client = cls.hdfs_client
+    if IS_S3:
+      cls.filesystem_client = S3Client(S3_BUCKET_NAME)
+    elif IS_ADLS:
+      cls.filesystem_client = ADLSClient(ADLS_STORE_NAME)
 
   @classmethod
   def teardown_class(cls):
@@ -161,16 +180,16 @@ class ImpalaTestSuite(BaseTestSuite):
     return hdfs_client
 
   @classmethod
-  def all_db_names(self):
-    results = self.client.execute("show databases").data
+  def all_db_names(cls):
+    results = cls.client.execute("show databases").data
     # Extract first column - database name
     return [row.split("\t")[0] for row in results]
 
   @classmethod
-  def cleanup_db(self, db_name, sync_ddl=1):
-    self.client.execute("use default")
-    self.client.set_configuration({'sync_ddl': sync_ddl})
-    self.client.execute("drop database if exists `" + db_name + "` cascade")
+  def cleanup_db(cls, db_name, sync_ddl=1):
+    cls.client.execute("use default")
+    cls.client.set_configuration({'sync_ddl': sync_ddl})
+    cls.client.execute("drop database if exists `" + db_name + "` cascade")
 
   def __restore_query_options(self, query_options_changed, impalad_client):
     """
@@ -274,7 +293,7 @@ class ImpalaTestSuite(BaseTestSuite):
 
 
   def run_test_case(self, test_file_name, vector, use_db=None, multiple_impalad=False,
-      encoding=None):
+      encoding=None, test_file_vars=None):
     """
     Runs the queries in the specified test based on the vector values
 
@@ -285,6 +304,9 @@ class ImpalaTestSuite(BaseTestSuite):
     Additionally, the encoding for all test data can be specified using the 'encoding'
     parameter. This is useful when data is ingested in a different encoding (ex.
     latin). If not set, the default system encoding will be used.
+    If a dict 'test_file_vars' is provided, then all keys will be replaced with their
+    values in queries before they are executed. Callers need to avoid using reserved key
+    names, see 'reserved_keywords' below.
     """
     table_format_info = vector.get_value('table_format')
     exec_options = vector.get_value('exec_option')
@@ -335,6 +357,15 @@ class ImpalaTestSuite(BaseTestSuite):
           .replace('$FILESYSTEM_PREFIX', FILESYSTEM_PREFIX)
           .replace('$SECONDARY_FILESYSTEM', os.getenv("SECONDARY_FILESYSTEM") or str()))
       if use_db: query = query.replace('$DATABASE', use_db)
+
+      reserved_keywords = ["$DATABASE", "$FILESYSTEM_PREFIX", "$GROUP_NAME",
+                           "$IMPALA_HOME", "$NAMENODE", "$QUERY", "$SECONDARY_FILESYSTEM"]
+
+      if test_file_vars:
+        for key, value in test_file_vars.iteritems():
+          if key in reserved_keywords:
+            raise RuntimeError("Key {0} is reserved".format(key))
+          query = query.replace(key, value)
 
       if 'QUERY_NAME' in test_section:
         LOG.info('Query Name: \n%s\n' % test_section['QUERY_NAME'])
@@ -590,7 +621,7 @@ class ImpalaTestSuite(BaseTestSuite):
     # This should never happen.
     assert 0, 'Unable to get location for table: ' + table_name
 
-  def run_stmt_in_hive(self, stmt):
+  def run_stmt_in_hive(self, stmt, username=getuser()):
     """
     Run a statement in Hive, returning stdout if successful and throwing
     RuntimeError(stderr) if not.
@@ -599,7 +630,7 @@ class ImpalaTestSuite(BaseTestSuite):
         ['beeline',
          '--outputformat=csv2',
          '-u', 'jdbc:hive2://' + pytest.config.option.hive_server2,
-         '-n', getuser(),
+         '-n', username,
          '-e', stmt],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE)
@@ -633,7 +664,7 @@ class ImpalaTestSuite(BaseTestSuite):
     # If 'skip_hbase' is specified or the filesystem is isilon, s3 or local, we don't
     # need the hbase dimension.
     if pytest.config.option.skip_hbase or TARGET_FILESYSTEM.lower() \
-        in ['s3', 'isilon', 'local']:
+        in ['s3', 'isilon', 'local', 'adls']:
       for tf_dimension in tf_dimensions:
         if tf_dimension.value.file_format == "hbase":
           tf_dimensions.remove(tf_dimension)
@@ -651,7 +682,8 @@ class ImpalaTestSuite(BaseTestSuite):
       cluster_sizes = ALL_NODES_ONLY
     return create_exec_option_dimension(cluster_sizes, disable_codegen_options,
                                         batch_sizes,
-                                        exec_single_node_option=exec_single_node_option)
+                                        exec_single_node_option=exec_single_node_option,
+                                        disable_codegen_rows_threshold_options=[0])
 
   @classmethod
   def exploration_strategy(cls):

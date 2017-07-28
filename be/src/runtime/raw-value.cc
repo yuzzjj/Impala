@@ -66,7 +66,7 @@ void RawValue::PrintValueAsBytes(const void* value, const ColumnType& type,
       stream->write(chars, TimestampValue::Size());
       break;
     case TYPE_CHAR:
-      stream->write(StringValue::CharSlotToPtr(chars, type), type.len);
+      stream->write(chars, type.len);
       break;
     case TYPE_DECIMAL:
       stream->write(chars, type.GetByteSize());
@@ -102,7 +102,7 @@ void RawValue::PrintValue(const void* value, const ColumnType& type, int scale,
       str->swap(tmp);
       return;
     case TYPE_CHAR:
-      *str = string(StringValue::CharSlotToPtr(value, type), type.len);
+      *str = string(reinterpret_cast<const char*>(value), type.len);
       return;
     default:
       PrintValue(value, type, scale, &out);
@@ -117,7 +117,11 @@ void RawValue::Write(const void* value, void* dst, const ColumnType& type,
     case TYPE_NULL:
       break;
     case TYPE_BOOLEAN:
-      *reinterpret_cast<bool*>(dst) = *reinterpret_cast<const bool*>(value);
+      // Unlike the other scalar types, bool has a limited set of valid values, so if
+      // 'dst' is uninitialized memory and happens to point to a value that is not a valid
+      // bool, then dereferencing it via *reinterpret_cast<bool*>(dst) is undefined
+      // behavior.
+      memcpy(dst, value, sizeof(bool));
       break;
     case TYPE_TINYINT:
       *reinterpret_cast<int8_t*>(dst) = *reinterpret_cast<const int8_t*>(value);
@@ -142,13 +146,7 @@ void RawValue::Write(const void* value, void* dst, const ColumnType& type,
           *reinterpret_cast<const TimestampValue*>(value);
       break;
     case TYPE_STRING:
-    case TYPE_VARCHAR:
-    case TYPE_CHAR: {
-      if (!type.IsVarLenStringType()) {
-        DCHECK_EQ(type.type, TYPE_CHAR);
-        memcpy(StringValue::CharSlotToPtr(dst, type), value, type.len);
-        break;
-      }
+    case TYPE_VARCHAR: {
       const StringValue* src = reinterpret_cast<const StringValue*>(value);
       StringValue* dest = reinterpret_cast<StringValue*>(dst);
       dest->len = src->len;
@@ -164,6 +162,10 @@ void RawValue::Write(const void* value, void* dst, const ColumnType& type,
       }
       break;
     }
+    case TYPE_CHAR:
+      DCHECK_EQ(type.type, TYPE_CHAR);
+      memcpy(dst, value, type.len);
+      break;
     case TYPE_DECIMAL:
       memcpy(dst, value, type.GetByteSize());
       break;
@@ -214,7 +216,7 @@ uint32_t RawValue::GetHashValueFnv(const void* v, const ColumnType& type, uint32
     case TYPE_DOUBLE: return HashUtil::FnvHash64to32(v, 8, seed);
     case TYPE_TIMESTAMP: return HashUtil::FnvHash64to32(v, 12, seed);
     case TYPE_CHAR:
-      return HashUtil::FnvHash64to32(StringValue::CharSlotToPtr(v, type), type.len, seed);
+      return HashUtil::FnvHash64to32(v, type.len, seed);
     case TYPE_DECIMAL: return HashUtil::FnvHash64to32(v, type.GetByteSize(), seed);
     default: DCHECK(false); return 0;
   }
@@ -284,7 +286,7 @@ void RawValue::PrintValue(
       *stream << *reinterpret_cast<const TimestampValue*>(value);
       break;
     case TYPE_CHAR:
-      stream->write(StringValue::CharSlotToPtr(value, type), type.len);
+      stream->write(reinterpret_cast<const char*>(value), type.len);
       break;
     case TYPE_DECIMAL:
       switch (type.GetByteSize()) {

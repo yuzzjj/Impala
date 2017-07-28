@@ -34,6 +34,7 @@ import org.apache.impala.util.AvroSchemaConverter;
 import org.apache.impala.util.AvroSchemaParser;
 import org.apache.impala.util.AvroSchemaUtils;
 import org.apache.impala.util.KuduUtil;
+import org.apache.impala.util.MetaStoreUtil;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -48,8 +49,7 @@ public class CreateTableStmt extends StatementBase {
 
   @VisibleForTesting
   final static String KUDU_STORAGE_HANDLER_ERROR_MESSAGE = "Kudu tables must be"
-      + " specified using 'STORED AS KUDU' without using the storage handler table"
-      + " property.";
+      + " specified using 'STORED AS KUDU'.";
 
   // Table parameters specified in a CREATE TABLE statement
   private final TableDef tableDef_;
@@ -91,6 +91,7 @@ public class CreateTableStmt extends StatementBase {
   public List<KuduPartitionParam> getKuduPartitionParams() {
     return tableDef_.getKuduPartitionParams();
   }
+  public List<String> getSortColumns() { return tableDef_.getSortColumns(); }
   public String getComment() { return tableDef_.getComment(); }
   Map<String, String> getTblProperties() { return tableDef_.getTblProperties(); }
   private HdfsCachingOp getCachingOp() { return tableDef_.getCachingOp(); }
@@ -144,6 +145,7 @@ public class CreateTableStmt extends StatementBase {
     if (getRowFormat() != null) params.setRow_format(getRowFormat().toThrift());
     params.setFile_format(getFileFormat());
     params.setIf_not_exists(getIfNotExists());
+    params.setSort_columns(getSortColumns());
     params.setTable_properties(getTblProperties());
     params.setSerde_properties(getSerdeProperties());
     for (KuduPartitionParam d: getKuduPartitionParams()) {
@@ -209,8 +211,27 @@ public class CreateTableStmt extends StatementBase {
    * Kudu tables.
    */
   private void analyzeKuduTableProperties(Analyzer analyzer) throws AnalysisException {
-    if (getTblProperties().containsKey(KuduTable.KEY_STORAGE_HANDLER)) {
-      throw new AnalysisException(KUDU_STORAGE_HANDLER_ERROR_MESSAGE);
+    if (analyzer.getAuthzConfig().isEnabled()) {
+      // Today there is no comprehensive way of enforcing a Sentry authorization policy
+      // against tables stored in Kudu. This is why only users with ALL privileges on
+      // SERVER may create external Kudu tables or set the master addresses.
+      // See IMPALA-4000 for details.
+      boolean isExternal = tableDef_.isExternal() ||
+          MetaStoreUtil.findTblPropKeyCaseInsensitive(
+              getTblProperties(), "EXTERNAL") != null;
+      if (getTblProperties().containsKey(KuduTable.KEY_MASTER_HOSTS) || isExternal) {
+        String authzServer = analyzer.getAuthzConfig().getServerName();
+        Preconditions.checkNotNull(authzServer);
+        analyzer.registerPrivReq(new PrivilegeRequestBuilder().onServer(
+            authzServer).all().toRequest());
+      }
+    }
+
+    // Only the Kudu storage handler may be specified for Kudu tables.
+    String handler = getTblProperties().get(KuduTable.KEY_STORAGE_HANDLER);
+    if (handler != null && !handler.equals(KuduTable.KUDU_STORAGE_HANDLER)) {
+      throw new AnalysisException("Invalid storage handler specified for Kudu table: " +
+          handler);
     }
     getTblProperties().put(KuduTable.KEY_STORAGE_HANDLER, KuduTable.KUDU_STORAGE_HANDLER);
 
@@ -226,8 +247,7 @@ public class CreateTableStmt extends StatementBase {
     }
 
     // TODO: Find out what is creating a directory in HDFS and stop doing that. Kudu
-    //       tables shouldn't have HDFS dirs.
-    //       https://issues.cloudera.org/browse/IMPALA-3570
+    //       tables shouldn't have HDFS dirs: IMPALA-3570
     AnalysisUtils.throwIfNotNull(getCachingOp(),
         "A Kudu table cannot be cached in HDFS.");
     AnalysisUtils.throwIfNotNull(getLocation(), "LOCATION cannot be specified for a " +
@@ -241,15 +261,6 @@ public class CreateTableStmt extends StatementBase {
    */
   private void analyzeExternalKuduTableParams(Analyzer analyzer)
       throws AnalysisException {
-    if (analyzer.getAuthzConfig().isEnabled()) {
-      // Today there is no comprehensive way of enforcing a Sentry authorization policy
-      // against tables stored in Kudu. This is why only users with ALL privileges on
-      // SERVER may create external Kudu tables. See IMPALA-4000 for details.
-      String authzServer = analyzer.getAuthzConfig().getServerName();
-      Preconditions.checkNotNull(authzServer);
-      analyzer.registerPrivReq(new PrivilegeRequestBuilder().onServer(
-          authzServer).all().toRequest());
-    }
     AnalysisUtils.throwIfNull(getTblProperties().get(KuduTable.KEY_TABLE_NAME),
         String.format("Table property %s must be specified when creating " +
             "an external Kudu table.", KuduTable.KEY_TABLE_NAME));
@@ -273,6 +284,7 @@ public class CreateTableStmt extends StatementBase {
   private void analyzeManagedKuduTableParams(Analyzer analyzer) throws AnalysisException {
     // If no Kudu table name is specified in tblproperties, generate one using the
     // current database as a prefix to avoid conflicts in Kudu.
+    // TODO: Disallow setting this manually for managed tables (IMPALA-5654).
     if (!getTblProperties().containsKey(KuduTable.KEY_TABLE_NAME)) {
       getTblProperties().put(KuduTable.KEY_TABLE_NAME,
           KuduUtil.getDefaultCreateKuduTableName(getDb(), getTbl()));

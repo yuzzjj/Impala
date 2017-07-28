@@ -53,6 +53,29 @@ under the License.
     <p outputclass="toc inpage"/>
   </conbody>
 
+  <concept rev="2.9.0" id="incompatible_changes_29x">
+
+    <title>Incompatible Changes Introduced in Impala 2.9.x</title>
+
+    <conbody>
+
+      <p>
+        For the full list of issues closed in this release, including any that introduce
+        behavior changes or incompatibilities, see the
+        <xref keyref="changelog_29">changelog for <keyword keyref="impala29"/></xref>.
+      </p>
+
+<!-- Prose explanations of specific incompatible changes - TBD.
+      <ul>
+        <li>
+        </li>
+      </ul>
+-->
+
+    </conbody>
+
+  </concept>
+
   <concept rev="2.8.0" id="incompatible_changes_28x">
 
     <title>Incompatible Changes Introduced in Impala 2.8.x</title>
@@ -129,9 +152,21 @@ under the License.
             The replication factor for Kudu tables must be an odd number.
           </p>
         </li>
+        <li>
+          <p rev="IMPALA-4432">
+            A UDF compiled into an LLVM IR bitcode module (<codeph>.bc</codeph>) might
+            encounter a runtime error when native code generation is turned off by
+            setting the query option <codeph>DISABLE_CODEGEN=1</codeph>.
+            This issue also applies when running a built-in or native UDF with
+            more than 20 arguments.
+            See <xref keyref="IMPALA-4432">IMPALA-4432</xref> for details.
+            As a workaround, either turn native code generation back on with the query option
+            <codeph>DISABLE_CODEGEN=0</codeph>, or use the regular UDF compilation path
+            that does not produce an IR module.
+          </p>
+        </li>
       </ul>
     </conbody>
-
   </concept>
 
   <concept rev="2.7.0" id="incompatible_changes_27x">

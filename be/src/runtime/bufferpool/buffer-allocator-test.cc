@@ -117,6 +117,9 @@ TEST_F(BufferAllocatorTest, FreeListSizes) {
       // The low water mark will be the current size, so half the buffers should be freed.
       EXPECT_EQ(prev_size == 1 ? 0 : prev_size - prev_size / 2, new_size);
     }
+    // Check that the allocator reports the correct numbers.
+    EXPECT_EQ(new_size, allocator.GetNumFreeBuffers());
+    EXPECT_EQ(new_size * TEST_BUFFER_LEN, allocator.GetFreeBufferBytes());
     ++maintenance_calls;
   }
 
@@ -182,7 +185,6 @@ int main(int argc, char** argv) {
   int result = 0;
   for (bool mmap : {false, true}) {
     for (bool madvise : {false, true}) {
-      if (madvise && !mmap) continue; // Not an interesting combination.
       std::cerr << "+==================================================" << std::endl
                 << "| Running tests with mmap=" << mmap << " madvise=" << madvise
                 << std::endl

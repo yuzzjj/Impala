@@ -18,34 +18,26 @@
 #ifndef IMPALA_EXEC_PARQUET_COLUMN_STATS_INLINE_H
 #define IMPALA_EXEC_PARQUET_COLUMN_STATS_INLINE_H
 
+#include "exec/parquet-common.h"
 #include "parquet-column-stats.h"
+#include "runtime/string-value.inline.h"
 
 namespace impala {
 
-template <typename T>
-inline bool ColumnStats<T>::ReadFromThrift(const parquet::Statistics& thrift_stats,
-    const StatsField& stats_field, void* slot) {
-  T* out = reinterpret_cast<T*>(slot);
-  switch (stats_field) {
-    case StatsField::MIN:
-      return DecodeValueFromThrift(thrift_stats.min, out);
-    case StatsField::MAX:
-      return DecodeValueFromThrift(thrift_stats.max, out);
-    default:
-      DCHECK(false) << "Unsupported statistics field requested";
-      return false;
-  }
+inline void ColumnStatsBase::Reset() {
+  has_min_max_values_ = false;
+  null_count_ = 0;
 }
 
 template <typename T>
-inline void ColumnStats<T>::Update(const T& v) {
-  if (!has_values_) {
-    has_values_ = true;
-    min_value_ = v;
-    max_value_ = v;
+inline void ColumnStats<T>::Update(const T& min_value, const T& max_value) {
+  if (!has_min_max_values_) {
+    has_min_max_values_ = true;
+    min_value_ = min_value;
+    max_value_ = max_value;
   } else {
-    min_value_ = std::min(min_value_, v);
-    max_value_ = std::max(max_value_, v);
+    min_value_ = std::min(min_value_, min_value);
+    max_value_ = std::max(max_value_, max_value);
   }
 }
 
@@ -53,53 +45,50 @@ template <typename T>
 inline void ColumnStats<T>::Merge(const ColumnStatsBase& other) {
   DCHECK(dynamic_cast<const ColumnStats<T>*>(&other));
   const ColumnStats<T>* cs = static_cast<const ColumnStats<T>*>(&other);
-  if (!cs->has_values_) return;
-  if (!has_values_) {
-    has_values_ = true;
-    min_value_ = cs->min_value_;
-    max_value_ = cs->max_value_;
-  } else {
-    min_value_ = std::min(min_value_, cs->min_value_);
-    max_value_ = std::max(max_value_, cs->max_value_);
-  }
+  if (cs->has_min_max_values_) Update(cs->min_value_, cs->max_value_);
+  IncrementNullCount(cs->null_count_);
 }
 
 template <typename T>
 inline int64_t ColumnStats<T>::BytesNeeded() const {
-  return BytesNeededInternal(min_value_) + BytesNeededInternal(max_value_);
+  return BytesNeeded(min_value_) + BytesNeeded(max_value_)
+      + ParquetPlainEncoder::ByteSize(null_count_);
 }
 
 template <typename T>
 inline void ColumnStats<T>::EncodeToThrift(parquet::Statistics* out) const {
-  DCHECK(has_values_);
-  std::string min_str;
-  EncodeValueToString(min_value_, &min_str);
-  out->__set_min(move(min_str));
-  std::string max_str;
-  EncodeValueToString(max_value_, &max_str);
-  out->__set_max(move(max_str));
+  if (has_min_max_values_) {
+    std::string min_str;
+    EncodePlainValue(min_value_, BytesNeeded(min_value_), &min_str);
+    out->__set_min_value(move(min_str));
+    std::string max_str;
+    EncodePlainValue(max_value_, BytesNeeded(max_value_), &max_str);
+    out->__set_max_value(move(max_str));
+  }
+  out->__set_null_count(null_count_);
 }
 
 template <typename T>
-inline void ColumnStats<T>::EncodeValueToString(const T& v, std::string* out) const {
-  int64_t bytes_needed = BytesNeededInternal(v);
+inline void ColumnStats<T>::EncodePlainValue(
+    const T& v, int64_t bytes_needed, std::string* out) {
+  DCHECK_GT(bytes_needed, 0);
   out->resize(bytes_needed);
-  int64_t bytes_written = ParquetPlainEncoder::Encode(
-      reinterpret_cast<uint8_t*>(&(*out)[0]), bytes_needed, v);
+  const int64_t bytes_written = ParquetPlainEncoder::Encode(
+      v, bytes_needed, reinterpret_cast<uint8_t*>(&(*out)[0]));
   DCHECK_EQ(bytes_needed, bytes_written);
 }
 
 template <typename T>
-inline bool ColumnStats<T>::DecodeValueFromThrift(const std::string& buffer, T* result) {
+inline bool ColumnStats<T>::DecodePlainValue(const std::string& buffer, void* slot) {
+  T* result = reinterpret_cast<T*>(slot);
   int size = buffer.size();
-  // The ParquetPlainEncoder interface expects mutable pointers.
-  uint8_t* data = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(&buffer[0]));
-  if (ParquetPlainEncoder::Decode(data, data + size, -1, result) == -1) return false;
+  const uint8_t* data = reinterpret_cast<const uint8_t*>(buffer.data());
+  if (ParquetPlainEncoder::Decode(data, data + size, size, result) == -1) return false;
   return true;
 }
 
 template <typename T>
-inline int64_t ColumnStats<T>::BytesNeededInternal(const T& v) const {
+inline int64_t ColumnStats<T>::BytesNeeded(const T& v) const {
   return plain_encoded_value_size_ < 0 ? ParquetPlainEncoder::ByteSize<T>(v) :
       plain_encoded_value_size_;
 }
@@ -107,46 +96,85 @@ inline int64_t ColumnStats<T>::BytesNeededInternal(const T& v) const {
 /// Plain encoding for Boolean values is not handled by the ParquetPlainEncoder and thus
 /// needs special handling here.
 template <>
-inline void ColumnStats<bool>::EncodeValueToString(const bool& v, std::string* out) const
-{
+inline void ColumnStats<bool>::EncodePlainValue(
+    const bool& v, int64_t bytes_needed, std::string* out) {
   char c = v;
   out->assign(1, c);
 }
 
 template <>
-inline bool ColumnStats<bool>::DecodeValueFromThrift(const std::string& buffer,
-    bool* result) {
+inline bool ColumnStats<bool>::DecodePlainValue(const std::string& buffer, void* slot) {
+  bool* result = reinterpret_cast<bool*>(slot);
   DCHECK(buffer.size() == 1);
   *result = (buffer[0] != 0);
   return true;
 }
 
 template <>
-inline int64_t ColumnStats<bool>::BytesNeededInternal(const bool& v) const {
+inline int64_t ColumnStats<bool>::BytesNeeded(const bool& v) const {
   return 1;
 }
 
-/// parquet-mr and subsequently Hive currently do not handle the following types
-/// correctly (PARQUET-251, PARQUET-686), so we disable support for them.
-/// The relevant Impala Jiras are for
-/// - StringValue    IMPALA-4817
-/// - TimestampValue IMPALA-4819
-/// - DecimalValue   IMPALA-4815
+/// Timestamp values need validation.
 template <>
-inline void ColumnStats<StringValue>::Update(const StringValue& v) {}
+inline bool ColumnStats<TimestampValue>::DecodePlainValue(
+    const std::string& buffer, void* slot) {
+  TimestampValue* result = reinterpret_cast<TimestampValue*>(slot);
+  int size = buffer.size();
+  const uint8_t* data = reinterpret_cast<const uint8_t*>(buffer.data());
+  if (ParquetPlainEncoder::Decode(data, data + size, size, result) == -1) return false;
+  // We don't need to convert the value here, since we don't support reading timestamp
+  // statistics written by Hive / old versions of parquet-mr. Should Hive add support for
+  // writing new statistics for the deprecated timestamp type, we will have to add support
+  // for conversion here.
+  return result->IsValidDate();
+}
+
+/// parquet::Statistics stores string values directly and does not use plain encoding.
+template <>
+inline void ColumnStats<StringValue>::EncodePlainValue(
+    const StringValue& v, int64_t bytes_needed, string* out) {
+  out->assign(v.ptr, v.len);
+}
 
 template <>
-inline void ColumnStats<TimestampValue>::Update(const TimestampValue& v) {}
+inline bool ColumnStats<StringValue>::DecodePlainValue(
+    const std::string& buffer, void* slot) {
+  StringValue* result = reinterpret_cast<StringValue*>(slot);
+  result->ptr = const_cast<char*>(buffer.data());
+  result->len = buffer.size();
+  return true;
+}
 
 template <>
-inline void ColumnStats<Decimal4Value>::Update(const Decimal4Value& v) {}
+inline void ColumnStats<StringValue>::Update(
+    const StringValue& min_value, const StringValue& max_value) {
+  if (!has_min_max_values_) {
+    has_min_max_values_ = true;
+    min_value_ = min_value;
+    min_buffer_.Clear();
+    max_value_ = max_value;
+    max_buffer_.Clear();
+  } else {
+    if (min_value < min_value_) {
+      min_value_ = min_value;
+      min_buffer_.Clear();
+    }
+    if (max_value > max_value_) {
+      max_value_ = max_value;
+      max_buffer_.Clear();
+    }
+  }
+}
 
+// StringValues need to be copied at the end of processing a row batch, since the batch
+// memory will be released.
 template <>
-inline void ColumnStats<Decimal8Value>::Update(const Decimal8Value& v) {}
-
-template <>
-inline void ColumnStats<Decimal16Value>::Update(const Decimal16Value& v) {}
-
+inline Status ColumnStats<StringValue>::MaterializeStringValuesToInternalBuffers() {
+  if (min_buffer_.IsEmpty()) RETURN_IF_ERROR(CopyToBuffer(&min_buffer_, &min_value_));
+  if (max_buffer_.IsEmpty()) RETURN_IF_ERROR(CopyToBuffer(&max_buffer_, &max_value_));
+  return Status::OK();
+}
 
 } // end ns impala
 #endif

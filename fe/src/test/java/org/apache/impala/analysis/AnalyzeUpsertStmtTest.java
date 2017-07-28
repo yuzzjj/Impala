@@ -63,9 +63,6 @@ public class AnalyzeUpsertStmtTest extends AnalyzerTest {
     // Hint
     AnalyzesOk("upsert into table functional_kudu.testtbl [clustered] select * from " +
         "functional_kudu.testtbl");
-    // Incorrect hint, results in warning
-    AnalyzesOk("upsert into table functional_kudu.testtbl [badhint] select * from " +
-        "functional_kudu.testtbl", "INSERT hint not recognized: badhint");
 
     // Key columns missing from permutation
     AnalysisError("upsert into functional_kudu.testtbl(zip) values(1)",

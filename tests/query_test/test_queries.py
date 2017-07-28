@@ -19,6 +19,7 @@
 
 import copy
 import pytest
+import re
 
 from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.test_dimensions import create_uncompressed_text_dimension
@@ -50,11 +51,11 @@ class TestQueries(ImpalaTestSuite):
     return 'functional-query'
 
   def test_analytic_fns(self, vector):
-    # TODO: Enable some of these tests for Avro/Kudu if possible
-    # Don't attempt to evaluate timestamp expressions with Avro/Kudu tables which don't
-    # support a timestamp type yet
+    # TODO: Enable some of these tests for Avro if possible
+    # Don't attempt to evaluate timestamp expressions with Avro tables which don't
+    # support a timestamp type
     table_format = vector.get_value('table_format')
-    if table_format.file_format in ['avro', 'kudu']:
+    if table_format.file_format == 'avro':
       pytest.xfail("%s doesn't support TIMESTAMP" % (table_format.file_format))
     if table_format.file_format == 'hbase':
       pytest.xfail("A lot of queries check for NULLs, which hbase does not recognize")
@@ -108,12 +109,6 @@ class TestQueries(ImpalaTestSuite):
 
   def test_subquery(self, vector):
     self.run_test_case('QueryTest/subquery', vector)
-
-  def test_subplans(self, vector):
-    pytest.xfail("Disabled due to missing nested types functionality.")
-    if vector.get_value('table_format').file_format != 'parquet':
-      pytest.xfail("Nested TPCH only available in parquet.")
-    self.run_test_case('QueryTest/subplannull_data', vector)
 
   def test_empty(self, vector):
     self.run_test_case('QueryTest/empty', vector)
@@ -223,3 +218,37 @@ class TestHdfsQueries(TestQueries):
 
   def test_file_partitions(self, vector):
     self.run_test_case('QueryTest/hdfs-partitions', vector)
+
+class TestTopNReclaimQuery(ImpalaTestSuite):
+  """Test class to validate that TopN periodically reclaims tuple pool memory
+   and runs with a lower memory footprint."""
+  QUERY = "select * from tpch.lineitem order by l_orderkey desc limit 10;"
+
+  # Mem limit empirically selected so that the query fails if tuple pool reclamation
+  # is not implemented for TopN
+  MEM_LIMIT = "50m"
+
+  @classmethod
+  def get_workload(self):
+    return 'tpch'
+
+  @classmethod
+  def add_test_dimensions(cls):
+    super(TestTopNReclaimQuery, cls).add_test_dimensions()
+    # The tpch tests take a long time to execute so restrict the combinations they
+    # execute over.
+    cls.ImpalaTestMatrix.add_dimension(
+      create_uncompressed_text_dimension(cls.get_workload()))
+
+  def test_top_n_reclaim(self, vector):
+    exec_options = vector.get_value('exec_option')
+    exec_options['mem_limit'] = self.MEM_LIMIT
+    result = self.execute_query(self.QUERY, exec_options)
+    runtime_profile = str(result.runtime_profile)
+    num_of_times_tuple_pool_reclaimed = re.findall(
+      'TuplePoolReclamations: ([0-9]*)', runtime_profile)
+    # Confirm newly added counter is visible
+    assert len(num_of_times_tuple_pool_reclaimed) > 0
+    # Tuple pool is expected to be reclaimed for this query
+    for n in num_of_times_tuple_pool_reclaimed:
+      assert int(n) > 0

@@ -144,15 +144,16 @@ class TestAdmissionController(TestAdmissionControllerBase, HS2TestSuite):
       assert re.search(expected_error_re, str(e))
 
   def __check_query_options(self, profile, expected_query_options):
-    """Validate that the per-pool query options were set on the specified profile.
-    expected_query_options is a list of "KEY=VALUE" strings, e.g. ["MEM_LIMIT=1", ...]"""
+    """Validate that the expected per-pool query options were set on the specified
+    profile. expected_query_options is a list of "KEY=VALUE" strings, e.g.
+    ["MEM_LIMIT=1", ...]"""
     confs = []
     for line in profile.split("\n"):
       if PROFILE_QUERY_OPTIONS_KEY in line:
         rhs = re.split(": ", line)[1]
         confs = re.split(",", rhs)
         break
-    assert len(confs) == len(expected_query_options)
+    assert len(confs) >= len(expected_query_options)
     confs = map(str.lower, confs)
     for expected in expected_query_options:
       assert expected.lower() in confs,\
@@ -314,6 +315,22 @@ class TestAdmissionController(TestAdmissionControllerBase, HS2TestSuite):
       ex = self.execute_query_expect_failure(self.client, query)
       assert re.search("Rejected query from pool default-pool : request memory needed "
           ".* is greater than pool max mem resources 10.00 MB", str(ex))
+
+  # Process mem_limit used in test_mem_limit_upper_bound
+  PROC_MEM_TEST_LIMIT = 1024 * 1024 * 1024
+
+  @pytest.mark.execute_serially
+  @CustomClusterTestSuite.with_args(
+      impalad_args=impalad_admission_ctrl_flags(1, 1, 10 * PROC_MEM_TEST_LIMIT,
+          PROC_MEM_TEST_LIMIT))
+  def test_mem_limit_upper_bound(self, vector):
+    """ Test to ensure that a query is admitted if the requested memory is equal to the
+    process mem limit"""
+    query = "select * from functional.alltypesagg limit 1"
+    exec_options = vector.get_value('exec_option')
+    # Setting requested memory equal to process memory limit
+    exec_options['mem_limit'] = self.PROC_MEM_TEST_LIMIT
+    self.execute_query_expect_success(self.client, query, exec_options)
 
 class TestAdmissionControllerStress(TestAdmissionControllerBase):
   """Submits a number of queries (parameterized) with some delay between submissions

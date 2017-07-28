@@ -22,15 +22,17 @@ import re
 import time
 from subprocess import check_call
 
+from tests.common.environ import specific_build_type_timeout
 from tests.common.impala_cluster import ImpalaCluster
 from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.common.skip import SkipIfS3, SkipIfIsilon, SkipIfLocal
+from tests.common.skip import SkipIfS3, SkipIfADLS, SkipIfIsilon, SkipIfLocal
 from tests.common.test_dimensions import create_single_exec_option_dimension
 from tests.util.filesystem_utils import get_fs_path
 from tests.util.shell_util import exec_process
 
 # End to end test that hdfs caching is working.
 @SkipIfS3.caching # S3: missing coverage: verify SET CACHED gives error
+@SkipIfADLS.caching
 @SkipIfIsilon.caching
 @SkipIfLocal.caching
 class TestHdfsCaching(ImpalaTestSuite):
@@ -106,6 +108,7 @@ class TestHdfsCaching(ImpalaTestSuite):
 # run as a part of exhaustive tests which require the workload to be 'functional-query'.
 # TODO: Move this to TestHdfsCaching once we make exhaustive tests run for other workloads
 @SkipIfS3.caching
+@SkipIfADLS.caching
 @SkipIfIsilon.caching
 @SkipIfLocal.caching
 class TestHdfsCachingFallbackPath(ImpalaTestSuite):
@@ -114,6 +117,7 @@ class TestHdfsCachingFallbackPath(ImpalaTestSuite):
     return 'functional-query'
 
   @SkipIfS3.hdfs_encryption
+  @SkipIfADLS.hdfs_encryption
   @SkipIfIsilon.hdfs_encryption
   @SkipIfLocal.hdfs_encryption
   def test_hdfs_caching_fallback_path(self, vector, unique_database, testid_checksum):
@@ -164,6 +168,7 @@ class TestHdfsCachingFallbackPath(ImpalaTestSuite):
 
 
 @SkipIfS3.caching
+@SkipIfADLS.caching
 @SkipIfIsilon.caching
 @SkipIfLocal.caching
 class TestHdfsCachingDdl(ImpalaTestSuite):
@@ -308,7 +313,8 @@ def get_num_cache_requests():
     assert rc == 0, 'Error executing hdfs cacheadmin: %s %s' % (stdout, stderr)
     return len(stdout.split('\n'))
 
-  wait_time_in_sec = 5
+  # IMPALA-3040: This can take time, especially under slow builds like ASAN.
+  wait_time_in_sec = specific_build_type_timeout(5, slow_build_timeout=20)
   num_stabilization_attempts = 0
   max_num_stabilization_attempts = 10
   new_requests = None

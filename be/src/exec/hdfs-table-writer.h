@@ -19,15 +19,21 @@
 #ifndef IMPALA_EXEC_HDFS_TABLE_WRITER_H
 #define IMPALA_EXEC_HDFS_TABLE_WRITER_H
 
+#include <vector>
 #include <hdfs.h>
-#include <boost/scoped_ptr.hpp>
-#include <boost/unordered_map.hpp>
 
-#include "runtime/descriptors.h"
-#include "exec/hdfs-table-sink.h"
-#include "util/hdfs-util.h"
+#include "common/status.h"
+#include "gen-cpp/ImpalaInternalService_types.h"
 
 namespace impala {
+
+class HdfsPartitionDescriptor;
+class HdfsTableDescriptor;
+class HdfsTableSink;
+class OutputPartition;
+class RowBatch;
+class RuntimeState;
+class ScalarExprEvaluator;
 
 /// Pure virtual class for writing to hdfs table partition files.
 /// Subclasses implement the code needed to write to a specific file type.
@@ -40,12 +46,10 @@ class HdfsTableWriter {
   /// output_partition -- Information on the output partition file.
   /// partition -- the descriptor for the partition being written
   /// table_desc -- the descriptor for the table being written.
-  /// output_exprs -- expressions which generate the output values.
   HdfsTableWriter(HdfsTableSink* parent,
                   RuntimeState* state, OutputPartition* output_partition,
                   const HdfsPartitionDescriptor* partition_desc,
-                  const HdfsTableDescriptor* table_desc,
-                  const std::vector<ExprContext*>& output_expr_ctxs);
+                  const HdfsTableDescriptor* table_desc);
 
   virtual ~HdfsTableWriter() { }
 
@@ -60,10 +64,10 @@ class HdfsTableWriter {
   /// text), 1) is called once and 2-4) is called repeatedly for each file.
 
   /// Do initialization of writer.
-  virtual Status Init() = 0;
+  virtual Status Init() WARN_UNUSED_RESULT = 0;
 
   /// Called when a new file is started.
-  virtual Status InitNewFile() = 0;
+  virtual Status InitNewFile() WARN_UNUSED_RESULT = 0;
 
   /// Appends rows of 'batch' to the partition that are selected via 'row_group_indices',
   /// and if the latter is empty, appends every row.
@@ -71,13 +75,14 @@ class HdfsTableWriter {
   /// *new_file == true. A new file will be opened and the same row batch will be passed
   /// again. The writer must track how much of the batch it had already processed asking
   /// for a new file. Otherwise the writer will return with *newfile == false.
-  virtual Status AppendRows(
-      RowBatch* batch, const std::vector<int32_t>& row_group_indices, bool* new_file) = 0;
+  virtual Status AppendRows(RowBatch* batch,
+      const std::vector<int32_t>& row_group_indices,
+      bool* new_file) WARN_UNUSED_RESULT = 0;
 
   /// Finalize this partition. The writer needs to finish processing
   /// all data have written out after the return from this call.
   /// This is called once for each call to InitNewFile()
-  virtual Status Finalize() = 0;
+  virtual Status Finalize() WARN_UNUSED_RESULT = 0;
 
   /// Called once when this writer should cleanup any resources.
   virtual void Close() = 0;
@@ -123,8 +128,9 @@ class HdfsTableWriter {
   /// Table descriptor of table to be written.
   const HdfsTableDescriptor* table_desc_;
 
-  /// Expressions that materialize output values.
-  std::vector<ExprContext*> output_expr_ctxs_;
+  /// Reference to the evaluators of expressions which generate the output value.
+  /// The evaluators are owned by sink which owns this table writer.
+  const std::vector<ScalarExprEvaluator*>& output_expr_evals_;
 
   /// Subclass should populate any file format specific stats.
   TInsertStats stats_;

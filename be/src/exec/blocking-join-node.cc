@@ -20,7 +20,8 @@
 #include <sstream>
 
 #include "exec/data-sink.h"
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
+#include "runtime/fragment-instance-state.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/row-batch.h"
 #include "runtime/runtime-state.h"
@@ -54,7 +55,7 @@ Status BlockingJoinNode::Init(const TPlanNode& tnode, RuntimeState* state) {
   RETURN_IF_ERROR(ExecNode::Init(tnode, state));
   DCHECK((join_op_ != TJoinOp::LEFT_SEMI_JOIN && join_op_ != TJoinOp::LEFT_ANTI_JOIN &&
       join_op_ != TJoinOp::RIGHT_SEMI_JOIN && join_op_ != TJoinOp::RIGHT_ANTI_JOIN &&
-      join_op_ != TJoinOp::NULL_AWARE_LEFT_ANTI_JOIN) || conjunct_ctxs_.size() == 0);
+      join_op_ != TJoinOp::NULL_AWARE_LEFT_ANTI_JOIN) || conjuncts_.size() == 0);
   runtime_profile_->AddLocalTimeCounter(
       bind<int64_t>(&BlockingJoinNode::LocalTimeCounterFn,
       runtime_profile_->total_time_counter(),
@@ -80,8 +81,8 @@ Status BlockingJoinNode::Prepare(RuntimeState* state) {
 
   // Validate the row desc layout is what we expect because the current join
   // implementation relies on it to enable some optimizations.
-  int num_left_tuples = child(0)->row_desc().tuple_descriptors().size();
-  int num_build_tuples = child(1)->row_desc().tuple_descriptors().size();
+  int num_left_tuples = child(0)->row_desc()->tuple_descriptors().size();
+  int num_build_tuples = child(1)->row_desc()->tuple_descriptors().size();
 
 #ifndef NDEBUG
   switch (join_op_) {
@@ -89,13 +90,13 @@ Status BlockingJoinNode::Prepare(RuntimeState* state) {
     case TJoinOp::LEFT_SEMI_JOIN:
     case TJoinOp::NULL_AWARE_LEFT_ANTI_JOIN: {
       // Only return the surviving probe-side tuples.
-      DCHECK(row_desc().Equals(child(0)->row_desc()));
+      DCHECK(row_desc()->Equals(*child(0)->row_desc()));
       break;
     }
     case TJoinOp::RIGHT_ANTI_JOIN:
     case TJoinOp::RIGHT_SEMI_JOIN: {
       // Only return the surviving build-side tuples.
-      DCHECK(row_desc().Equals(child(1)->row_desc()));
+      DCHECK(row_desc()->Equals(*child(1)->row_desc()));
       break;
     }
     default: {
@@ -106,12 +107,12 @@ Status BlockingJoinNode::Prepare(RuntimeState* state) {
       //   result[1] = build[0]
       //   result[2] = build[1]
       for (int i = 0; i < num_left_tuples; ++i) {
-        TupleDescriptor* desc = child(0)->row_desc().tuple_descriptors()[i];
-        DCHECK_EQ(i, row_desc().GetTupleIdx(desc->id()));
+        TupleDescriptor* desc = child(0)->row_desc()->tuple_descriptors()[i];
+        DCHECK_EQ(i, row_desc()->GetTupleIdx(desc->id()));
       }
       for (int i = 0; i < num_build_tuples; ++i) {
-        TupleDescriptor* desc = child(1)->row_desc().tuple_descriptors()[i];
-        DCHECK_EQ(num_left_tuples + i, row_desc().GetTupleIdx(desc->id()));
+        TupleDescriptor* desc = child(1)->row_desc()->tuple_descriptors()[i];
+        DCHECK_EQ(num_left_tuples + i, row_desc()->GetTupleIdx(desc->id()));
       }
       break;
     }
@@ -143,32 +144,32 @@ void BlockingJoinNode::Close(RuntimeState* state) {
   ExecNode::Close(state);
 }
 
-void BlockingJoinNode::ProcessBuildInputAsync(RuntimeState* state, DataSink* build_sink,
-    Promise<Status>* status) {
-  Status s;
+void BlockingJoinNode::ProcessBuildInputAsync(
+    RuntimeState* state, DataSink* build_sink, Status* status) {
+  DCHECK(status != nullptr);
+  SCOPED_THREAD_COUNTER_MEASUREMENT(state->total_thread_statistics());
   {
-    SCOPED_THREAD_COUNTER_MEASUREMENT(state->total_thread_statistics());
-    if  (build_sink == NULL){
-      s = ProcessBuildInput(state);
-    } else {
-      s = SendBuildInputToSink<true>(state, build_sink);
-    }
-    // IMPALA-1863: If the build-side thread failed, then we need to close the right
-    // (build-side) child to avoid a potential deadlock between fragment instances.  This
-    // is safe to do because while the build may have partially completed, it will not be
-    // probed.  BlockJoinNode::Open() will return failure as soon as child(0)->Open()
-    // completes.
-    if (!s.ok()) child(1)->Close(state);
-    // Release the thread token as soon as possible (before the main thread joins
-    // on it).  This way, if we had a chain of 10 joins using 1 additional thread,
-    // we'd keep the additional thread busy the whole time.
-    state->resource_pool()->ReleaseThreadToken(false);
+    SCOPED_STOP_WATCH(&built_probe_overlap_stop_watch_);
+    *status = child(1)->Open(state);
   }
-  // Please keep this as the last line in this function to avoid use-after-free problem.
-  // Once 'status' is set, ProcessBuildInputAndProbe() will start running and 'states'
-  // may have been freed after this line once the query completes. IMPALA-4532.
-  // TODO: Make this less fragile.
-  status->Set(s);
+  if (status->ok()) *status = AcquireResourcesForBuild(state);
+  if (status->ok()) {
+    if (build_sink == nullptr){
+      *status = ProcessBuildInput(state);
+    } else {
+      *status = SendBuildInputToSink<true>(state, build_sink);
+    }
+  }
+  // IMPALA-1863: If the build-side thread failed, then we need to close the right
+  // (build-side) child to avoid a potential deadlock between fragment instances.  This
+  // is safe to do because while the build may have partially completed, it will not be
+  // probed. BlockingJoinNode::Open() will return failure as soon as child(0)->Open()
+  // completes.
+  if (CanCloseBuildEarly() || !status->ok()) child(1)->Close(state);
+  // Release the thread token as soon as possible (before the main thread joins
+  // on it).  This way, if we had a chain of 10 joins using 1 additional thread,
+  // we'd keep the additional thread busy the whole time.
+  state->resource_pool()->ReleaseThreadToken(false);
 }
 
 Status BlockingJoinNode::Open(RuntimeState* state) {
@@ -186,19 +187,22 @@ Status BlockingJoinNode::ProcessBuildInputAndOpenProbe(
   // Inside a subplan we expect Open() to be called a number of times proportional to the
   // input data of the SubplanNode, so we prefer doing processing the build input in the
   // main thread, assuming that thread creation is expensive relative to a single subplan
-  // iteration.
+  // iteration. TODO-MT: disable async build thread when mt_dop >= 1.
   //
-  // In this block, we also compute the 'overlap' time for the left and right child.  This
+  // In this block, we also compute the 'overlap' time for the left and right child. This
   // is the time (i.e. clock reads) when the right child stops overlapping with the left
   // child. For the single threaded case, the left and right child never overlap. For the
   // build side in a different thread, the overlap stops when the left child Open()
   // returns.
   if (!IsInSubplan() && state->resource_pool()->TryAcquireThreadToken()) {
-    Promise<Status> build_side_status;
+    Status build_side_status;
     runtime_profile()->AppendExecOption("Join Build-Side Prepared Asynchronously");
-    Thread build_thread(
-        node_name_, "build thread", bind(&BlockingJoinNode::ProcessBuildInputAsync, this,
-                                        state, build_sink, &build_side_status));
+    string thread_name = Substitute("join-build-thread (finst:$0, plan-node-id:$1)",
+        PrintId(state->fragment_instance_id()), id());
+    Thread build_thread(FragmentInstanceState::FINST_THREAD_GROUP_NAME, thread_name,
+        [this, state, build_sink, status=&build_side_status]() {
+          ProcessBuildInputAsync(state, build_sink, status);
+        });
     // Open the left child so that it may perform any initialisation in parallel.
     // Don't exit even if we see an error, we still need to wait for the build thread
     // to finish.
@@ -209,7 +213,8 @@ Status BlockingJoinNode::ProcessBuildInputAndOpenProbe(
 
     // Blocks until ProcessBuildInput has returned, after which the build side structures
     // are fully constructed.
-    RETURN_IF_ERROR(build_side_status.Get());
+    build_thread.Join();
+    RETURN_IF_ERROR(build_side_status);
     RETURN_IF_ERROR(open_status);
   } else if (IsInSubplan()) {
     // When inside a subplan, open the first child before doing the build such that
@@ -219,6 +224,8 @@ Status BlockingJoinNode::ProcessBuildInputAndOpenProbe(
     // TODO: Remove this special-case behavior for subplans once we have proper
     // projection. See UnnestNode for details on the current projection implementation.
     RETURN_IF_ERROR(child(0)->Open(state));
+    RETURN_IF_ERROR(child(1)->Open(state));
+    RETURN_IF_ERROR(AcquireResourcesForBuild(state));
     if (build_sink == NULL) {
       RETURN_IF_ERROR(ProcessBuildInput(state));
     } else {
@@ -227,11 +234,16 @@ Status BlockingJoinNode::ProcessBuildInputAndOpenProbe(
   } else {
     // The left/right child never overlap. The overlap stops here.
     built_probe_overlap_stop_watch_.SetTimeCeiling();
+    // Open the build side before acquiring our own resources so that the build side
+    // can release any resources only used during its Open().
+    RETURN_IF_ERROR(child(1)->Open(state));
+    RETURN_IF_ERROR(AcquireResourcesForBuild(state));
     if (build_sink == NULL) {
       RETURN_IF_ERROR(ProcessBuildInput(state));
     } else {
       RETURN_IF_ERROR(SendBuildInputToSink<false>(state, build_sink));
     }
+    if (CanCloseBuildEarly()) child(1)->Close(state);
     RETURN_IF_ERROR(child(0)->Open(state));
   }
   return Status::OK();
@@ -260,11 +272,6 @@ Status BlockingJoinNode::GetFirstProbeRow(RuntimeState* state) {
 template <bool ASYNC_BUILD>
 Status BlockingJoinNode::SendBuildInputToSink(RuntimeState* state,
     DataSink* build_sink) {
-  {
-    CONDITIONAL_SCOPED_STOP_WATCH(&built_probe_overlap_stop_watch_, ASYNC_BUILD);
-    RETURN_IF_ERROR(child(1)->Open(state));
-  }
-
   {
     SCOPED_TIMER(build_timer_);
     RETURN_IF_ERROR(build_sink->Open(state));
@@ -309,14 +316,14 @@ void BlockingJoinNode::DebugString(int indentation_level, stringstream* out) con
 string BlockingJoinNode::GetLeftChildRowString(TupleRow* row) {
   stringstream out;
   out << "[";
-  int num_probe_tuple_rows = child(0)->row_desc().tuple_descriptors().size();
-  for (int i = 0; i < row_desc().tuple_descriptors().size(); ++i) {
+  int num_probe_tuple_rows = child(0)->row_desc()->tuple_descriptors().size();
+  for (int i = 0; i < row_desc()->tuple_descriptors().size(); ++i) {
     if (i != 0) out << " ";
     if (i >= num_probe_tuple_rows) {
       // Build row is not yet populated, print NULL
-      out << PrintTuple(NULL, *row_desc().tuple_descriptors()[i]);
+      out << PrintTuple(NULL, *row_desc()->tuple_descriptors()[i]);
     } else {
-      out << PrintTuple(row->GetTuple(i), *row_desc().tuple_descriptors()[i]);
+      out << PrintTuple(row->GetTuple(i), *row_desc()->tuple_descriptors()[i]);
     }
   }
   out << "]";

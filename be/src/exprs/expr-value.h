@@ -26,7 +26,7 @@
 
 namespace impala {
 
-/// The materialized value returned by ExprContext::GetValue().
+/// The materialized value returned by ScalarExprEvaluator::GetValue().
 struct ExprValue {
   bool bool_val;
   int8_t tinyint_val;
@@ -65,12 +65,11 @@ struct ExprValue {
   ExprValue(int64_t v) : bigint_val(v) {}
   ExprValue(float v) : float_val(v) {}
   ExprValue(double v) : double_val(v) {}
-  ExprValue(int64_t t, int64_t n) : timestamp_val(t, n) {}
 
   void Init(const std::string& str) {
     string_data = str;
-    string_val.ptr = &string_data[0];
     string_val.len = string_data.size();
+    string_val.ptr = string_val.len > 0 ? &string_data[0] : nullptr;
   }
 
   /// Sets the value for type to '0' and returns a pointer to the data

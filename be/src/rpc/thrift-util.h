@@ -26,6 +26,7 @@
 #include <thrift/TApplicationException.h>
 #include <thrift/protocol/TDebugProtocol.h>
 #include <thrift/transport/TBufferTransports.h>
+#include <thrift/transport/TTransportException.h>
 
 #include "common/status.h"
 
@@ -125,7 +126,7 @@ Status DeserializeThriftMsg(const uint8_t* buf, uint32_t* len, bool compact,
   } catch (std::exception& e) {
     std::stringstream msg;
     msg << "couldn't deserialize thrift msg:\n" << e.what();
-    return Status(msg.str());
+    return Status::Expected(msg.str());
   } catch (...) {
     /// TODO: Find the right exception for 0 bytes
     return Status("Unknown exception");
@@ -154,8 +155,11 @@ std::ostream& operator<<(std::ostream& out, const TColumnValue& colval);
 /// string representation
 bool TNetworkAddressComparator(const TNetworkAddress& a, const TNetworkAddress& b);
 
-/// Returns true if the TException corresponds to a TCP socket recv timeout.
-bool IsRecvTimeoutTException(const apache::thrift::TException& e);
+/// Returns true if the TTransportException corresponds to a TCP socket recv timeout.
+bool IsRecvTimeoutTException(const apache::thrift::transport::TTransportException& e);
+
+/// Returns true if the exception indicates the other end of the TCP socket was closed.
+bool IsConnResetTException(const apache::thrift::transport::TTransportException& e);
 
 }
 

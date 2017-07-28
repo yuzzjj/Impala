@@ -34,6 +34,7 @@
 #include "runtime/bufferpool/buffer-pool.h"
 #include "runtime/bufferpool/reservation-tracker.h"
 #include "runtime/test-env.h"
+#include "runtime/query-state.h"
 #include "service/fe-support.h"
 #include "testutil/cpu-util.h"
 #include "testutil/death-test-util.h"
@@ -265,7 +266,7 @@ class BufferPoolTest : public ::testing::Test {
   void WriteOrVerifyData(const T& object, int val, bool write) {
     // Only write sentinel values to start and end of buffer to make writing and
     // verification cheap.
-    MemRange mem = object.mem_range();
+    MemRange mem = GetMemRange(object);
     uint64_t* start_word = reinterpret_cast<uint64_t*>(mem.data());
     uint64_t* end_word =
         reinterpret_cast<uint64_t*>(&mem.data()[mem.len() - sizeof(uint64_t)]);
@@ -278,9 +279,12 @@ class BufferPoolTest : public ::testing::Test {
     }
   }
 
-  /// Return the total number of bytes allocated from the system currently.
-  int64_t SystemBytesAllocated(BufferPool* pool) {
-    return pool->allocator()->GetSystemBytesAllocated();
+  MemRange GetMemRange(const BufferHandle& buffer) { return buffer.mem_range(); }
+
+  MemRange GetMemRange(const PageHandle& page) {
+    const BufferHandle* buffer;
+    EXPECT_OK(page.GetBuffer(&buffer));
+    return buffer->mem_range();
   }
 
   /// Set the maximum number of scavenge attempts that the pool's allocator wil do.
@@ -326,6 +330,11 @@ class BufferPoolTest : public ::testing::Test {
     EXPECT_GT(path.size(), 0);
     EXPECT_EQ(0, truncate(path.c_str(), 0));
     LOG(INFO) << "Injected fault by truncating file " << path;
+  }
+
+  // Return whether a pin is in flight for the page.
+  static bool PinInFlight(PageHandle* page) {
+    return page->page_->pin_in_flight;
   }
 
   // Return the path of the temporary file backing the page.
@@ -504,11 +513,11 @@ TEST_F(BufferPoolTest, PageCreation) {
     ASSERT_OK(pool.CreatePage(&client, page_len, &handles[i]));
     ASSERT_TRUE(handles[i].is_open());
     ASSERT_TRUE(handles[i].is_pinned());
-    ASSERT_TRUE(handles[i].buffer_handle() != NULL);
-    ASSERT_TRUE(handles[i].data() != NULL);
-    ASSERT_EQ(handles[i].buffer_handle()->data(), handles[i].data());
+    const BufferHandle* buffer;
+    ASSERT_OK(handles[i].GetBuffer(&buffer));
+    ASSERT_TRUE(buffer->data() != NULL);
     ASSERT_EQ(handles[i].len(), page_len);
-    ASSERT_EQ(handles[i].buffer_handle()->len(), page_len);
+    ASSERT_EQ(buffer->len(), page_len);
     ASSERT_EQ(client.GetUsedReservation(), used_before + page_len);
   }
 
@@ -542,15 +551,22 @@ TEST_F(BufferPoolTest, BufferAllocation) {
   vector<BufferPool::BufferHandle> handles(num_buffers);
 
   // Create buffers of various valid sizes.
+  int64_t total_allocated = 0;
   for (int i = 0; i < num_buffers; ++i) {
     int size_multiple = 1 << i;
     int64_t buffer_len = TEST_BUFFER_LEN * size_multiple;
     int64_t used_before = client.GetUsedReservation();
     ASSERT_OK(pool.AllocateBuffer(&client, buffer_len, &handles[i]));
+    total_allocated += buffer_len;
     ASSERT_TRUE(handles[i].is_open());
     ASSERT_TRUE(handles[i].data() != NULL);
     ASSERT_EQ(handles[i].len(), buffer_len);
     ASSERT_EQ(client.GetUsedReservation(), used_before + buffer_len);
+
+    // Check that pool-wide values are updated correctly.
+    EXPECT_EQ(total_allocated, pool.GetSystemBytesAllocated());
+    EXPECT_EQ(0, pool.GetNumFreeBuffers());
+    EXPECT_EQ(0, pool.GetFreeBufferBytes());
   }
 
   // Close the handles and check memory consumption.
@@ -565,6 +581,52 @@ TEST_F(BufferPoolTest, BufferAllocation) {
 
   // All the reservations should be released at this point.
   ASSERT_EQ(global_reservations_.GetReservation(), 0);
+  // But freed memory is not released to the system immediately.
+  EXPECT_EQ(total_allocated, pool.GetSystemBytesAllocated());
+  EXPECT_EQ(num_buffers, pool.GetNumFreeBuffers());
+  EXPECT_EQ(total_allocated, pool.GetFreeBufferBytes());
+  global_reservations_.Close();
+}
+
+// Test that the buffer pool correctly reports the number of clean pages.
+TEST_F(BufferPoolTest, CleanPageStats) {
+  const int MAX_NUM_BUFFERS = 4;
+  const int64_t TOTAL_MEM = MAX_NUM_BUFFERS * TEST_BUFFER_LEN;
+  global_reservations_.InitRootTracker(NewProfile(), TOTAL_MEM);
+  BufferPool pool(TEST_BUFFER_LEN, TOTAL_MEM);
+
+  ClientHandle client;
+  ASSERT_OK(pool.RegisterClient("test client", NewFileGroup(), &global_reservations_,
+      nullptr, TOTAL_MEM, NewProfile(), &client));
+  ASSERT_TRUE(client.IncreaseReservation(TOTAL_MEM));
+
+  vector<PageHandle> pages;
+  CreatePages(&pool, &client, TEST_BUFFER_LEN, TOTAL_MEM, &pages);
+  WriteData(pages, 0);
+
+  // Pages don't start off clean.
+  EXPECT_EQ(0, pool.GetNumCleanPages());
+  EXPECT_EQ(0, pool.GetCleanPageBytes());
+
+  // Unpin pages and wait until they're written out and therefore clean.
+  UnpinAll(&pool, &client, &pages);
+  WaitForAllWrites(&client);
+  EXPECT_EQ(MAX_NUM_BUFFERS, pool.GetNumCleanPages());
+  EXPECT_EQ(TOTAL_MEM, pool.GetCleanPageBytes());
+
+  // Do an allocation to force eviction of one page.
+  ASSERT_OK(AllocateAndFree(&pool, &client, TEST_BUFFER_LEN));
+  EXPECT_EQ(MAX_NUM_BUFFERS - 1, pool.GetNumCleanPages());
+  EXPECT_EQ(TOTAL_MEM - TEST_BUFFER_LEN, pool.GetCleanPageBytes());
+
+  // Re-pin all the pages - none will be clean afterwards.
+  ASSERT_OK(PinAll(&pool, &client, &pages));
+  VerifyData(pages, 0);
+  EXPECT_EQ(0, pool.GetNumCleanPages());
+  EXPECT_EQ(0, pool.GetCleanPageBytes());
+
+  DestroyAll(&pool, &client, &pages);
+  pool.DeregisterClient(&client);
   global_reservations_.Close();
 }
 
@@ -622,14 +684,15 @@ TEST_F(BufferPoolTest, Pin) {
   BufferPool::PageHandle handle1, handle2;
 
   // Can pin two minimum sized pages.
-  ASSERT_OK(pool.CreatePage(&client, TEST_BUFFER_LEN, &handle1));
+  const BufferHandle* page_buffer;
+  ASSERT_OK(pool.CreatePage(&client, TEST_BUFFER_LEN, &handle1, &page_buffer));
   ASSERT_TRUE(handle1.is_open());
   ASSERT_TRUE(handle1.is_pinned());
-  ASSERT_TRUE(handle1.data() != NULL);
-  ASSERT_OK(pool.CreatePage(&client, TEST_BUFFER_LEN, &handle2));
+  ASSERT_TRUE(page_buffer->data() != NULL);
+  ASSERT_OK(pool.CreatePage(&client, TEST_BUFFER_LEN, &handle2, &page_buffer));
   ASSERT_TRUE(handle2.is_open());
   ASSERT_TRUE(handle2.is_pinned());
-  ASSERT_TRUE(handle2.data() != NULL);
+  ASSERT_TRUE(page_buffer->data() != NULL);
 
   pool.Unpin(&client, &handle2);
   ASSERT_FALSE(handle2.is_pinned());
@@ -645,15 +708,87 @@ TEST_F(BufferPoolTest, Pin) {
 
   // Can pin double-sized page only once.
   BufferPool::PageHandle double_handle;
-  ASSERT_OK(pool.CreatePage(&client, TEST_BUFFER_LEN * 2, &double_handle));
+  ASSERT_OK(pool.CreatePage(&client, TEST_BUFFER_LEN * 2, &double_handle, &page_buffer));
   ASSERT_TRUE(double_handle.is_open());
   ASSERT_TRUE(double_handle.is_pinned());
-  ASSERT_TRUE(double_handle.data() != NULL);
+  ASSERT_TRUE(page_buffer->data() != NULL);
 
   // Destroy the pages - test destroying both pinned and unpinned.
   pool.DestroyPage(&client, &handle1);
   pool.DestroyPage(&client, &handle2);
   pool.DestroyPage(&client, &double_handle);
+
+  pool.DeregisterClient(&client);
+}
+
+// Test the various state transitions possible with async Pin() calls.
+TEST_F(BufferPoolTest, AsyncPin) {
+  const int DATA_SEED = 1234;
+  // Set up pool with enough reservation to keep two buffers in memory.
+  const int64_t TOTAL_MEM = 2 * TEST_BUFFER_LEN;
+  BufferPool pool(TEST_BUFFER_LEN, TOTAL_MEM);
+  global_reservations_.InitRootTracker(NULL, TOTAL_MEM);
+  BufferPool::ClientHandle client;
+  ASSERT_OK(pool.RegisterClient("test client", NewFileGroup(), &global_reservations_,
+      NULL, TOTAL_MEM, NewProfile(), &client));
+  ASSERT_TRUE(client.IncreaseReservationToFit(TOTAL_MEM));
+
+  PageHandle handle;
+  const BufferHandle* buffer;
+  ASSERT_OK(pool.CreatePage(&client, TEST_BUFFER_LEN, &handle, &buffer));
+  WriteData(*buffer, DATA_SEED);
+  // Pin() on a pinned page just increments the pin count.
+  ASSERT_OK(pool.Pin(&client, &handle));
+  EXPECT_EQ(2, handle.pin_count());
+  EXPECT_FALSE(PinInFlight(&handle));
+
+  pool.Unpin(&client, &handle);
+  pool.Unpin(&client, &handle);
+  ASSERT_FALSE(handle.is_pinned());
+
+  // Calling Pin() then Pin() results in double-pinning.
+  ASSERT_OK(pool.Pin(&client, &handle));
+  ASSERT_OK(pool.Pin(&client, &handle));
+  EXPECT_EQ(2, handle.pin_count());
+  EXPECT_FALSE(PinInFlight(&handle));
+
+  pool.Unpin(&client, &handle);
+  pool.Unpin(&client, &handle);
+  ASSERT_FALSE(handle.is_pinned());
+
+  // Pin() on a page that isn't evicted pins it immediately.
+  ASSERT_OK(pool.Pin(&client, &handle));
+  EXPECT_EQ(1, handle.pin_count());
+  EXPECT_FALSE(PinInFlight(&handle));
+  VerifyData(handle, 1234);
+  pool.Unpin(&client, &handle);
+  ASSERT_FALSE(handle.is_pinned());
+
+  // Force eviction. Pin() on an evicted page starts the write asynchronously.
+  ASSERT_OK(AllocateAndFree(&pool, &client, TOTAL_MEM));
+  ASSERT_OK(pool.Pin(&client, &handle));
+  EXPECT_EQ(1, handle.pin_count());
+  EXPECT_TRUE(PinInFlight(&handle));
+  // Block on the pin and verify the buffer.
+  ASSERT_OK(handle.GetBuffer(&buffer));
+  EXPECT_FALSE(PinInFlight(&handle));
+  VerifyData(*buffer, 1234);
+
+  // Test that we can unpin while in flight and the data remains valid.
+  pool.Unpin(&client, &handle);
+  ASSERT_OK(AllocateAndFree(&pool, &client, TOTAL_MEM));
+  ASSERT_OK(pool.Pin(&client, &handle));
+  EXPECT_TRUE(PinInFlight(&handle));
+  pool.Unpin(&client, &handle);
+  ASSERT_OK(pool.Pin(&client, &handle));
+  ASSERT_OK(handle.GetBuffer(&buffer));
+  VerifyData(*buffer, 1234);
+
+  // Evict the page, then destroy while we're pinning it asynchronously.
+  pool.Unpin(&client, &handle);
+  ASSERT_OK(AllocateAndFree(&pool, &client, TOTAL_MEM));
+  ASSERT_OK(pool.Pin(&client, &handle));
+  pool.DestroyPage(&client, &handle);
 
   pool.DeregisterClient(&client);
 }
@@ -697,9 +832,10 @@ TEST_F(BufferPoolTest, ExtractBuffer) {
 
   // Test basic buffer extraction.
   for (int len = TEST_BUFFER_LEN; len <= 2 * TEST_BUFFER_LEN; len *= 2) {
-    ASSERT_OK(pool.CreatePage(&client, len, &page));
-    uint8_t* page_data = page.data();
-    pool.ExtractBuffer(&client, &page, &buffer);
+    const BufferHandle* page_buffer;
+    ASSERT_OK(pool.CreatePage(&client, len, &page, &page_buffer));
+    uint8_t* page_data = page_buffer->data();
+    ASSERT_OK(pool.ExtractBuffer(&client, &page, &buffer));
     ASSERT_FALSE(page.is_open());
     ASSERT_TRUE(buffer.is_open());
     ASSERT_EQ(len, buffer.len());
@@ -710,11 +846,12 @@ TEST_F(BufferPoolTest, ExtractBuffer) {
   }
 
   // Test that ExtractBuffer() accounts correctly for pin count > 1.
-  ASSERT_OK(pool.CreatePage(&client, TEST_BUFFER_LEN, &page));
-  uint8_t* page_data = page.data();
+  const BufferHandle* page_buffer;
+  ASSERT_OK(pool.CreatePage(&client, TEST_BUFFER_LEN, &page, &page_buffer));
+  uint8_t* page_data = page_buffer->data();
   ASSERT_OK(pool.Pin(&client, &page));
   ASSERT_EQ(TEST_BUFFER_LEN * 2, client.GetUsedReservation());
-  pool.ExtractBuffer(&client, &page, &buffer);
+  ASSERT_OK(pool.ExtractBuffer(&client, &page, &buffer));
   ASSERT_EQ(TEST_BUFFER_LEN, client.GetUsedReservation());
   ASSERT_FALSE(page.is_open());
   ASSERT_TRUE(buffer.is_open());
@@ -726,7 +863,7 @@ TEST_F(BufferPoolTest, ExtractBuffer) {
   // Test that ExtractBuffer() DCHECKs for unpinned pages.
   ASSERT_OK(pool.CreatePage(&client, TEST_BUFFER_LEN, &page));
   pool.Unpin(&client, &page);
-  IMPALA_ASSERT_DEBUG_DEATH(pool.ExtractBuffer(&client, &page, &buffer), "");
+  IMPALA_ASSERT_DEBUG_DEATH((void)pool.ExtractBuffer(&client, &page, &buffer), "");
   pool.DestroyPage(&client, &page);
 
   pool.DeregisterClient(&client);
@@ -870,15 +1007,17 @@ TEST_F(BufferPoolTest, EvictPageDifferentClient) {
   }
 
   // Create a pinned and unpinned page for the first client.
-  BufferPool::PageHandle handle1, handle2;
-  ASSERT_OK(pool.CreatePage(&clients[0], TEST_BUFFER_LEN, &handle1));
+  PageHandle handle1, handle2;
+  const BufferHandle* page_buffer;
+  ASSERT_OK(pool.CreatePage(&clients[0], TEST_BUFFER_LEN, &handle1, &page_buffer));
   const uint8_t TEST_VAL = 123;
-  memset(handle1.data(), TEST_VAL, handle1.len()); // Fill page with an arbitrary value.
+  memset(
+      page_buffer->data(), TEST_VAL, handle1.len()); // Fill page with an arbitrary value.
   pool.Unpin(&clients[0], &handle1);
   ASSERT_OK(pool.CreatePage(&clients[0], TEST_BUFFER_LEN, &handle2));
 
   // Allocating a buffer for the second client requires evicting the unpinned page.
-  BufferPool::BufferHandle buffer;
+  BufferHandle buffer;
   ASSERT_OK(pool.AllocateBuffer(&clients[1], TEST_BUFFER_LEN, &buffer));
   ASSERT_TRUE(IsEvicted(&handle1));
 
@@ -886,7 +1025,10 @@ TEST_F(BufferPoolTest, EvictPageDifferentClient) {
   pool.Unpin(&clients[0], &handle2);
   ASSERT_OK(pool.Pin(&clients[0], &handle1));
   ASSERT_TRUE(IsEvicted(&handle2));
-  for (int i = 0; i < handle1.len(); ++i) EXPECT_EQ(TEST_VAL, handle1.data()[i]) << i;
+  ASSERT_OK(handle1.GetBuffer(&page_buffer));
+  for (int i = 0; i < handle1.len(); ++i) {
+    EXPECT_EQ(TEST_VAL, page_buffer->data()[i]) << i;
+  }
 
   // Clean up everything.
   pool.DestroyPage(&clients[0], &handle1);
@@ -1048,18 +1190,28 @@ void BufferPoolTest::TestEvictionPolicy(int64_t page_size) {
       nullptr, total_mem, profile, &client));
   ASSERT_TRUE(client.IncreaseReservation(total_mem));
 
-  RuntimeProfile::Counter* bytes_alloced =
-      profile->GetCounter("BufferPoolAllocationBytes");
-  RuntimeProfile::Counter* write_ios = profile->GetCounter("BufferPoolWriteIoOps");
-  RuntimeProfile::Counter* read_ios = profile->GetCounter("BufferPoolReadIoOps");
+  RuntimeProfile* buffer_pool_profile = nullptr;
+  vector<RuntimeProfile*> profile_children;
+  profile->GetChildren(&profile_children);
+  for (RuntimeProfile* child : profile_children) {
+    if (child->name() == "Buffer pool") {
+      buffer_pool_profile = child;
+      break;
+    }
+  }
+  ASSERT_TRUE(buffer_pool_profile != nullptr);
+  RuntimeProfile::Counter* cumulative_bytes_alloced =
+      buffer_pool_profile->GetCounter("CumulativeAllocationBytes");
+  RuntimeProfile::Counter* write_ios = buffer_pool_profile->GetCounter("WriteIoOps");
+  RuntimeProfile::Counter* read_ios = buffer_pool_profile->GetCounter("ReadIoOps");
 
   vector<PageHandle> pages;
   CreatePages(&pool, &client, page_size, total_mem, &pages);
   WriteData(pages, 0);
 
   // Unpin pages. Writes should be started and memory should not be deallocated.
-  EXPECT_EQ(total_mem, bytes_alloced->value());
-  EXPECT_EQ(total_mem, SystemBytesAllocated(&pool));
+  EXPECT_EQ(total_mem, cumulative_bytes_alloced->value());
+  EXPECT_EQ(total_mem, pool.GetSystemBytesAllocated());
   UnpinAll(&pool, &client, &pages);
   ASSERT_GT(write_ios->value(), 0);
 
@@ -1082,7 +1234,7 @@ void BufferPoolTest::TestEvictionPolicy(int64_t page_size) {
   // At least two unpinned pages should have been written out.
   ASSERT_GE(write_ios->value(), prev_write_ios + NUM_EXTRA_BUFFERS);
   // No additional memory should have been allocated - it should have been recycled.
-  EXPECT_EQ(total_mem, SystemBytesAllocated(&pool));
+  EXPECT_EQ(total_mem, pool.GetSystemBytesAllocated());
   // Check that two pages were evicted.
   int num_evicted = 0;
   for (PageHandle& page : pages) {
@@ -1161,7 +1313,7 @@ void BufferPoolTest::TestQueryTeardown(bool write_error) {
     // unpinned pages.
     vector<BufferHandle> tmp_buffers;
     AllocateBuffers(pool, &client, TEST_BUFFER_LEN, CLIENT_BUFFERS, &tmp_buffers);
-    string tmp_file_path = TmpFilePath(&pages[0]);
+    string tmp_file_path = TmpFilePath(pages.data());
     FreeBuffers(pool, &client, &tmp_buffers);
 
     PinAll(pool, &client, &pages);
@@ -1230,7 +1382,7 @@ void BufferPoolTest::TestWriteError(int write_delay_ms) {
   error = pool.CreatePage(&client, TEST_BUFFER_LEN, &tmp_page);
   EXPECT_EQ(TErrorCode::SCRATCH_ALLOCATION_FAILED, error.code());
   EXPECT_FALSE(tmp_page.is_open());
-  error = pool.Pin(&client, &pages[0]);
+  error = pool.Pin(&client, pages.data());
   EXPECT_EQ(TErrorCode::SCRATCH_ALLOCATION_FAILED, error.code());
   EXPECT_FALSE(pages[0].is_pinned());
 
@@ -1264,7 +1416,7 @@ TEST_F(BufferPoolTest, TmpFileAllocateError) {
   vector<PageHandle> pages;
   CreatePages(&pool, &client, TEST_BUFFER_LEN, TOTAL_MEM, &pages);
   // Unpin a page, which will trigger a write.
-  pool.Unpin(&client, &pages[0]);
+  pool.Unpin(&client, pages.data());
   WaitForAllWrites(&client);
   // Remove permissions to the temporary files - subsequent operations will fail.
   ASSERT_GT(RemoveScratchPerms(), 0);
@@ -1273,7 +1425,7 @@ TEST_F(BufferPoolTest, TmpFileAllocateError) {
 
   // Write failure causes future operations like Pin() to fail.
   WaitForAllWrites(&client);
-  Status error = pool.Pin(&client, &pages[0]);
+  Status error = pool.Pin(&client, pages.data());
   EXPECT_EQ(TErrorCode::SCRATCH_ALLOCATION_FAILED, error.code());
   EXPECT_FALSE(pages[0].is_pinned());
 
@@ -1437,7 +1589,10 @@ TEST_F(BufferPoolTest, ScratchReadError) {
       DCHECK_EQ(error_type, TRUNCATE);
       TruncateBackingFile(tmp_file);
     }
-    Status status = pool.Pin(&client, &page);
+    ASSERT_OK(pool.Pin(&client, &page));
+    // The read is async, so won't bubble up until we block on it with GetBuffer().
+    const BufferHandle* page_buffer;
+    Status status = page.GetBuffer(&page_buffer);
     if (error_type == CORRUPT_DATA && !FLAGS_disk_spill_encryption) {
       // Without encryption we can't detect that the data changed.
       EXPECT_OK(status);
@@ -1521,7 +1676,7 @@ TEST_F(BufferPoolTest, NoTmpDirs) {
   // active scratch devices.
   UnpinAll(&pool, &client, &pages);
   WaitForAllWrites(&client);
-  ASSERT_OK(pool.Pin(&client, &pages[0]));
+  ASSERT_OK(pool.Pin(&client, pages.data()));
 
   // Allocating another buffer will force a write, which will fail.
   BufferHandle tmp_buffer;
@@ -1563,7 +1718,7 @@ TEST_F(BufferPoolTest, ScratchLimitZero) {
 
   // Spilling is disabled by the QueryState when scratch_limit is 0, so trying to unpin
   // will cause a DCHECK.
-  IMPALA_ASSERT_DEBUG_DEATH(pool->Unpin(&client, &pages[0]), "");
+  IMPALA_ASSERT_DEBUG_DEATH(pool->Unpin(&client, pages.data()), "");
 
   DestroyAll(pool, &client, &pages);
   pool->DeregisterClient(&client);
@@ -1661,7 +1816,8 @@ void BufferPoolTest::TestRandomInternalImpl(BufferPool* pool, FileGroup* file_gr
     if ((i % 10000) == 0) LOG(ERROR) << " Iteration " << i << endl;
     // Pick an operation.
     // New page: 15%
-    // Pin a page: 30%
+    // Pin a page and block waiting for the result: 20%
+    // Pin a page and let it continue asynchronously: 10%
     // Unpin a pinned page: 25% (< Pin prob. so that memory consumption increases).
     // Destroy page: 10% (< New page prob. so that number of pages grows over time).
     // Allocate buffer: 10%
@@ -1678,24 +1834,29 @@ void BufferPoolTest::TestRandomInternalImpl(BufferPool* pool, FileGroup* file_gr
       WriteData(new_page, data);
       pages.emplace_back(move(new_page), data);
     } else if (p < 0.45) {
-      // Pin a page.
+      // Pin a page asynchronously.
       if (pages.empty()) continue;
       int rand_pick = uniform_int_distribution<int>(0, pages.size() - 1)(*rng);
       PageHandle* page = &pages[rand_pick].first;
       if (!client.IncreaseReservationToFit(page->len())) continue;
       if (!page->is_pinned() || multiple_pins) ASSERT_OK(pool->Pin(&client, page));
-      VerifyData(*page, pages[rand_pick].second);
+      // Block on the pin and verify data for sync pins.
+      if (p < 0.35) VerifyData(*page, pages[rand_pick].second);
     } else if (p < 0.70) {
       // Unpin a pinned page.
       if (pages.empty()) continue;
       int rand_pick = uniform_int_distribution<int>(0, pages.size() - 1)(*rng);
       PageHandle* page = &pages[rand_pick].first;
-      if (page->is_pinned()) pool->Unpin(&client, page);
+      if (page->is_pinned()) {
+        VerifyData(*page, pages[rand_pick].second);
+        pool->Unpin(&client, page);
+      }
     } else if (p < 0.80) {
       // Destroy a page.
       if (pages.empty()) continue;
       int rand_pick = uniform_int_distribution<int>(0, pages.size() - 1)(*rng);
       auto page_data = move(pages[rand_pick]);
+      if (page_data.first.is_pinned()) VerifyData(page_data.first, page_data.second);
       pages[rand_pick] = move(pages.back());
       pages.pop_back();
       pool->DestroyPage(&client, &page_data.first);
@@ -1726,6 +1887,39 @@ void BufferPoolTest::TestRandomInternalImpl(BufferPool* pool, FileGroup* file_gr
   for (auto& page : pages) pool->DestroyPage(&client, &page.first);
   for (auto& buffer : buffers) pool->FreeBuffer(&client, &buffer.first);
   pool->DeregisterClient(&client);
+}
+
+/// Test basic SubReservation functionality.
+TEST_F(BufferPoolTest, SubReservation) {
+  const int64_t TOTAL_MEM = TEST_BUFFER_LEN * 10;
+  global_reservations_.InitRootTracker(NULL, TOTAL_MEM);
+  BufferPool pool(TEST_BUFFER_LEN, TOTAL_MEM);
+  BufferPool::ClientHandle client;
+  ASSERT_OK(pool.RegisterClient("test client", NULL, &global_reservations_, NULL,
+      TOTAL_MEM, NewProfile(), &client));
+  ASSERT_TRUE(client.IncreaseReservationToFit(TEST_BUFFER_LEN));
+
+  BufferPool::SubReservation subreservation(&client);
+  BufferPool::BufferHandle buffer;
+  // Save and check that the reservation moved as expected.
+  client.SaveReservation(&subreservation, TEST_BUFFER_LEN);
+  EXPECT_EQ(0, client.GetUnusedReservation());
+  EXPECT_EQ(TEST_BUFFER_LEN, subreservation.GetReservation());
+
+  // Should not be able to allocate from client since the reservation was moved.
+  IMPALA_ASSERT_DEBUG_DEATH(AllocateAndFree(&pool, &client, TEST_BUFFER_LEN), "");
+
+  // Restore and check that the reservation moved as expected.
+  client.RestoreReservation(&subreservation, TEST_BUFFER_LEN);
+  EXPECT_EQ(TEST_BUFFER_LEN, client.GetUnusedReservation());
+  EXPECT_EQ(0, subreservation.GetReservation());
+
+  // Should be able to allocate from the client after restoring.
+  ASSERT_OK(AllocateAndFree(&pool, &client, TEST_BUFFER_LEN));
+  EXPECT_EQ(TEST_BUFFER_LEN, client.GetUnusedReservation());
+
+  subreservation.Close();
+  pool.DeregisterClient(&client);
 }
 }
 

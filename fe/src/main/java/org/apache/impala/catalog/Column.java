@@ -52,6 +52,7 @@ public class Column {
   }
 
   public Column(String name, Type type, String comment, int position) {
+    Preconditions.checkState(name.equals(name.toLowerCase()));
     name_ = name;
     type_ = type;
     comment_ = comment;
@@ -128,5 +129,11 @@ public class Column {
             column.getComment());
       }
     });
+  }
+
+  public static List<String> toColumnNames(List<Column> columns) {
+    List<String> colNames = Lists.newArrayList();
+    for (Column col: columns) colNames.add(col.getName());
+    return colNames;
   }
 }

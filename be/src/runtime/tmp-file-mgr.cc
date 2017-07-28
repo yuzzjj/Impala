@@ -26,7 +26,6 @@
 #include <gutil/strings/join.h>
 #include <gutil/strings/substitute.h>
 
-#include "gutil/bits.h"
 #include "runtime/runtime-state.h"
 #include "runtime/tmp-file-mgr-internal.h"
 #include "util/bit-util.h"
@@ -299,7 +298,7 @@ Status TmpFileMgr::FileGroup::AllocateSpace(
     int64_t num_bytes, File** tmp_file, int64_t* file_offset) {
   lock_guard<SpinLock> lock(lock_);
   int64_t scratch_range_bytes = max<int64_t>(1L, BitUtil::RoundUpToPowerOfTwo(num_bytes));
-  int free_ranges_idx = Bits::Log2Ceiling64(scratch_range_bytes);
+  int free_ranges_idx = BitUtil::Log2Ceiling64(scratch_range_bytes);
   if (!free_ranges_[free_ranges_idx].empty()) {
     *tmp_file = free_ranges_[free_ranges_idx].back().first;
     *file_offset = free_ranges_[free_ranges_idx].back().second;
@@ -342,7 +341,7 @@ Status TmpFileMgr::FileGroup::AllocateSpace(
 void TmpFileMgr::FileGroup::RecycleFileRange(unique_ptr<WriteHandle> handle) {
   int64_t scratch_range_bytes =
       max<int64_t>(1L, BitUtil::RoundUpToPowerOfTwo(handle->len()));
-  int free_ranges_idx = Bits::Log2Ceiling64(scratch_range_bytes);
+  int free_ranges_idx = BitUtil::Log2Ceiling64(scratch_range_bytes);
   lock_guard<SpinLock> lock(lock_);
   free_ranges_[free_ranges_idx].emplace_back(
       handle->file_, handle->write_range_->offset());
@@ -369,36 +368,44 @@ Status TmpFileMgr::FileGroup::Write(
 }
 
 Status TmpFileMgr::FileGroup::Read(WriteHandle* handle, MemRange buffer) {
+  RETURN_IF_ERROR(ReadAsync(handle, buffer));
+  return WaitForAsyncRead(handle, buffer);
+}
+
+Status TmpFileMgr::FileGroup::ReadAsync(WriteHandle* handle, MemRange buffer) {
   DCHECK(handle->write_range_ != nullptr);
   DCHECK(!handle->is_cancelled_);
   DCHECK_EQ(buffer.len(), handle->len());
   Status status;
 
-  // Don't grab 'lock_' in this method - it is not necessary because we don't touch
-  // any members that it protects and could block other threads for the duration of
-  // the synchronous read.
+  // Don't grab 'write_state_lock_' in this method - it is not necessary because we
+  // don't touch any members that it protects and could block other threads for the
+  // duration of the synchronous read.
   DCHECK(!handle->write_in_flight_);
+  DCHECK(handle->read_range_ == nullptr);
   DCHECK(handle->write_range_ != nullptr);
-  // Don't grab handle->lock_, it is safe to touch all of handle's state since the
-  // write is not in flight.
-  DiskIoMgr::ScanRange* scan_range = scan_range_pool_.Add(new DiskIoMgr::ScanRange);
-  scan_range->Reset(nullptr, handle->write_range_->file(), handle->write_range_->len(),
-      handle->write_range_->offset(), handle->write_range_->disk_id(), false,
+  // Don't grab handle->write_state_lock_, it is safe to touch all of handle's state
+  // since the write is not in flight.
+  handle->read_range_ = scan_range_pool_.Add(new DiskIoMgr::ScanRange);
+  handle->read_range_->Reset(nullptr, handle->write_range_->file(),
+      handle->write_range_->len(), handle->write_range_->offset(),
+      handle->write_range_->disk_id(), false,
       DiskIoMgr::BufferOpts::ReadInto(buffer.data(), buffer.len()));
-  DiskIoMgr::BufferDescriptor* io_mgr_buffer = nullptr;
-  {
-    SCOPED_TIMER(disk_read_timer_);
-    read_counter_->Add(1);
-    bytes_read_counter_->Add(buffer.len());
-    status = io_mgr_->Read(io_ctx_, scan_range, &io_mgr_buffer);
-    if (!status.ok()) goto exit;
-  }
+  read_counter_->Add(1);
+  bytes_read_counter_->Add(buffer.len());
+  RETURN_IF_ERROR(io_mgr_->AddScanRange(io_ctx_, handle->read_range_, true));
+  return Status::OK();
+}
 
-  if (FLAGS_disk_spill_encryption) {
-    status = handle->CheckHashAndDecrypt(buffer);
-    if (!status.ok()) goto exit;
-  }
-
+Status TmpFileMgr::FileGroup::WaitForAsyncRead(WriteHandle* handle, MemRange buffer) {
+  DCHECK(handle->read_range_ != nullptr);
+  // Don't grab handle->write_state_lock_, it is safe to touch all of handle's state
+  // since the write is not in flight.
+  SCOPED_TIMER(disk_read_timer_);
+  unique_ptr<DiskIoMgr::BufferDescriptor> io_mgr_buffer;
+  Status status = handle->read_range_->GetNext(&io_mgr_buffer);
+  if (!status.ok()) goto exit;
+  DCHECK(io_mgr_buffer != NULL);
   DCHECK(io_mgr_buffer->eosr());
   DCHECK_LE(io_mgr_buffer->len(), buffer.len());
   if (io_mgr_buffer->len() < buffer.len()) {
@@ -410,9 +417,14 @@ Status TmpFileMgr::FileGroup::Read(WriteHandle* handle, MemRange buffer) {
   }
   DCHECK_EQ(io_mgr_buffer->buffer(), buffer.data());
 
+  if (FLAGS_disk_spill_encryption) {
+    status = handle->CheckHashAndDecrypt(buffer);
+    if (!status.ok()) goto exit;
+  }
 exit:
   // Always return the buffer before exiting to avoid leaking it.
-  if (io_mgr_buffer != nullptr) io_mgr_buffer->Return();
+  if (io_mgr_buffer != nullptr) io_mgr_->ReturnBuffer(move(io_mgr_buffer));
+  handle->read_range_ = nullptr;
   return status;
 }
 
@@ -421,6 +433,7 @@ Status TmpFileMgr::FileGroup::RestoreData(
   DCHECK_EQ(handle->write_range_->data(), buffer.data());
   DCHECK_EQ(handle->len(), buffer.len());
   DCHECK(!handle->write_in_flight_);
+  DCHECK(handle->read_range_ == nullptr);
   // Decrypt after the write is finished, so that we don't accidentally write decrypted
   // data to disk.
   Status status;
@@ -502,6 +515,7 @@ TmpFileMgr::WriteHandle::WriteHandle(
   : cb_(cb),
     encryption_timer_(encryption_timer),
     file_(nullptr),
+    read_range_(nullptr),
     is_cancelled_(false),
     write_in_flight_(false) {}
 
@@ -571,9 +585,20 @@ void TmpFileMgr::WriteHandle::WriteComplete(const Status& write_status) {
 }
 
 void TmpFileMgr::WriteHandle::Cancel() {
-  unique_lock<mutex> lock(write_state_lock_);
-  is_cancelled_ = true;
-  // TODO: in future, if DiskIoMgr supported cancellation, we could cancel it here.
+  CancelRead();
+  {
+    unique_lock<mutex> lock(write_state_lock_);
+    is_cancelled_ = true;
+    // TODO: in future, if DiskIoMgr supported write cancellation, we could cancel it
+    // here.
+  }
+}
+
+void TmpFileMgr::WriteHandle::CancelRead() {
+  if (read_range_ != nullptr) {
+    read_range_->Cancel(Status::CANCELLED);
+    read_range_ = nullptr;
+  }
 }
 
 void TmpFileMgr::WriteHandle::WaitForWrite() {

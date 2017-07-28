@@ -21,8 +21,8 @@
 #include <sstream>
 
 #include "common/logging.h"
-#include "exprs/expr.h"
-#include "exprs/expr-context.h"
+#include "exprs/scalar-expr.h"
+#include "exprs/scalar-expr-evaluator.h"
 #include "runtime/hbase-table-factory.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/raw-value.h"
@@ -42,17 +42,15 @@ jmethodID HBaseTableWriter::put_ctor_ = NULL;
 jmethodID HBaseTableWriter::list_ctor_ = NULL;
 jmethodID HBaseTableWriter::list_add_id_ = NULL;
 
-jmethodID HBaseTableWriter::put_add_id_ = NULL;
+jmethodID HBaseTableWriter::put_addcolumn_id_ = NULL;
 
 HBaseTableWriter::HBaseTableWriter(HBaseTableDescriptor* table_desc,
-                                   const vector<ExprContext*>& output_expr_ctxs,
-                                   RuntimeProfile* profile)
-    : table_desc_(table_desc),
-      table_(NULL),
-      output_expr_ctxs_(output_expr_ctxs),
-      put_list_(NULL),
-      runtime_profile_(profile) {
-};
+    const vector<ScalarExprEvaluator*>& output_expr_evals, RuntimeProfile* profile)
+  : table_desc_(table_desc),
+    table_(NULL),
+    output_expr_evals_(output_expr_evals),
+    put_list_(NULL),
+    runtime_profile_(profile) { }
 
 Status HBaseTableWriter::Init(RuntimeState* state) {
   RETURN_IF_ERROR(state->htable_factory()->GetTable(table_desc_->name(),
@@ -72,7 +70,8 @@ Status HBaseTableWriter::Init(RuntimeState* state) {
   cf_arrays_.reserve(num_col - 1);
   qual_arrays_.reserve(num_col - 1);
   for (int i = 0; i < num_col; ++i) {
-    output_exprs_byte_sizes_[i] = output_expr_ctxs_[i]->root()->type().GetByteSize();
+    output_exprs_byte_sizes_[i] =
+        output_expr_evals_[i]->root().type().GetByteSize();
 
     if (i == 0) continue;
 
@@ -101,7 +100,7 @@ Status HBaseTableWriter::InitJNI() {
   RETURN_ERROR_IF_EXC(env);
   put_ctor_ = env->GetMethodID(put_cl_, "<init>", "([B)V");
   RETURN_ERROR_IF_EXC(env);
-  put_add_id_ = env->GetMethodID(put_cl_, "add",
+  put_addcolumn_id_ = env->GetMethodID(put_cl_, "addColumn",
     "([B[B[B)Lorg/apache/hadoop/hbase/client/Put;");
   RETURN_ERROR_IF_EXC(env);
   RETURN_IF_ERROR(
@@ -138,20 +137,20 @@ Status HBaseTableWriter::AppendRows(RowBatch* batch) {
       TupleRow* current_row = batch->GetRow(idx_batch);
       jobject put = NULL;
 
-      if (output_expr_ctxs_[0]->GetValue(current_row) == NULL) {
+      if (output_expr_evals_[0]->GetValue(current_row) == NULL) {
         // HBase row key must not be null.
         return Status("Cannot insert into HBase with a null row key.");
       }
 
       for (int j = 0; j < num_cols; j++) {
         const HBaseTableDescriptor::HBaseColumnDescriptor& col = table_desc_->cols()[j];
-        void* value = output_expr_ctxs_[j]->GetValue(current_row);
+        void* value = output_expr_evals_[j]->GetValue(current_row);
 
         if (value != NULL) {
           if (!col.binary_encoded) {
             // Text encoded
             string_value.clear();
-            output_expr_ctxs_[j]->PrintValue(value, &string_value);
+            output_expr_evals_[j]->PrintValue(value, &string_value);
             data = string_value.data();
             data_len = string_value.length();
           } else {
@@ -172,8 +171,8 @@ Status HBaseTableWriter::AppendRows(RowBatch* batch) {
             DCHECK(put != NULL) << "Put shouldn't be NULL for non-key cols.";
             jbyteArray val_array;
             RETURN_IF_ERROR(CreateByteArray(env, data, data_len, &val_array));
-            env->CallObjectMethod(put, put_add_id_, cf_arrays_[j-1], qual_arrays_[j-1],
-                val_array);
+            env->CallObjectMethod(put, put_addcolumn_id_, cf_arrays_[j-1],
+                qual_arrays_[j-1], val_array);
             RETURN_ERROR_IF_EXC(env);
 
             // Clean up the local references.

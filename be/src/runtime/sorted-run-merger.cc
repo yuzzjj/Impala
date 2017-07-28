@@ -12,7 +12,7 @@
 // limitations under the License.
 
 #include "runtime/sorted-run-merger.h"
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
 #include "runtime/descriptors.h"
 #include "runtime/row-batch.h"
 #include "runtime/sorter.h"
@@ -126,7 +126,7 @@ void SortedRunMerger::Heapify(int parent_index) {
 }
 
 SortedRunMerger::SortedRunMerger(const TupleRowComparator& comparator,
-    RowDescriptor* row_desc, RuntimeProfile* profile, bool deep_copy_input)
+    const RowDescriptor* row_desc, RuntimeProfile* profile, bool deep_copy_input)
   : comparator_(comparator),
     input_row_desc_(row_desc),
     deep_copy_input_(deep_copy_input) {

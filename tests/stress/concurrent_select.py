@@ -315,8 +315,9 @@ class StressRunner(object):
     self.result_hash_log_dir = gettempdir()
 
     self._status_headers = [
-        " Done", "Running", "Mem Lmt Ex", "Time Out", "Cancel",
-        "Err", "Next Qry Mem Lmt", "Tot Qry Mem Lmt", "Tracked Mem", "RSS Mem"]
+        "Done", "Running", "Mem Lmt Ex", "Time Out", "Cancel",
+        "Err", "Incorrect", "Next Qry Mem Lmt", "Tot Qry Mem Lmt", "Tracked Mem",
+        "RSS Mem"]
 
     self._num_queries_to_run = None
     self._query_producer_thread = None
@@ -435,6 +436,15 @@ class StressRunner(object):
     # And print the final state.
     if should_print_status:
       self._print_status()
+
+    if (
+        self._num_other_errors.value > 0 or
+        self._num_result_mismatches.value > 0 or
+        self._num_queries_timedout.value - self._num_queries_cancelled.value > 0
+    ):
+      LOG.error("Failing the stress test due to unexpected errors, incorrect results, or "
+                "timed out queries. See the report line above for details.")
+      sys.exit(1)
 
   def _start_producing_queries(self, queries):
     def enqueue_queries():
@@ -693,15 +703,27 @@ class StressRunner(object):
     reported_mem, actual_mem = self._get_mem_usage_values(reset=True)
     status_format = " | ".join(["%%%ss" % len(header) for header in self._status_headers])
     print(status_format % (
+        # Done
         self._num_queries_finished.value,
+        # Running
         self._num_queries_started.value - self._num_queries_finished.value,
+        # Mem Lmt Ex
         self._num_queries_exceeded_mem_limit.value,
+        # Time Out
         self._num_queries_timedout.value - self._num_queries_cancelled.value,
+        # Cancel
         self._num_queries_cancelled.value,
+        # Err
         self._num_other_errors.value,
+        # Incorrect
+        self._num_result_mismatches.value,
+        # Next Qry Mem Lmt
         self._mem_mb_needed_for_next_query.value,
+        # Total Qry Mem Lmt
         self._mem_broker.total_mem_mb - self._mem_broker.available_mem_mb,
+        # Tracked Mem
         "" if reported_mem == -1 else reported_mem,
+        # RSS Mem
         "" if actual_mem == -1 else actual_mem))
 
   def _update_from_query_report(self, report):
@@ -900,10 +922,10 @@ class QueryRunner(object):
             op_handle_to_query_id(cursor._last_operation.handle), e)
     caught_msg = str(caught_exception).lower().strip()
 
-    # Exceeding a mem limit may result in the message "cancelled".
-    # https://issues.cloudera.org/browse/IMPALA-2234
+    # Exceeding a mem limit may result in the message "cancelled". See IMPALA-2234
     if "memory limit exceeded" in caught_msg or \
        "repartitioning did not reduce the size of a spilled partition" in caught_msg or \
+       "failed to get minimum memory reservation" in caught_msg or \
        caught_msg == "cancelled":
       report.mem_limit_exceeded = True
       return
@@ -1632,6 +1654,19 @@ def populate_all_queries(queries, impala, args, runtime_info_path,
   return result
 
 
+def print_version(cluster):
+  """
+  Print the cluster impalad version info to the console sorted by hostname.
+  """
+  def _sorter(i1, i2):
+    return cmp(i1.host_name, i2.host_name)
+
+  version_info = cluster.impala.get_version_info()
+  print("Cluster Impalad Version Info:")
+  for impalad in sorted(version_info.keys(), cmp=_sorter):
+    print("{0}: {1}".format(impalad.host_name, version_info[impalad]))
+
+
 def main():
   from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
   from random import shuffle
@@ -1650,6 +1685,7 @@ def main():
   cli_options.add_logging_options(parser)
   cli_options.add_cluster_options(parser)
   cli_options.add_kerberos_options(parser)
+  cli_options.add_ssl_options(parser)
   parser.add_argument(
       "--runtime-info-path",
       default=os.path.join(gettempdir(), "{cm_host}_query_runtime_info.json"),
@@ -1825,10 +1861,10 @@ def main():
             query_option=query_option, value=value))
 
   cluster = cli_options.create_cluster(args)
-  cluster.is_kerberized = args.use_kerberos
   impala = cluster.impala
   if impala.find_stopped_impalads():
     impala.restart()
+  print_version(cluster)
   impala.find_and_set_path_to_running_impalad_binary()
   if args.cancel_current_queries and impala.queries_are_running():
     impala.cancel_queries()

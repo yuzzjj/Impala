@@ -23,10 +23,8 @@
 
 #include "codegen/impala-ir.h"
 #include "exprs/anyval-util.h"
-#include "exprs/case-expr.h"
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
 #include "runtime/decimal-value.inline.h"
-#include "runtime/tuple-row.h"
 #include "util/decimal-util.h"
 #include "util/string-parser.h"
 
@@ -616,7 +614,7 @@ TimestampVal DecimalOperators::CastToTimestampVal(
       int32_t seconds = dv.whole_part(scale);
       int32_t nanoseconds = ConvertToNanoseconds(
           dv.fractional_part(scale), scale);
-      TimestampValue tv(seconds, nanoseconds);
+      TimestampValue tv = TimestampValue::FromUnixTimeNanos(seconds, nanoseconds);
       tv.ToTimestampVal(&result);
       break;
     }
@@ -625,7 +623,7 @@ TimestampVal DecimalOperators::CastToTimestampVal(
       int64_t seconds = dv.whole_part(scale);
       int64_t nanoseconds = ConvertToNanoseconds(
           dv.fractional_part(scale), scale);
-      TimestampValue tv(seconds, nanoseconds);
+      TimestampValue tv = TimestampValue::FromUnixTimeNanos(seconds, nanoseconds);
       tv.ToTimestampVal(&result);
       break;
     }
@@ -639,7 +637,7 @@ TimestampVal DecimalOperators::CastToTimestampVal(
       }
       int128_t nanoseconds = ConvertToNanoseconds(
           dv.fractional_part(scale), scale);
-      TimestampValue tv(seconds, nanoseconds);
+      TimestampValue tv = TimestampValue::FromUnixTimeNanos(seconds, nanoseconds);
       tv.ToTimestampVal(&result);
       break;
     }

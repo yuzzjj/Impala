@@ -31,12 +31,13 @@ import org.apache.impala.analysis.AggregateInfo;
 import org.apache.impala.analysis.AnalyticInfo;
 import org.apache.impala.analysis.Analyzer;
 import org.apache.impala.analysis.BaseTableRef;
-import org.apache.impala.analysis.BinaryPredicate;
 import org.apache.impala.analysis.BinaryPredicate.Operator;
+import org.apache.impala.analysis.BinaryPredicate;
 import org.apache.impala.analysis.CollectionTableRef;
 import org.apache.impala.analysis.Expr;
 import org.apache.impala.analysis.ExprId;
 import org.apache.impala.analysis.ExprSubstitutionMap;
+import org.apache.impala.analysis.FunctionCallExpr;
 import org.apache.impala.analysis.InlineViewRef;
 import org.apache.impala.analysis.JoinOperator;
 import org.apache.impala.analysis.NullLiteral;
@@ -47,11 +48,12 @@ import org.apache.impala.analysis.SlotDescriptor;
 import org.apache.impala.analysis.SlotId;
 import org.apache.impala.analysis.SlotRef;
 import org.apache.impala.analysis.TableRef;
+import org.apache.impala.analysis.TableSampleClause;
 import org.apache.impala.analysis.TupleDescriptor;
 import org.apache.impala.analysis.TupleId;
 import org.apache.impala.analysis.TupleIsNullPredicate;
-import org.apache.impala.analysis.UnionStmt;
 import org.apache.impala.analysis.UnionStmt.UnionOperand;
+import org.apache.impala.analysis.UnionStmt;
 import org.apache.impala.catalog.ColumnStats;
 import org.apache.impala.catalog.DataSourceTable;
 import org.apache.impala.catalog.HBaseTable;
@@ -60,6 +62,7 @@ import org.apache.impala.catalog.HdfsTable;
 import org.apache.impala.catalog.KuduTable;
 import org.apache.impala.catalog.Table;
 import org.apache.impala.catalog.Type;
+import org.apache.impala.catalog.HdfsPartition.FileDescriptor;
 import org.apache.impala.common.ImpalaException;
 import org.apache.impala.common.InternalException;
 import org.apache.impala.common.NotImplementedException;
@@ -237,6 +240,9 @@ public class SingleNodePlanner {
       Preconditions.checkState(collExpr instanceof SlotRef);
       SlotRef collSlotRef = (SlotRef) collExpr;
       collSlotRef.getDesc().setIsMaterialized(false);
+      // Re-compute the mem layout if necessary. The tuple may not have a mem layout if
+      // no plan has been generated for the TableRef (e.g. due to limit 0 or similar).
+      collSlotRef.getDesc().getParent().recomputeMemLayout();
     }
   }
 
@@ -289,8 +295,13 @@ public class SingleNodePlanner {
       // TODO: External sort could be used for very large limits
       // not just unlimited order-by
       boolean useTopN = stmt.hasLimit() && !disableTopN;
-      root = new SortNode(ctx_.getNextNodeId(), root, stmt.getSortInfo(),
-          useTopN, stmt.getOffset());
+      if (useTopN) {
+        root = SortNode.createTopNSortNode(
+            ctx_.getNextNodeId(), root, stmt.getSortInfo(), stmt.getOffset());
+      } else {
+        root = SortNode.createTotalSortNode(
+            ctx_.getNextNodeId(), root, stmt.getSortInfo(), stmt.getOffset());
+      }
       Preconditions.checkState(root.hasValidStats());
       root.setLimit(limit);
       root.init(analyzer);
@@ -596,24 +607,22 @@ public class SingleNodePlanner {
       return createAggregationPlan(selectStmt, analyzer, emptySetNode);
     }
 
-    AggregateInfo aggInfo = selectStmt.getAggInfo();
-    // For queries which contain partition columns only, we may use the metadata instead
-    // of table scans. This is only feasible if all materialized aggregate expressions
-    // have distinct semantics. Please see createHdfsScanPlan() for details.
-    boolean fastPartitionKeyScans =
-        analyzer.getQueryCtx().client_request.query_options.optimize_partition_key_scans &&
-        aggInfo != null && aggInfo.hasAllDistinctAgg();
-
     // Separate table refs into parent refs (uncorrelated or absolute) and
     // subplan refs (correlated or relative), and generate their plan.
     List<TableRef> parentRefs = Lists.newArrayList();
     List<SubplanRef> subplanRefs = Lists.newArrayList();
     computeParentAndSubplanRefs(
         selectStmt.getTableRefs(), analyzer.isStraightJoin(), parentRefs, subplanRefs);
-    PlanNode root = createTableRefsPlan(parentRefs, subplanRefs, fastPartitionKeyScans,
-        analyzer);
+    AggregateInfo aggInfo = selectStmt.getAggInfo();
+    PlanNode root = createTableRefsPlan(parentRefs, subplanRefs, aggInfo, analyzer);
     // add aggregation, if any
-    if (aggInfo != null) root = createAggregationPlan(selectStmt, analyzer, root);
+    if (aggInfo != null) {
+      if (root instanceof HdfsScanNode) {
+        aggInfo.substitute(((HdfsScanNode) root).getOptimizedAggSmap(), analyzer);
+        aggInfo.getMergeAggInfo().substitute(((HdfsScanNode) root).getOptimizedAggSmap(), analyzer);
+      }
+      root = createAggregationPlan(selectStmt, analyzer, root);
+    }
 
     // All the conjuncts_ should be assigned at this point.
     // TODO: Re-enable this check here and/or elswehere.
@@ -758,19 +767,16 @@ public class SingleNodePlanner {
 
   /**
    * Returns a plan tree for evaluating the given parentRefs and subplanRefs.
-   *
-   * 'fastPartitionKeyScans' indicates whether to try to produce slots with
-   * metadata instead of table scans.
    */
   private PlanNode createTableRefsPlan(List<TableRef> parentRefs,
-      List<SubplanRef> subplanRefs, boolean fastPartitionKeyScans,
-      Analyzer analyzer) throws ImpalaException {
+      List<SubplanRef> subplanRefs, AggregateInfo aggInfo, Analyzer analyzer)
+      throws ImpalaException {
     // create plans for our table refs; use a list here instead of a map to
     // maintain a deterministic order of traversing the TableRefs during join
     // plan generation (helps with tests)
     List<Pair<TableRef, PlanNode>> parentRefPlans = Lists.newArrayList();
     for (TableRef ref: parentRefs) {
-      PlanNode root = createTableRefNode(ref, fastPartitionKeyScans, analyzer);
+      PlanNode root = createTableRefNode(ref, aggInfo, analyzer);
       Preconditions.checkNotNull(root);
       root = createSubplan(root, subplanRefs, true, analyzer);
       parentRefPlans.add(new Pair<TableRef, PlanNode>(ref, root));
@@ -840,7 +846,7 @@ public class SingleNodePlanner {
     // their containing SubplanNode. Also, further plan generation relies on knowing
     // whether we are in a subplan context or not (see computeParentAndSubplanRefs()).
     ctx_.pushSubplan(subplanNode);
-    PlanNode subplan = createTableRefsPlan(applicableRefs, subplanRefs, false, analyzer);
+    PlanNode subplan = createTableRefsPlan(applicableRefs, subplanRefs, null, analyzer);
     ctx_.popSubplan();
     subplanNode.setSubplan(subplan);
     subplanNode.init(analyzer);
@@ -1189,33 +1195,27 @@ public class SingleNodePlanner {
   /**
    * Create a node to materialize the slots in the given HdfsTblRef.
    *
-   * If 'hdfsTblRef' only contains partition columns and 'fastPartitionKeyScans'
-   * is true, the slots may be produced directly in this function using the metadata.
-   * Otherwise, a HdfsScanNode will be created.
+   * The given 'aggInfo' is used for detecting and applying optimizations that span both
+   * the scan and aggregation.
    */
-  private PlanNode createHdfsScanPlan(TableRef hdfsTblRef, boolean fastPartitionKeyScans,
-      Analyzer analyzer) throws ImpalaException {
+  private PlanNode createHdfsScanPlan(TableRef hdfsTblRef, AggregateInfo aggInfo,
+      List<Expr> conjuncts, Analyzer analyzer) throws ImpalaException {
     TupleDescriptor tupleDesc = hdfsTblRef.getDesc();
 
-    // Get all predicates bound by the tuple.
-    List<Expr> conjuncts = Lists.newArrayList();
-    conjuncts.addAll(analyzer.getBoundPredicates(tupleDesc.getId()));
-
-    // Also add remaining unassigned conjuncts
-    List<Expr> unassigned = analyzer.getUnassignedConjuncts(tupleDesc.getId().asList());
-    conjuncts.addAll(unassigned);
-    analyzer.markConjunctsAssigned(unassigned);
-
-    analyzer.createEquivConjuncts(tupleDesc.getId(), conjuncts);
-    Expr.removeDuplicates(conjuncts);
-
-    // Do partition pruning before deciding which slots to materialize,
-    // We might end up removing some predicates.
+    // Do partition pruning before deciding which slots to materialize because we might
+    // end up removing some predicates.
     HdfsPartitionPruner pruner = new HdfsPartitionPruner(tupleDesc);
     List<HdfsPartition> partitions = pruner.prunePartitions(analyzer, conjuncts, false);
 
     // Mark all slots referenced by the remaining conjuncts as materialized.
     analyzer.materializeSlots(conjuncts);
+
+    // For queries which contain partition columns only, we may use the metadata instead
+    // of table scans. This is only feasible if all materialized aggregate expressions
+    // have distinct semantics. Please see createHdfsScanPlan() for details.
+    boolean fastPartitionKeyScans =
+        analyzer.getQueryCtx().client_request.query_options.optimize_partition_key_scans &&
+        aggInfo != null && aggInfo.hasAllDistinctAgg();
 
     // If the optimization for partition key scans with metadata is enabled,
     // try evaluating with metadata first. If not, fall back to scanning.
@@ -1252,7 +1252,7 @@ public class SingleNodePlanner {
     } else {
       ScanNode scanNode =
           new HdfsScanNode(ctx_.getNextNodeId(), tupleDesc, conjuncts, partitions,
-              hdfsTblRef);
+              hdfsTblRef, aggInfo);
       scanNode.init(analyzer);
       return scanNode;
     }
@@ -1261,27 +1261,52 @@ public class SingleNodePlanner {
   /**
    * Create node for scanning all data files of a particular table.
    *
-   * 'fastPartitionKeyScans' indicates whether to try to produce the slots with
-   * metadata instead of table scans. Only applicable to HDFS tables.
+   * The given 'aggInfo' is used for detecting and applying optimizations that span both
+   * the scan and aggregation. Only applicable to HDFS table refs.
    *
    * Throws if a PlanNode.init() failed or if planning of the given
    * table ref is not implemented.
    */
-  private PlanNode createScanNode(TableRef tblRef, boolean fastPartitionKeyScans,
+  private PlanNode createScanNode(TableRef tblRef, AggregateInfo aggInfo,
       Analyzer analyzer) throws ImpalaException {
     ScanNode scanNode = null;
+
+    // Get all predicates bound by the tuple.
+    List<Expr> conjuncts = Lists.newArrayList();
+    TupleId tid = tblRef.getId();
+    conjuncts.addAll(analyzer.getBoundPredicates(tid));
+
+    // Also add remaining unassigned conjuncts
+    List<Expr> unassigned = analyzer.getUnassignedConjuncts(tid.asList());
+    conjuncts.addAll(unassigned);
+    analyzer.markConjunctsAssigned(unassigned);
+    analyzer.createEquivConjuncts(tid, conjuncts);
+
+    // Perform constant propagation and optimization if rewriting is enabled
+    if (analyzer.getQueryCtx().client_request.query_options.enable_expr_rewrites) {
+      if (!Expr.optimizeConjuncts(conjuncts, analyzer)) {
+        // Conjuncts implied false; convert to EmptySetNode
+        EmptySetNode node = new EmptySetNode(ctx_.getNextNodeId(), tid.asList());
+        node.init(analyzer);
+        return node;
+      }
+    } else {
+      Expr.removeDuplicates(conjuncts);
+    }
+
     Table table = tblRef.getTable();
     if (table instanceof HdfsTable) {
-      return createHdfsScanPlan(tblRef, fastPartitionKeyScans, analyzer);
+      return createHdfsScanPlan(tblRef, aggInfo, conjuncts, analyzer);
     } else if (table instanceof DataSourceTable) {
-      scanNode = new DataSourceScanNode(ctx_.getNextNodeId(), tblRef.getDesc());
+      scanNode = new DataSourceScanNode(ctx_.getNextNodeId(), tblRef.getDesc(),
+          conjuncts);
       scanNode.init(analyzer);
       return scanNode;
     } else if (table instanceof HBaseTable) {
       // HBase table
       scanNode = new HBaseScanNode(ctx_.getNextNodeId(), tblRef.getDesc());
     } else if (tblRef.getTable() instanceof KuduTable) {
-      scanNode = new KuduScanNode(ctx_.getNextNodeId(), tblRef.getDesc());
+      scanNode = new KuduScanNode(ctx_.getNextNodeId(), tblRef.getDesc(), conjuncts);
       scanNode.init(analyzer);
       return scanNode;
     } else {
@@ -1290,11 +1315,6 @@ public class SingleNodePlanner {
     }
     // TODO: move this to HBaseScanNode.init();
     Preconditions.checkState(scanNode instanceof HBaseScanNode);
-
-    List<Expr> conjuncts = analyzer.getUnassignedConjuncts(scanNode);
-    // mark conjuncts_ assigned here; they will either end up inside a
-    // ValueRange or will be evaluated directly by the node
-    analyzer.markConjunctsAssigned(conjuncts);
     List<ValueRange> keyRanges = Lists.newArrayList();
     // determine scan predicates for clustering cols
     for (int i = 0; i < tblRef.getTable().getNumClusteringCols(); ++i) {
@@ -1484,18 +1504,17 @@ public class SingleNodePlanner {
    * Create a tree of PlanNodes for the given tblRef, which can be a BaseTableRef,
    * CollectionTableRef or an InlineViewRef.
    *
-   * 'fastPartitionKeyScans' indicates whether to try to produce the slots with
-   * metadata instead of table scans. Only applicable to BaseTableRef which is also
-   * an HDFS table.
+   * The given 'aggInfo' is used for detecting and applying optimizations that span both
+   * the scan and aggregation. Only applicable to HDFS table refs.
    *
    * Throws if a PlanNode.init() failed or if planning of the given
    * table ref is not implemented.
    */
-  private PlanNode createTableRefNode(TableRef tblRef, boolean fastPartitionKeyScans,
+  private PlanNode createTableRefNode(TableRef tblRef, AggregateInfo aggInfo,
       Analyzer analyzer) throws ImpalaException {
     PlanNode result = null;
     if (tblRef instanceof BaseTableRef) {
-      result = createScanNode(tblRef, fastPartitionKeyScans, analyzer);
+      result = createScanNode(tblRef, aggInfo, analyzer);
     } else if (tblRef instanceof CollectionTableRef) {
       if (tblRef.isRelative()) {
         Preconditions.checkState(ctx_.hasSubplan());
@@ -1503,7 +1522,7 @@ public class SingleNodePlanner {
             (CollectionTableRef) tblRef);
         result.init(analyzer);
       } else {
-        result = createScanNode(tblRef, false, analyzer);
+        result = createScanNode(tblRef, null, analyzer);
       }
     } else if (tblRef instanceof InlineViewRef) {
       result = createInlineViewPlan(analyzer, (InlineViewRef) tblRef);

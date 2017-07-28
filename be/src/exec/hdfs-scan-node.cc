@@ -17,12 +17,14 @@
 
 #include "exec/hdfs-scan-node.h"
 
+#include <memory>
 #include <sstream>
 
 #include "common/logging.h"
 #include "exec/hdfs-scanner.h"
 #include "exec/scanner-context.h"
 #include "runtime/descriptors.h"
+#include "runtime/fragment-instance-state.h"
 #include "runtime/runtime-filter.inline.h"
 #include "runtime/runtime-state.h"
 #include "runtime/mem-tracker.h"
@@ -110,10 +112,10 @@ Status HdfsScanNode::GetNextInternal(
     return Status::OK();
   }
   *eos = false;
-  RowBatch* materialized_batch = materialized_row_batches_->GetBatch();
+  unique_ptr<RowBatch> materialized_batch = materialized_row_batches_->GetBatch();
   if (materialized_batch != NULL) {
     num_owned_io_buffers_.Add(-materialized_batch->num_io_buffers());
-    row_batch->AcquireState(materialized_batch);
+    row_batch->AcquireState(materialized_batch.get());
     // Update the number of materialized rows now instead of when they are materialized.
     // This means that scanners might process and queue up more rows than are necessary
     // for the limit case but we want to avoid the synchronized writes to
@@ -131,7 +133,7 @@ Status HdfsScanNode::GetNextInternal(
       SetDone();
     }
     DCHECK_EQ(materialized_batch->num_io_buffers(), 0);
-    delete materialized_batch;
+    materialized_batch.reset();
     return Status::OK();
   }
   // The RowBatchQueue was shutdown either because all scan ranges are complete or a
@@ -247,12 +249,12 @@ void HdfsScanNode::RangeComplete(const THdfsFileFormat::type& file_type,
 
 void HdfsScanNode::TransferToScanNodePool(MemPool* pool) {
   unique_lock<mutex> l(lock_);
-  scan_node_pool_->AcquireData(pool, false);
+  HdfsScanNodeBase::TransferToScanNodePool(pool);
 }
 
-void HdfsScanNode::AddMaterializedRowBatch(RowBatch* row_batch) {
-  InitNullCollectionValues(row_batch);
-  materialized_row_batches_->AddBatch(row_batch);
+void HdfsScanNode::AddMaterializedRowBatch(unique_ptr<RowBatch> row_batch) {
+  InitNullCollectionValues(row_batch.get());
+  materialized_row_batches_->AddBatch(move(row_batch));
 }
 
 Status HdfsScanNode::AddDiskIoRanges(const vector<DiskIoMgr::ScanRange*>& ranges,
@@ -346,10 +348,13 @@ void HdfsScanNode::ThreadTokenAvailableCb(ThreadResourceMgr::ResourcePool* pool)
 
     COUNTER_ADD(&active_scanner_thread_counter_, 1);
     COUNTER_ADD(num_scanner_threads_started_counter_, 1);
-    stringstream ss;
-    ss << "scanner-thread(" << num_scanner_threads_started_counter_->value() << ")";
+    string name = Substitute("scanner-thread (finst:$0, plan-node-id:$1, thread-idx:$2)",
+        PrintId(runtime_state_->fragment_instance_id()), id(),
+        num_scanner_threads_started_counter_->value());
+
+    auto fn = [this]() { this->ScannerThread(); };
     scanner_threads_.AddThread(
-        new Thread("hdfs-scan-node", ss.str(), &HdfsScanNode::ScannerThread, this));
+        new Thread(FragmentInstanceState::FINST_THREAD_GROUP_NAME, name, fn));
   }
 }
 
@@ -358,12 +363,15 @@ void HdfsScanNode::ScannerThread() {
   SCOPED_THREAD_COUNTER_MEASUREMENT(runtime_state_->total_thread_statistics());
 
   // Make thread-local copy of filter contexts to prune scan ranges, and to pass to the
-  // scanner for finer-grained filtering.
+  // scanner for finer-grained filtering. Use a thread-local MemPool for the filter
+  // contexts as the embedded expression evaluators may allocate from it and MemPool
+  // is not thread safe.
+  MemPool filter_mem_pool(expr_mem_tracker());
   vector<FilterContext> filter_ctxs;
   Status filter_status = Status::OK();
   for (auto& filter_ctx: filter_ctxs_) {
     FilterContext filter;
-    filter_status = filter.CloneFrom(filter_ctx, runtime_state_);
+    filter_status = filter.CloneFrom(filter_ctx, pool_, runtime_state_, &filter_mem_pool);
     if (!filter_status.ok()) break;
     filter_ctxs.push_back(filter);
   }
@@ -382,14 +390,7 @@ void HdfsScanNode::ScannerThread() {
           // Unlock before releasing the thread token to avoid deadlock in
           // ThreadTokenAvailableCb().
           l.unlock();
-          runtime_state_->resource_pool()->ReleaseThreadToken(false);
-          if (filter_status.ok()) {
-            for (auto& ctx: filter_ctxs) {
-              ctx.expr_ctx->FreeLocalAllocations();
-              ctx.expr_ctx->Close(runtime_state_);
-            }
-          }
-          return;
+          goto exit;
         }
       } else {
         // If this is the only scanner thread, it should keep running regardless
@@ -454,16 +455,17 @@ void HdfsScanNode::ScannerThread() {
       break;
     }
   }
+  COUNTER_ADD(&active_scanner_thread_counter_, -1);
 
+exit:
+  runtime_state_->resource_pool()->ReleaseThreadToken(false);
   if (filter_status.ok()) {
     for (auto& ctx: filter_ctxs) {
-      ctx.expr_ctx->FreeLocalAllocations();
-      ctx.expr_ctx->Close(runtime_state_);
+      ctx.expr_eval->FreeLocalAllocations();
+      ctx.expr_eval->Close(runtime_state_);
     }
   }
-
-  COUNTER_ADD(&active_scanner_thread_counter_, -1);
-  runtime_state_->resource_pool()->ReleaseThreadToken(false);
+  filter_mem_pool.FreeAll();
 }
 
 namespace {
@@ -540,9 +542,8 @@ Status HdfsScanNode::ProcessSplit(const vector<FilterContext>& filter_ctxs,
     VLOG_QUERY << ss.str();
   }
 
-  // Transfer the remaining resources to the final row batch (if any) and add it to
-  // the row batch queue.
-  scanner->Close(scanner->batch());
+  // Transfer remaining resources to a final batch and add it to the row batch queue.
+  scanner->Close();
   return status;
 }
 

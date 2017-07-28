@@ -42,22 +42,23 @@ using namespace impala;
 InProcessImpalaServer* InProcessImpalaServer::StartWithEphemeralPorts(
     const string& statestore_host, int statestore_port) {
   for (int tries = 0; tries < 10; ++tries) {
-    int backend_port = FindUnusedEphemeralPort();
+    vector<int> used_ports;
+    int backend_port = FindUnusedEphemeralPort(&used_ports);
     if (backend_port == -1) continue;
     // This flag is read directly in several places to find the address of the local
     // backend interface.
     FLAGS_be_port = backend_port;
 
-    int subscriber_port = FindUnusedEphemeralPort();
+    int subscriber_port = FindUnusedEphemeralPort(&used_ports);
     if (subscriber_port == -1) continue;
 
-    int webserver_port = FindUnusedEphemeralPort();
+    int webserver_port = FindUnusedEphemeralPort(&used_ports);
     if (webserver_port == -1) continue;
 
-    int beeswax_port = FindUnusedEphemeralPort();
+    int beeswax_port = FindUnusedEphemeralPort(&used_ports);
     if (beeswax_port == -1) continue;
 
-    int hs2_port = FindUnusedEphemeralPort();
+    int hs2_port = FindUnusedEphemeralPort(&used_ports);
     if (hs2_port == -1) continue;
 
     InProcessImpalaServer* impala =
@@ -65,8 +66,7 @@ InProcessImpalaServer* InProcessImpalaServer::StartWithEphemeralPorts(
             webserver_port, statestore_host, statestore_port);
     // Start the daemon and check if it works, if not delete the current server object and
     // pick a new set of ports
-    Status started = impala->StartWithClientServers(beeswax_port, hs2_port,
-        !statestore_host.empty());
+    Status started = impala->StartWithClientServers(beeswax_port, hs2_port);
     if (started.ok()) {
       impala->SetCatalogInitialized();
       return impala;
@@ -93,8 +93,7 @@ void InProcessImpalaServer::SetCatalogInitialized() {
   exec_env_->frontend()->SetCatalogInitialized();
 }
 
-Status InProcessImpalaServer::StartWithClientServers(int beeswax_port, int hs2_port,
-    bool use_statestore) {
+Status InProcessImpalaServer::StartWithClientServers(int beeswax_port, int hs2_port) {
   RETURN_IF_ERROR(exec_env_->StartServices());
   beeswax_port_ = beeswax_port;
   hs2_port_ = hs2_port;
@@ -117,7 +116,7 @@ Status InProcessImpalaServer::StartWithClientServers(int beeswax_port, int hs2_p
   return Status::OK();
 }
 
-Status InProcessImpalaServer::StartAsBackendOnly(bool use_statestore) {
+Status InProcessImpalaServer::StartAsBackendOnly() {
   RETURN_IF_ERROR(exec_env_->StartServices());
   ThriftServer* be_server;
   RETURN_IF_ERROR(CreateImpalaServer(exec_env_.get(), 0, 0, backend_port_, NULL, NULL,
@@ -134,10 +133,11 @@ Status InProcessImpalaServer::Join() {
 
 InProcessStatestore* InProcessStatestore::StartWithEphemeralPorts() {
   for (int tries = 0; tries < 10; ++tries) {
-    int statestore_port = FindUnusedEphemeralPort();
+    vector<int> used_ports;
+    int statestore_port = FindUnusedEphemeralPort(&used_ports);
     if (statestore_port == -1) continue;
 
-    int webserver_port = FindUnusedEphemeralPort();
+    int webserver_port = FindUnusedEphemeralPort(&used_ports);
     if (webserver_port == -1) continue;
 
     InProcessStatestore* ips = new InProcessStatestore(statestore_port, webserver_port);

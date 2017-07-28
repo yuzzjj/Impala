@@ -113,7 +113,7 @@ class TestTpchMemLimitError(TestLowMemoryLimits):
   MIN_MEM_FOR_TPCH = { 'Q1' : 140, 'Q2' : 120, 'Q3' : 240, 'Q4' : 125, 'Q5' : 235,\
                        'Q6' : 25, 'Q7' : 265, 'Q8' : 250, 'Q9' : 400, 'Q10' : 240,\
                        'Q11' : 110, 'Q12' : 125, 'Q13' : 110, 'Q14' : 229, 'Q15' : 125,\
-                       'Q16' : 125, 'Q17' : 130, 'Q18' : 425, 'Q19' : 240, 'Q20' : 250,\
+                       'Q16' : 125, 'Q17' : 130, 'Q18' : 475, 'Q19' : 240, 'Q20' : 250,\
                        'Q21' : 620, 'Q22' : 125}
 
   @classmethod
@@ -202,11 +202,11 @@ class TestTpchMemLimitError(TestLowMemoryLimits):
 
 class TestTpcdsMemLimitError(TestLowMemoryLimits):
   # The mem limits that will be used.
-  MEM_IN_MB = [20, 100, 110, 150]
+  MEM_IN_MB = [20, 100, 116, 150]
 
   # Different values of mem limits and minimum mem limit (in MBs) each query is expected
   # to run without problem. Those values were determined by manual testing.
-  MIN_MEM_FOR_TPCDS = { 'q53' : 110}
+  MIN_MEM_FOR_TPCDS = { 'q53' : 116}
 
   @classmethod
   def get_workload(self):

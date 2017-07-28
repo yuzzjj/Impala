@@ -100,7 +100,7 @@ public class AnalyticEvalNode extends PlanNode {
   }
 
   @Override
-  public boolean isBlockingNode() { return true; }
+  public boolean isBlockingNode() { return false; }
   public List<Expr> getPartitionExprs() { return partitionExprs_; }
   public List<OrderByElement> getOrderByElements() { return orderByElements_; }
 
@@ -242,14 +242,14 @@ public class AnalyticEvalNode extends PlanNode {
   }
 
   @Override
-  public void computeResourceProfile(TQueryOptions queryOptions) {
+  public void computeNodeResourceProfile(TQueryOptions queryOptions) {
     Preconditions.checkNotNull(
         fragment_, "PlanNode must be placed into a fragment before calling this method.");
     // TODO: come up with estimate based on window
     long perInstanceMemEstimate = 0;
 
     // Must be kept in sync with MIN_REQUIRED_BUFFERS in AnalyticEvalNode in be.
-    long perInstanceMinBufferBytes = 2 * SPILLABLE_BUFFER_BYTES;
-    resourceProfile_ = new ResourceProfile(perInstanceMemEstimate, perInstanceMinBufferBytes);
+    long perInstanceMinBufferBytes = 2 * getDefaultSpillableBufferBytes();
+    nodeResourceProfile_ = new ResourceProfile(perInstanceMemEstimate, perInstanceMinBufferBytes);
   }
 }

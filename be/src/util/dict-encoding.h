@@ -22,11 +22,12 @@
 
 #include <boost/unordered_map.hpp>
 
-#include "gutil/bits.h"
-#include "gutil/strings/substitute.h"
+#include "common/compiler-util.h"
 #include "exec/parquet-common.h"
+#include "gutil/strings/substitute.h"
 #include "runtime/mem-pool.h"
 #include "runtime/string-value.h"
+#include "util/bit-util.h"
 #include "util/rle-encoding.h"
 
 namespace impala {
@@ -73,7 +74,7 @@ class DictEncoderBase {
   int bit_width() const {
     if (UNLIKELY(num_entries() == 0)) return 0;
     if (UNLIKELY(num_entries() == 1)) return 1;
-    return Bits::Log2Ceiling64(num_entries());
+    return BitUtil::Log2Ceiling64(num_entries());
   }
 
   /// Writes out any buffered indices to buffer preceded by the bit width of this data.
@@ -285,8 +286,9 @@ inline int DictEncoder<StringValue>::AddToTable(const StringValue& value,
   return bytes_added;
 }
 
-template<typename T>
-inline bool DictDecoder<T>::GetNextValue(T* value) {
+// Force inlining - GCC does not always inline this into hot loops in Parquet scanner.
+template <typename T>
+ALWAYS_INLINE inline bool DictDecoder<T>::GetNextValue(T* value) {
   int index = -1; // Initialize to avoid compiler warning.
   bool result = data_decoder_.Get(&index);
   // Use & to avoid branches.
@@ -297,15 +299,17 @@ inline bool DictDecoder<T>::GetNextValue(T* value) {
   return false;
 }
 
-template<>
-inline bool DictDecoder<Decimal16Value>::GetNextValue(Decimal16Value* value) {
+// Force inlining - GCC does not always inline this into hot loops in Parquet scanner.
+template <>
+ALWAYS_INLINE inline bool DictDecoder<Decimal16Value>::GetNextValue(
+    Decimal16Value* value) {
   int index;
   bool result = data_decoder_.Get(&index);
   if (!result) return false;
   if (index >= dict_.size()) return false;
   // Workaround for IMPALA-959. Use memcpy instead of '=' so addresses
   // do not need to be 16 byte aligned.
-  uint8_t* addr = reinterpret_cast<uint8_t*>(&dict_[0]);
+  uint8_t* addr = reinterpret_cast<uint8_t*>(dict_.data());
   addr = addr + index * sizeof(*value);
   memcpy(value, addr, sizeof(*value));
   return true;
@@ -314,7 +318,7 @@ inline bool DictDecoder<Decimal16Value>::GetNextValue(Decimal16Value* value) {
 template<typename T>
 inline void DictEncoder<T>::WriteDict(uint8_t* buffer) {
   for (const Node& node: nodes_) {
-    buffer += ParquetPlainEncoder::Encode(buffer, encoded_value_size_, node.value);
+    buffer += ParquetPlainEncoder::Encode(node.value, encoded_value_size_, buffer);
   }
 }
 

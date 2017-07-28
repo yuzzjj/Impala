@@ -81,9 +81,10 @@ class RuntimeState {
   RuntimeState(QueryState* query_state, const TPlanFragmentCtx& fragment_ctx,
       const TPlanFragmentInstanceCtx& instance_ctx, ExecEnv* exec_env);
 
-  /// RuntimeState for executing expr in fe-support.
+  /// RuntimeState for test execution and fe-support.cc. Creates its own QueryState and
+  /// installs desc_tbl, if set. If query_ctx.request_pool isn't set, sets it to "test-pool".
   RuntimeState(
-      const TQueryCtx& query_ctx, ExecEnv* exec_env, const std::string& request_pool);
+      const TQueryCtx& query_ctx, ExecEnv* exec_env, DescriptorTbl* desc_tbl = nullptr);
 
   /// Empty d'tor to avoid issues with scoped_ptr.
   ~RuntimeState();
@@ -95,9 +96,9 @@ class RuntimeState {
   Status CreateBlockMgr();
 
   QueryState* query_state() const { return query_state_; }
-  ObjectPool* obj_pool() const { return obj_pool_.get(); }
-  const DescriptorTbl& desc_tbl() const { return *desc_tbl_; }
-  void set_desc_tbl(DescriptorTbl* desc_tbl) { desc_tbl_ = desc_tbl; }
+  /// Return the query's ObjectPool
+  ObjectPool* obj_pool() const;
+  const DescriptorTbl& desc_tbl() const;
   const TQueryOptions& query_options() const;
   int batch_size() const { return query_options().batch_size; }
   bool abort_on_error() const { return query_options().abort_on_error; }
@@ -114,6 +115,7 @@ class RuntimeState {
     return query_ctx().session.connected_user;
   }
   const TimestampValue* now() const { return now_.get(); }
+  const TimestampValue* utc_timestamp() const { return utc_timestamp_.get(); }
   void set_now(const TimestampValue* now);
   const TUniqueId& query_id() const { return query_ctx().query_id; }
   const TUniqueId& fragment_instance_id() const {
@@ -128,7 +130,7 @@ class RuntimeState {
   CatalogServiceClientCache* catalogd_client_cache();
   DiskIoMgr* io_mgr();
   MemTracker* instance_mem_tracker() { return instance_mem_tracker_.get(); }
-  MemTracker* query_mem_tracker() { return query_mem_tracker_; }
+  MemTracker* query_mem_tracker();  // reference to the query_state_'s memtracker
   ReservationTracker* instance_buffer_reservation() {
     return instance_buffer_reservation_;
   }
@@ -253,7 +255,7 @@ class RuntimeState {
   Status LogOrReturnError(const ErrorMsg& message);
 
   bool is_cancelled() const { return is_cancelled_; }
-  void set_is_cancelled(bool v) { is_cancelled_ = v; }
+  void set_is_cancelled() { is_cancelled_ = true; }
 
   RuntimeProfile::Counter* total_storage_wait_timer() {
     return total_storage_wait_timer_;
@@ -292,8 +294,8 @@ class RuntimeState {
 
   /// Returns a non-OK status if query execution should stop (e.g., the query was
   /// cancelled or a mem limit was exceeded). Exec nodes should check this periodically so
-  /// execution doesn't continue if the query terminates abnormally. This can be called
-  /// after ReleaseResources().
+  /// execution doesn't continue if the query terminates abnormally. This should not be
+  /// called after ReleaseResources().
   Status CheckQueryState();
 
   /// Create a codegen object accessible via codegen() if it doesn't exist already.
@@ -320,9 +322,6 @@ class RuntimeState {
     block_mgr_ = block_mgr;
   }
 
-  DescriptorTbl* desc_tbl_ = nullptr;
-  boost::scoped_ptr<ObjectPool> obj_pool_;
-
   /// Lock protecting error_log_
   SpinLock error_log_lock_;
 
@@ -330,20 +329,22 @@ class RuntimeState {
   ErrorLogMap error_log_;
 
   /// Global QueryState and original thrift descriptors for this fragment instance.
-  /// Not set by the (const TQueryCtx&) c'tor.
   QueryState* const query_state_;
   const TPlanFragmentCtx* const fragment_ctx_;
   const TPlanFragmentInstanceCtx* const instance_ctx_;
 
-  /// Provides query ctx if query_state_ == nullptr.
-  TQueryCtx local_query_ctx_;
+  /// only populated by the (const QueryCtx&, ExecEnv*, DescriptorTbl*) c'tor
+  boost::scoped_ptr<QueryState> local_query_state_;
 
   /// Provides instance id if instance_ctx_ == nullptr
   TUniqueId no_instance_id_;
 
-  /// Query-global timestamp, e.g., for implementing now(). Set from query_globals_.
-  /// Use pointer to avoid inclusion of timestampvalue.h and avoid clang issues.
+  /// Query-global timestamps for implementing now() and utc_timestamp(). Both represent
+  /// the same point in time but now_ is in local time and utc_timestamp_ is in UTC.
+  /// Set from query_globals_. Use pointer to avoid inclusion of timestampvalue.h and
+  /// avoid clang issues.
   boost::scoped_ptr<TimestampValue> now_;
+  boost::scoped_ptr<TimestampValue> utc_timestamp_;
 
   /// TODO: get rid of this and use ExecEnv::GetInstance() instead
   ExecEnv* exec_env_;
@@ -377,16 +378,12 @@ class RuntimeState {
   /// Total CPU utilization for all threads in this plan fragment.
   RuntimeProfile::ThreadCounters* total_thread_statistics_;
 
-  /// Reference to the query MemTracker, owned by 'query_state_' if that is non-NULL
-  /// or stored in 'obj_pool_' otherwise.
-  MemTracker* query_mem_tracker_;
-
   /// Memory usage of this fragment instance, a child of 'query_mem_tracker_'.
   boost::scoped_ptr<MemTracker> instance_mem_tracker_;
 
   /// Buffer reservation for this fragment instance - a child of the query buffer
   /// reservation. Non-NULL if 'query_state_' is not NULL and ExecEnv::buffer_pool_
-  /// was created by a backend test. Owned by 'obj_pool_'.
+  /// was created by a backend test. Owned by obj_pool().
   ReservationTracker* instance_buffer_reservation_;
 
   /// if true, execution should stop with a CANCELLED status

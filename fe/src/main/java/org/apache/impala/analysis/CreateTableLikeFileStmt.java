@@ -270,8 +270,12 @@ public class CreateTableLikeFileStmt extends CreateTableStmt {
 
     PrimitiveType prim = parquetType.asPrimitiveType();
     if (prim.getPrimitiveTypeName() == PrimitiveType.PrimitiveTypeName.BINARY &&
-        orig == OriginalType.UTF8) {
+        (orig == OriginalType.UTF8 || orig == OriginalType.ENUM)) {
       // UTF8 is the type annotation Parquet uses for strings
+      // ENUM is the type annotation Parquet uses to indicate that
+      // the original data type, before conversion to parquet, had been enum.
+      // Applications which do not have enumerated types (e.g. Impala)
+      // should interpret it as a string.
       // We check to make sure it applies to BINARY to avoid errors if there is a bad
       // annotation.
       return Type.STRING;
@@ -344,11 +348,11 @@ public class CreateTableLikeFileStmt extends CreateTableStmt {
         schemaLocation_.toString());
     String s = ToSqlUtils.getCreateTableSql(getDb(),
         getTbl() + " __LIKE_FILEFORMAT__ ",  getComment(), colsSql, partitionColsSql,
-        null, null, getTblProperties(), getSerdeProperties(), isExternal(),
-        getIfNotExists(), getRowFormat(), HdfsFileFormat.fromThrift(getFileFormat()),
-        compression, null, getLocation());
-    s = s.replace("__LIKE_FILEFORMAT__", "LIKE " + schemaFileFormat_ + " " +
-        schemaLocation_.toString());
+        null, null, getSortColumns(), getTblProperties(), getSerdeProperties(),
+        isExternal(), getIfNotExists(), getRowFormat(),
+        HdfsFileFormat.fromThrift(getFileFormat()), compression, null, getLocation());
+    s = s.replace("__LIKE_FILEFORMAT__", String.format("LIKE %s '%s'",
+        schemaFileFormat_, schemaLocation_.toString()));
     return s;
   }
 

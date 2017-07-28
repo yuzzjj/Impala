@@ -30,6 +30,7 @@ from tests.common.test_dimensions import (
     create_uncompressed_text_dimension)
 from tests.util.calculation_util import get_random_id
 from tests.util.filesystem_utils import get_fs_path, IS_S3
+from tests.verifiers.metric_verifier import MetricVerifier
 
 class TestUdfBase(ImpalaTestSuite):
   """
@@ -103,6 +104,11 @@ create aggregate function {database}.agg_decimal_intermediate(decimal(2,1), int)
 returns decimal(6,5) intermediate decimal(4,3) location '{location}'
 init_fn='AggDecimalIntermediateInit' update_fn='AggDecimalIntermediateUpdate'
 merge_fn='AggDecimalIntermediateMerge' finalize_fn='AggDecimalIntermediateFinalize';
+
+create aggregate function {database}.agg_string_intermediate(decimal(20,10), bigint, string)
+returns decimal(20,0) intermediate string location '{location}'
+init_fn='AggStringIntermediateInit' update_fn='AggStringIntermediateUpdate'
+merge_fn='AggStringIntermediateMerge' finalize_fn='AggStringIntermediateFinalize';
 """
 
   # Create test UDF functions in {database} from library {location}
@@ -255,6 +261,7 @@ class TestUdfExecution(TestUdfBase):
     super(TestUdfExecution, cls).add_test_dimensions()
     cls.ImpalaTestMatrix.add_dimension(
         create_exec_option_dimension_from_dict({"disable_codegen" : [False, True],
+          "disable_codegen_rows_threshold" : [0],
           "exec_single_node_rows_threshold" : [0,100],
           "enable_expr_rewrites" : [False, True]}))
     # There is no reason to run these tests using all dimensions.
@@ -335,6 +342,14 @@ class TestUdfExecution(TestUdfBase):
       assert False, "Query was expected to fail"
     except ImpalaBeeswaxException, e:
       self._check_exception(e)
+
+    # It takes a long time for Impala to free up memory after this test, especially if
+    # ASAN is enabled. Verify that all fragments finish executing before moving on to the
+    # next test to make sure that the next test is not affected.
+    for impalad in ImpalaCluster().impalads:
+      verifier = MetricVerifier(impalad.service)
+      verifier.wait_for_metric("impala-server.num-fragments-in-flight", 0)
+      verifier.verify_num_unused_buffers()
 
   def test_udf_constant_folding(self, vector, unique_database):
     """Test that constant folding of UDFs is handled correctly. Uses count_rows(),

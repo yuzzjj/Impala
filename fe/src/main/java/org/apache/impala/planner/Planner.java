@@ -43,6 +43,7 @@ import org.apache.impala.thrift.TQueryExecRequest;
 import org.apache.impala.thrift.TQueryOptions;
 import org.apache.impala.thrift.TRuntimeFilterMode;
 import org.apache.impala.thrift.TTableName;
+import org.apache.impala.util.KuduUtil;
 import org.apache.impala.util.MaxRowsProcessedVisitor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,6 +57,13 @@ import com.google.common.collect.Lists;
  */
 public class Planner {
   private final static Logger LOG = LoggerFactory.getLogger(Planner.class);
+
+  // Minimum per-host resource requirements to ensure that no plan node set can have
+  // estimates of zero, even if the contained PlanNodes have estimates of zero.
+  public static final long MIN_PER_HOST_MEM_ESTIMATE_BYTES = 10 * 1024 * 1024;
+
+  public static final ResourceProfile MIN_PER_HOST_RESOURCES =
+      new ResourceProfile(MIN_PER_HOST_MEM_ESTIMATE_BYTES, 0);
 
   private final PlannerContext ctx_;
 
@@ -89,24 +97,7 @@ public class Planner {
     ctx_.getAnalysisResult().getTimeline().markEvent("Single node plan created");
     ArrayList<PlanFragment> fragments = null;
 
-    // Determine the maximum number of rows processed by any node in the plan tree
-    MaxRowsProcessedVisitor visitor = new MaxRowsProcessedVisitor();
-    singleNodePlan.accept(visitor);
-    long maxRowsProcessed = visitor.get() == -1 ? Long.MAX_VALUE : visitor.get();
-    boolean isSmallQuery =
-        maxRowsProcessed < ctx_.getQueryOptions().exec_single_node_rows_threshold;
-    if (isSmallQuery) {
-      // Execute on a single node and disable codegen for small results
-      ctx_.getQueryOptions().setNum_nodes(1);
-      ctx_.getQueryCtx().disable_codegen_hint = true;
-      if (maxRowsProcessed < ctx_.getQueryOptions().batch_size ||
-          maxRowsProcessed < 1024 && ctx_.getQueryOptions().batch_size == 0) {
-        // Only one scanner thread for small queries
-        ctx_.getQueryOptions().setNum_scanner_threads(1);
-      }
-      // disable runtime filters
-      ctx_.getQueryOptions().setRuntime_filter_mode(TRuntimeFilterMode.OFF);
-    }
+    checkForSmallQueryOptimization(singleNodePlan);
 
     // Join rewrites.
     invertJoins(singleNodePlan, ctx_.isSingleNodeExec());
@@ -165,13 +156,17 @@ public class Planner {
     }
     rootFragment.setOutputExprs(resultExprs);
 
+    // The check for disabling codegen uses estimates of rows per node so must be done
+    // on the distributed plan.
+    checkForDisableCodegen(rootFragment.getPlanRoot());
+
     if (LOG.isTraceEnabled()) {
       LOG.trace("desctbl: " + ctx_.getRootAnalyzer().getDescTbl().debugString());
       LOG.trace("resultexprs: " + Expr.debugString(rootFragment.getOutputExprs()));
       LOG.trace("finalize plan fragments");
     }
     for (PlanFragment fragment: fragments) {
-      fragment.finalize(ctx_.getRootAnalyzer());
+      fragment.finalizeExchanges(ctx_.getRootAnalyzer());
     }
 
     Collections.reverse(fragments);
@@ -277,6 +272,9 @@ public class Planner {
           PrintUtils.printBytes(request.getPer_host_mem_estimate())));
       hasHeader = true;
     }
+    if (request.query_ctx.disable_codegen_hint) {
+      str.append("Codegen disabled by planner\n");
+    }
 
     // IMPALA-1983 In the case of corrupt stats, issue a warning for all queries except
     // child queries of 'compute stats'.
@@ -341,48 +339,66 @@ public class Planner {
   }
 
   /**
-   * Estimates the per-host resource requirements for the given plans, and sets the
-   * results in request.
-   * TODO: The LOG.warn() messages should eventually become Preconditions checks
-   * once resource estimation is more robust.
+   * Computes the per-host resource profile for the given plans, i.e. the peak resources
+   * consumed by all fragment instances belonging to the query per host. Sets the
+   * per-host resource values in 'request'.
    */
   public void computeResourceReqs(List<PlanFragment> planRoots,
       TQueryExecRequest request) {
     Preconditions.checkState(!planRoots.isEmpty());
     Preconditions.checkNotNull(request);
+    TQueryOptions queryOptions = ctx_.getRootAnalyzer().getQueryOptions();
+    int mtDop = queryOptions.getMt_dop();
 
-    // Compute the sum over all plans.
-    // TODO: Revisit during MT work - scheduling of fragments will change and computing
-    // the sum may not be correct or optimal.
-    ResourceProfile totalResources = ResourceProfile.invalid();
-    for (PlanFragment planRoot: planRoots) {
-      ResourceProfile planMaxResources = ResourceProfile.invalid();
-      ArrayList<PlanFragment> fragments = planRoot.getNodesPreOrder();
-      // Compute pipelined plan node sets.
-      ArrayList<PipelinedPlanNodeSet> planNodeSets =
-          PipelinedPlanNodeSet.computePlanNodeSets(fragments.get(0).getPlanRoot());
+    // Peak per-host peak resources for all plan fragments.
+    ResourceProfile perHostPeakResources = ResourceProfile.invalid();
+    // Total of initial reservation claims in bytes by all operators in all fragment
+    // instances per host. Computed by summing the per-host minimum reservations of
+    // all plan nodes and sinks.
+    long perHostInitialReservationTotal = 0;
 
-      // Compute the max of the per-host resources requirement.
-      // Note that the different maxes may come from different plan node sets.
-      for (PipelinedPlanNodeSet planNodeSet : planNodeSets) {
-        TQueryOptions queryOptions = ctx_.getQueryOptions();
-        ResourceProfile perHostResources =
-            planNodeSet.computePerHostResources(queryOptions);
-        if (!perHostResources.isValid()) continue;
-        planMaxResources = ResourceProfile.max(planMaxResources, perHostResources);
+    // Do a pass over all the fragments to compute resource profiles. Compute the
+    // profiles bottom-up since a fragment's profile may depend on its descendants.
+    List<PlanFragment> allFragments = planRoots.get(0).getNodesPostOrder();
+    for (PlanFragment fragment: allFragments) {
+      // Compute the per-node, per-sink and aggregate profiles for the fragment.
+      fragment.computeResourceProfile(ctx_.getRootAnalyzer());
+
+      // Different fragments do not synchronize their Open() and Close(), so the backend
+      // does not provide strong guarantees about whether one fragment instance releases
+      // resources before another acquires them. Conservatively assume that all fragment
+      // instances can consume their peak resources at the same time, i.e. that the
+      // query-wide peak resources is the sum of the per-fragment-instance peak
+      // resources.
+      perHostPeakResources =
+          perHostPeakResources.sum(fragment.getPerHostResourceProfile());
+      perHostInitialReservationTotal += fragment.getNumInstancesPerHost(mtDop)
+          * fragment.getSink().getResourceProfile().getMinReservationBytes();
+
+      for (PlanNode node: fragment.collectPlanNodes()) {
+        perHostInitialReservationTotal += fragment.getNumInstances(mtDop)
+            * node.getNodeResourceProfile().getMinReservationBytes();
       }
-      totalResources = ResourceProfile.sum(totalResources, planMaxResources);
     }
 
-    Preconditions.checkState(totalResources.getMemEstimateBytes() >= 0);
-    Preconditions.checkState(totalResources.getMinReservationBytes() >= 0);
-    request.setPer_host_mem_estimate(totalResources.getMemEstimateBytes());
-    request.setPer_host_min_reservation(totalResources.getMinReservationBytes());
+    Preconditions.checkState(perHostPeakResources.getMemEstimateBytes() >= 0,
+        perHostPeakResources.getMemEstimateBytes());
+    Preconditions.checkState(perHostPeakResources.getMinReservationBytes() >= 0,
+        perHostPeakResources.getMinReservationBytes());
+
+    perHostPeakResources = MIN_PER_HOST_RESOURCES.max(perHostPeakResources);
+
+    request.setPer_host_mem_estimate(perHostPeakResources.getMemEstimateBytes());
+    request.setPer_host_min_reservation(perHostPeakResources.getMinReservationBytes());
+    request.setPer_host_initial_reservation_total_claims(perHostInitialReservationTotal);
     if (LOG.isTraceEnabled()) {
-      LOG.trace("Per-host min buffer : " + totalResources.getMinReservationBytes());
-      LOG.trace("Estimated per-host memory: " + totalResources.getMemEstimateBytes());
+      LOG.trace("Per-host min buffer : " + perHostPeakResources.getMinReservationBytes());
+      LOG.trace(
+          "Estimated per-host memory: " + perHostPeakResources.getMemEstimateBytes());
+      LOG.trace("Per-host initial reservation total: " + perHostInitialReservationTotal);
     }
   }
+
 
   /**
    * Traverses the plan tree rooted at 'root' and inverts outer and semi joins
@@ -480,27 +496,72 @@ public class Planner {
     return newJoinNode;
   }
 
+  private void checkForSmallQueryOptimization(PlanNode singleNodePlan) {
+    MaxRowsProcessedVisitor visitor = new MaxRowsProcessedVisitor();
+    singleNodePlan.accept(visitor);
+    // TODO: IMPALA-3335: support the optimization for plans with joins.
+    if (!visitor.valid() || visitor.foundJoinNode()) return;
+    // This optimization executes the plan on a single node so the threshold must
+    // be based on the total number of rows processed.
+    long maxRowsProcessed = visitor.getMaxRowsProcessed();
+    int threshold = ctx_.getQueryOptions().exec_single_node_rows_threshold;
+    if (maxRowsProcessed < threshold) {
+      // Execute on a single node and disable codegen for small results
+      ctx_.getQueryOptions().setNum_nodes(1);
+      ctx_.getQueryCtx().disable_codegen_hint = true;
+      if (maxRowsProcessed < ctx_.getQueryOptions().batch_size ||
+          maxRowsProcessed < 1024 && ctx_.getQueryOptions().batch_size == 0) {
+        // Only one scanner thread for small queries
+        ctx_.getQueryOptions().setNum_scanner_threads(1);
+      }
+      // disable runtime filters
+      ctx_.getQueryOptions().setRuntime_filter_mode(TRuntimeFilterMode.OFF);
+    }
+  }
+
+  private void checkForDisableCodegen(PlanNode distributedPlan) {
+    MaxRowsProcessedVisitor visitor = new MaxRowsProcessedVisitor();
+    distributedPlan.accept(visitor);
+    if (!visitor.valid()) return;
+    // This heuristic threshold tries to determine if the per-node codegen time will
+    // reduce per-node execution time enough to justify the cost of codegen. Per-node
+    // execution time is correlated with the number of rows flowing through the plan.
+    if (visitor.getMaxRowsProcessedPerNode()
+        < ctx_.getQueryOptions().getDisable_codegen_rows_threshold()) {
+      ctx_.getQueryCtx().disable_codegen_hint = true;
+    }
+  }
+
   /**
-   * Insert a sort node on top of the plan, depending on the clustered/noclustered/sortby
-   * plan hint. If clustering is enabled in insertStmt, then the ordering columns will
-   * start with the clustering columns (key columns for Kudu tables), so that partitions
-   * can be written sequentially in the table sink. Any additional non-clustering columns
-   * specified by the sortby hint will be added to the ordering columns and after any
-   * clustering columns. If neither clustering nor a sortby hint are specified, then no
-   * sort node will be added to the plan.
+   * Insert a sort node on top of the plan, depending on the clustered/noclustered
+   * plan hint and on the 'sort.columns' table property. If clustering is enabled in
+   * insertStmt or additional columns are specified in the 'sort.columns' table property,
+   * then the ordering columns will start with the clustering columns (key columns for
+   * Kudu tables), so that partitions can be written sequentially in the table sink. Any
+   * additional non-clustering columns specified by the 'sort.columns' property will be
+   * added to the ordering columns and after any clustering columns. If no clustering is
+   * requested and the table does not contain columns in the 'sort.columns' property, then
+   * no sort node will be added to the plan.
    */
   public void createPreInsertSort(InsertStmt insertStmt, PlanFragment inputFragment,
        Analyzer analyzer) throws ImpalaException {
     List<Expr> orderingExprs = Lists.newArrayList();
 
-    if (insertStmt.hasClusteredHint()) {
-      if (insertStmt.getTargetTable() instanceof KuduTable) {
+    boolean partialSort = false;
+    if (insertStmt.getTargetTable() instanceof KuduTable) {
+      if (!insertStmt.hasNoClusteredHint() && !ctx_.isSingleNodeExec()) {
+        orderingExprs.add(
+            KuduUtil.createPartitionExpr(insertStmt, ctx_.getRootAnalyzer()));
         orderingExprs.addAll(insertStmt.getPrimaryKeyExprs());
-      } else {
-        orderingExprs.addAll(insertStmt.getPartitionKeyExprs());
+        partialSort = true;
       }
+    } else if (insertStmt.hasClusteredHint() || !insertStmt.getSortExprs().isEmpty()) {
+      // NOTE: If the table has a 'sort.columns' property and the query has a
+      // 'noclustered' hint, we issue a warning during analysis and ignore the
+      // 'noclustered' hint.
+      orderingExprs.addAll(insertStmt.getPartitionKeyExprs());
     }
-    orderingExprs.addAll(insertStmt.getSortByExprs());
+    orderingExprs.addAll(insertStmt.getSortExprs());
     // Ignore constants for the sake of clustering.
     Expr.removeConstants(orderingExprs);
 
@@ -517,10 +578,16 @@ public class Planner {
 
     insertStmt.substituteResultExprs(smap, analyzer);
 
-    SortNode sortNode = new SortNode(ctx_.getNextNodeId(), inputFragment.getPlanRoot(),
-        sortInfo, false, 0);
-    sortNode.init(analyzer);
+    PlanNode node = null;
+    if (partialSort) {
+      node = SortNode.createPartialSortNode(
+          ctx_.getNextNodeId(), inputFragment.getPlanRoot(), sortInfo);
+    } else {
+      node = SortNode.createTotalSortNode(
+          ctx_.getNextNodeId(), inputFragment.getPlanRoot(), sortInfo, 0);
+    }
+    node.init(analyzer);
 
-    inputFragment.setPlanRoot(sortNode);
+    inputFragment.setPlanRoot(node);
   }
 }

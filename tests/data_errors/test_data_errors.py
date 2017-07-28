@@ -21,9 +21,11 @@
 
 import pytest
 import random
+import subprocess
 
+from tests.beeswax.impala_beeswax import ImpalaBeeswaxException
 from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.common.skip import SkipIfS3, SkipIfLocal
+from tests.common.skip import SkipIf, SkipIfS3, SkipIfADLS, SkipIfLocal
 from tests.common.test_dimensions import create_exec_option_dimension
 
 class TestDataErrors(ImpalaTestSuite):
@@ -41,8 +43,69 @@ class TestDataErrors(ImpalaTestSuite):
   def get_workload(self):
     return 'functional-query'
 
+# Regression test for IMP-633. Added as a part of IMPALA-5198.
+@SkipIf.not_hdfs
+class TestHdfsFileOpenFailErrors(ImpalaTestSuite):
+  @pytest.mark.execute_serially
+  def test_hdfs_file_open_fail(self):
+    absolute_location = "/test-warehouse/file_open_fail"
+    create_stmt = \
+        "create table file_open_fail (x int) location '" + absolute_location + "'"
+    insert_stmt = "insert into file_open_fail values(1)"
+    select_stmt = "select * from file_open_fail"
+    drop_stmt = "drop table if exists file_open_fail purge"
+    self.client.execute(drop_stmt)
+    self.client.execute(create_stmt)
+    self.client.execute(insert_stmt)
+    self.filesystem_client.delete_file_dir(absolute_location, recursive=True)
+    assert not self.filesystem_client.exists(absolute_location)
+    try:
+      self.client.execute(select_stmt)
+    except ImpalaBeeswaxException as e:
+      assert "Failed to open HDFS file" in str(e)
+    self.client.execute(drop_stmt)
+
+# Test for IMPALA-5331 to verify that the libHDFS API hdfsGetLastExceptionRootCause()
+# works.
+@SkipIf.not_hdfs
+class TestHdfsUnknownErrors(ImpalaTestSuite):
+  @pytest.mark.execute_serially
+  def test_hdfs_safe_mode_error_255(self, unique_database):
+    create_stmt = "create table {0}.safe_mode_fail (x int)".format(unique_database)
+    insert_stmt = "insert into {0}.safe_mode_fail values (1)".format(unique_database)
+    self.execute_query_expect_success(self.client, create_stmt)
+    self.execute_query_expect_success(self.client, insert_stmt)
+    try:
+      # Check that we're not in safe mode.
+      output, error = subprocess.Popen(
+          ['hdfs', 'dfsadmin', '-safemode', 'get'],
+              stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+      assert error is "", "Couldn't get status of Safe mode. Error: %s" % (error)
+      assert "Safe mode is OFF" in output
+      # Turn safe mode on.
+      output, error = subprocess.Popen(
+          ['hdfs', 'dfsadmin', '-safemode', 'enter'],
+              stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+      assert error is "", "Couldn't turn Safe mode ON. Error: %s" % (error)
+      assert "Safe mode is ON" in output
+
+      # We shouldn't be able to write to HDFS when it's in safe mode.
+      ex = self.execute_query_expect_failure(self.client, insert_stmt)
+
+      # Confirm that it is an Unknown error with error code 255.
+      assert "Unknown error 255" in str(ex)
+      # Confirm that we were able to get the root cause.
+      assert "Name node is in safe mode" in str(ex)
+    finally:
+      # Leave safe mode.
+      output, error = subprocess.Popen(
+          ['hdfs', 'dfsadmin', '-safemode', 'leave'],
+              stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+      assert error is "", "Couldn't turn Safe mode OFF. Error: %s" % (error)
+      assert "Safe mode is OFF" in output
 
 @SkipIfS3.qualified_path
+@SkipIfADLS.qualified_path
 class TestHdfsScanNodeErrors(TestDataErrors):
   @classmethod
   def add_test_dimensions(cls):
@@ -59,8 +122,8 @@ class TestHdfsScanNodeErrors(TestDataErrors):
       pytest.xfail("Expected results differ across file formats")
     self.run_test_case('DataErrorsTest/hdfs-scan-node-errors', vector)
 
-
 @SkipIfS3.qualified_path
+@SkipIfADLS.qualified_path
 @SkipIfLocal.qualified_path
 class TestHdfsSeqScanNodeErrors(TestHdfsScanNodeErrors):
   @classmethod
@@ -75,6 +138,7 @@ class TestHdfsSeqScanNodeErrors(TestHdfsScanNodeErrors):
 
 
 @SkipIfS3.qualified_path
+@SkipIfADLS.qualified_path
 class TestHdfsRcFileScanNodeErrors(TestHdfsScanNodeErrors):
   @classmethod
   def add_test_dimensions(cls):

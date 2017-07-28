@@ -21,7 +21,9 @@
 
 #include "exec/kudu-scanner.h"
 #include "exec/kudu-util.h"
+#include "exprs/scalar-expr.h"
 #include "gutil/gscoped_ptr.h"
+#include "runtime/fragment-instance-state.h"
 #include "runtime/mem-pool.h"
 #include "runtime/runtime-state.h"
 #include "runtime/row-batch.h"
@@ -95,9 +97,9 @@ Status KuduScanNode::GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos
   }
 
   *eos = false;
-  RowBatch* materialized_batch = materialized_row_batches_->GetBatch();
+  unique_ptr<RowBatch> materialized_batch = materialized_row_batches_->GetBatch();
   if (materialized_batch != NULL) {
-    row_batch->AcquireState(materialized_batch);
+    row_batch->AcquireState(materialized_batch.get());
     num_rows_returned_ += row_batch->num_rows();
     COUNTER_SET(rows_returned_counter_, num_rows_returned_);
 
@@ -112,7 +114,7 @@ Status KuduScanNode::GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos
       done_ = true;
       materialized_row_batches_->Shutdown();
     }
-    delete materialized_batch;
+    materialized_batch.reset();
   } else {
     *eos = true;
   }
@@ -152,14 +154,17 @@ void KuduScanNode::ThreadAvailableCb(ThreadResourceMgr::ResourcePool* pool) {
     ++num_active_scanners_;
     COUNTER_ADD(num_scanner_threads_started_counter_, 1);
 
-    // Reserve the first token so no other thread picks it up.
-    const string* token = GetNextScanToken();
-    string name = Substitute("scanner-thread($0)",
+    string name = Substitute(
+        "kudu-scanner-thread (finst:$0, plan-node-id:$1, thread-idx:$2)",
+        PrintId(runtime_state_->fragment_instance_id()), id(),
         num_scanner_threads_started_counter_->value());
 
+    // Reserve the first token so no other thread picks it up.
+    const string* token = GetNextScanToken();
+    auto fn = [this, token, name]() { this->RunScannerThread(name, token); };
     VLOG_RPC << "Thread started: " << name;
-    scanner_threads_.AddThread(new Thread("kudu-scan-node", name,
-        &KuduScanNode::RunScannerThread, this, name, token));
+    scanner_threads_.AddThread(
+        new Thread(FragmentInstanceState::FINST_THREAD_GROUP_NAME, name, fn));
   }
 }
 
@@ -167,15 +172,16 @@ Status KuduScanNode::ProcessScanToken(KuduScanner* scanner, const string& scan_t
   RETURN_IF_ERROR(scanner->OpenNextScanToken(scan_token));
   bool eos = false;
   while (!eos && !done_) {
-    gscoped_ptr<RowBatch> row_batch(new RowBatch(
-        row_desc(), runtime_state_->batch_size(), mem_tracker()));
+    unique_ptr<RowBatch> row_batch = std::make_unique<RowBatch>(row_desc(),
+        runtime_state_->batch_size(), mem_tracker());
     RETURN_IF_ERROR(scanner->GetNext(row_batch.get(), &eos));
     while (!done_) {
       scanner->KeepKuduScannerAlive();
-      if (materialized_row_batches_->AddBatchWithTimeout(row_batch.get(), 1000000)) {
-        ignore_result(row_batch.release());
+      if (materialized_row_batches_->BlockingPutWithTimeout(move(row_batch), 1000000)) {
         break;
       }
+      // Make sure that we still own the RowBatch if BlockingPutWithTimeout() timed out.
+      DCHECK(row_batch != nullptr);
     }
   }
   if (eos) scan_ranges_complete_counter()->Add(1);

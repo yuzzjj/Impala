@@ -26,6 +26,7 @@
 /// needed for scoped_ptr to work on ObjectPool
 #include "common/object-pool.h"
 #include "exec/data-sink.h"
+#include "exec/hdfs-table-writer.h"
 #include "runtime/descriptors.h"
 
 namespace impala {
@@ -34,7 +35,6 @@ class Expr;
 class TupleDescriptor;
 class TupleRow;
 class RuntimeState;
-class HdfsTableWriter;
 class MemTracker;
 
 /// Records the temporary and final Hdfs file name, the opened temporary Hdfs file, and
@@ -127,8 +127,7 @@ struct OutputPartition {
 /// This is consistent with Hive's behavior.
 class HdfsTableSink : public DataSink {
  public:
-  HdfsTableSink(const RowDescriptor& row_desc,
-      const std::vector<TExpr>& select_list_texprs, const TDataSink& tsink);
+  HdfsTableSink(const RowDescriptor* row_desc, const TDataSink& tsink);
 
   virtual std::string GetName() { return "HdfsTableSink"; }
 
@@ -152,7 +151,7 @@ class HdfsTableSink : public DataSink {
   virtual void Close(RuntimeState* state);
 
   int skip_header_line_count() const { return skip_header_line_count_; }
-  const vector<int32_t>& sort_by_columns() const { return sort_by_columns_; }
+  const vector<int32_t>& sort_columns() const { return sort_columns_; }
   const HdfsTableDescriptor& TableDesc() { return *table_desc_; }
 
   RuntimeProfile::Counter* rows_inserted_counter() { return rows_inserted_counter_; }
@@ -162,6 +161,10 @@ class HdfsTableSink : public DataSink {
   RuntimeProfile::Counter* compress_timer() { return compress_timer_; }
 
   std::string DebugString() const;
+
+ protected:
+  virtual Status Init(const std::vector<TExpr>& thrift_output_exprs,
+      const TDataSink& tsink, RuntimeState* state) WARN_UNUSED_RESULT;
 
  private:
   /// Initialises the filenames of a given output partition, and opens the temporary file.
@@ -193,8 +196,8 @@ class HdfsTableSink : public DataSink {
   /// Generates string key for hash_tbl_ as a concatenation of all evaluated exprs,
   /// evaluated against 'row'. The generated string is much shorter than the full Hdfs
   /// file name.
-  void GetHashTblKey(
-      const TupleRow* row, const std::vector<ExprContext*>& ctxs, std::string* key);
+  void GetHashTblKey(const TupleRow* row,
+      const std::vector<ScalarExprEvaluator*>& evals, std::string* key);
 
   /// Given a hashed partition key, get the output partition structure from
   /// the 'partition_keys_to_output_partitions_'. 'no_more_rows' indicates that no more
@@ -202,9 +205,6 @@ class HdfsTableSink : public DataSink {
   Status GetOutputPartition(RuntimeState* state, const TupleRow* row,
       const std::string& key, PartitionPair** partition_pair, bool no_more_rows)
       WARN_UNUSED_RESULT;
-
-  /// Initialise and prepare select and partition key expressions
-  Status PrepareExprs(RuntimeState* state) WARN_UNUSED_RESULT;
 
   /// Sets hdfs_file_name and tmp_hdfs_file_name of given output partition.
   /// The Hdfs directory is created from the target table's base Hdfs dir,
@@ -246,9 +246,6 @@ class HdfsTableSink : public DataSink {
   /// Currently this is the default partition since we don't support multi-format sinks.
   const HdfsPartitionDescriptor* default_partition_;
 
-  /// Exprs that materialize output values
-  std::vector<ExprContext*> output_expr_ctxs_;
-
   /// Table id resolved in Prepare() to set tuple_desc_;
   TableId table_id_;
 
@@ -256,17 +253,6 @@ class HdfsTableSink : public DataSink {
   /// many empty lines at the beginning of new text files, which will be skipped by the
   /// scanners while reading from the files.
   int skip_header_line_count_;
-
-  /// Thrift representation of select list exprs, saved in the constructor
-  /// to be used to initialise output_exprs_ in Init
-  const std::vector<TExpr>& select_list_texprs_;
-
-  /// Thrift representation of partition keys, saved in the constructor
-  /// to be used to initialise partition_key_exprs_ in Init
-  const std::vector<TExpr>& partition_key_texprs_;
-
-  /// Exprs of partition keys.
-  std::vector<ExprContext*> partition_key_expr_ctxs_;
 
   /// Indicates whether the existing partitions should be overwritten.
   bool overwrite_;
@@ -276,9 +262,9 @@ class HdfsTableSink : public DataSink {
   bool input_is_clustered_;
 
   // Stores the indices into the list of non-clustering columns of the target table that
-  // are mentioned in the 'sortby()' hint. This is used in the backend to populate the
-  // RowGroup::sorting_columns list in parquet files.
-  const std::vector<int32_t>& sort_by_columns_;
+  // are stored in the 'sort.columns' table property. This is used in the backend to
+  // populate the RowGroup::sorting_columns list in parquet files.
+  const std::vector<int32_t>& sort_columns_;
 
   /// Stores the current partition during clustered inserts across subsequent row batches.
   /// Only set if 'input_is_clustered_' is true.
@@ -303,9 +289,13 @@ class HdfsTableSink : public DataSink {
   /// OutputPartition in the map to simplify the code.
   PartitionMap partition_keys_to_output_partitions_;
 
-  /// Subset of partition_key_expr_ctxs_ which are not constant. Set in Prepare().
+  /// Expressions for computing the target partitions to which a row is written.
+  std::vector<ScalarExpr*> partition_key_exprs_;
+  std::vector<ScalarExprEvaluator*> partition_key_expr_evals_;
+
+  /// Subset of partition_key_expr_evals_ which are not constant. Set in Prepare().
   /// Used for generating the string key of hash_tbl_.
-  std::vector<ExprContext*> dynamic_partition_key_expr_ctxs_;
+  std::vector<ScalarExprEvaluator*> dynamic_partition_key_expr_evals_;
 
   /// Map from row key (i.e. concatenated non-constant partition keys) to
   /// partition descriptor. We don't own the HdfsPartitionDescriptors, they

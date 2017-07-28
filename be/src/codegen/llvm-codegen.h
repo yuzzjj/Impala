@@ -37,7 +37,7 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
 
-#include "exprs/expr.h"
+#include "exprs/scalar-expr.h"
 #include "impala-ir/impala-ir-functions.h"
 #include "runtime/types.h"
 #include "util/runtime-profile.h"
@@ -231,6 +231,9 @@ class LlvmCodeGen {
   /// Return a pointer to pointer type to 'type'.
   llvm::PointerType* GetPtrPtrType(llvm::Type* type);
 
+  /// Return a pointer to pointer type for 'name' type.
+  llvm::PointerType* GetPtrPtrType(const std::string& name);
+
   /// Returns llvm type for the column type
   llvm::Type* GetType(const ColumnType& type);
 
@@ -407,8 +410,8 @@ class LlvmCodeGen {
   llvm::Function* GetFnvHashFunction(int num_bytes = -1);
   llvm::Function* GetMurmurHashFunction(int num_bytes = -1);
 
-  /// Set the NoInline attribute on 'function' and remove the AlwaysInline attribute if
-  /// present.
+  /// Set the NoInline attribute on 'function' and remove the AlwaysInline and InlineHint
+  /// attributes if present.
   void SetNoInline(llvm::Function* function) const;
 
   /// Allocate stack storage for local variables.  This is similar to traditional c, where
@@ -495,9 +498,10 @@ class LlvmCodeGen {
   void CodegenClearNullBits(LlvmBuilder* builder, llvm::Value* tuple_ptr,
       const TupleDescriptor& tuple_desc);
 
-  /// Codegen to call pool->Allocate(size).
-  llvm::Value* CodegenAllocate(LlvmBuilder* builder, MemPool* pool, llvm::Value* size,
-      const char* name = "");
+  /// Codegen to call pool_val->Allocate(size_val).
+  /// 'pool_val' has to be of type MemPool*.
+  llvm::Value* CodegenMemPoolAllocate(LlvmBuilder* builder, llvm::Value* pool_val,
+      llvm::Value* size_val, const char* name = "");
 
   /// Codegens IR to load array[idx] and returns the loaded value. 'array' should be a
   /// C-style array (e.g. i32*) or an IR array (e.g. [10 x i32]). This function does not
@@ -569,6 +573,11 @@ class LlvmCodeGen {
   /// anyway (they must be explicitly invoked) so it is dead code.
   static void StripGlobalCtorsDtors(llvm::Module* module);
 
+  /// Set the "target-cpu" and "target-features" of 'function' to match the host's CPU's
+  /// features. Having consistent attributes for all materialized functions allows
+  /// generated IR to be inlined into cross-compiled functions' IR and vice versa.
+  static void SetCPUAttrs(llvm::Function* function);
+
   // Setup any JIT listeners to process generated machine code object, e.g. to generate
   // perf symbol map or disassembly.
   void SetupJITListeners();
@@ -638,6 +647,11 @@ class LlvmCodeGen {
   /// Host CPU name and attributes, filled in by InitializeLlvm().
   static std::string cpu_name_;
   static std::vector<std::string> cpu_attrs_;
+
+  /// Value of "target-features" attribute to be set on all IR functions. Derived from
+  /// 'cpu_attrs_'. Using a consistent value for this attribute among hand-crafted IR
+  /// and cross-compiled functions allow them to be inlined into each other.
+  static std::string target_features_attr_;
 
   /// A global shared call graph for all IR functions in the main module.
   /// Used for determining dependencies when materializing IR functions.

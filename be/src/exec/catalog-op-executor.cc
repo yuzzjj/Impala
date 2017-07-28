@@ -19,8 +19,9 @@
 
 #include <sstream>
 
-#include "exec/incr-stats-util.h"
 #include "common/status.h"
+#include "catalog/catalog-service-client-wrapper.h"
+#include "exec/incr-stats-util.h"
 #include "runtime/lib-cache.h"
 #include "runtime/client-cache-types.h"
 #include "runtime/exec-env.h"
@@ -59,8 +60,8 @@ Status CatalogOpExecutor::Exec(const TCatalogOpRequest& request) {
       DCHECK(request.ddl_params.ddl_type != TDdlType::COMPUTE_STATS);
 
       exec_response_.reset(new TDdlExecResponse());
-      RETURN_IF_ERROR(client.DoRpc(&CatalogServiceClient::ExecDdl, request.ddl_params,
-          exec_response_.get()));
+      RETURN_IF_ERROR(client.DoRpc(&CatalogServiceClientWrapper::ExecDdl,
+          request.ddl_params, exec_response_.get()));
       catalog_update_result_.reset(
           new TCatalogUpdateResult(exec_response_.get()->result));
       Status status(exec_response_->result.status);
@@ -75,7 +76,7 @@ Status CatalogOpExecutor::Exec(const TCatalogOpRequest& request) {
     }
     case TCatalogOpType::RESET_METADATA: {
       TResetMetadataResponse response;
-      RETURN_IF_ERROR(client.DoRpc(&CatalogServiceClient::ResetMetadata,
+      RETURN_IF_ERROR(client.DoRpc(&CatalogServiceClientWrapper::ResetMetadata,
           request.reset_metadata_params, &response));
       catalog_update_result_.reset(new TCatalogUpdateResult(response.result));
       return Status(response.result.status);
@@ -112,6 +113,10 @@ Status CatalogOpExecutor::ExecComputeStats(
   // Fill the alteration request based on the child-query results.
   SetTableStats(tbl_stats_schema, tbl_stats_data,
       compute_stats_params.existing_part_stats, &update_stats_params);
+  if (compute_stats_params.__isset.total_file_bytes) {
+    update_stats_params.table_stats.__set_total_file_bytes(
+        compute_stats_params.total_file_bytes);
+  }
   // col_stats_schema and col_stats_data will be empty if there was no column stats query.
   if (!col_stats_schema.columns.empty()) {
     if (compute_stats_params.is_incremental) {
@@ -260,7 +265,7 @@ Status CatalogOpExecutor::GetCatalogObject(const TCatalogObject& object_desc,
 
   TGetCatalogObjectResponse response;
   RETURN_IF_ERROR(
-      client.DoRpc(&CatalogServiceClient::GetCatalogObject, request, &response));
+      client.DoRpc(&CatalogServiceClientWrapper::GetCatalogObject, request, &response));
   *result = response.catalog_object;
   return Status::OK();
 }
@@ -272,7 +277,8 @@ Status CatalogOpExecutor::PrioritizeLoad(const TPrioritizeLoadRequest& req,
   Status status;
   CatalogServiceConnection client(env_->catalogd_client_cache(), address, &status);
   RETURN_IF_ERROR(status);
-  RETURN_IF_ERROR(client.DoRpc(&CatalogServiceClient::PrioritizeLoad, req, result));
+  RETURN_IF_ERROR(
+      client.DoRpc(&CatalogServiceClientWrapper::PrioritizeLoad, req, result));
   return Status::OK();
 }
 
@@ -283,6 +289,7 @@ Status CatalogOpExecutor::SentryAdminCheck(const TSentryAdminCheckRequest& req) 
   CatalogServiceConnection client(env_->catalogd_client_cache(), address, &cnxn_status);
   RETURN_IF_ERROR(cnxn_status);
   TSentryAdminCheckResponse resp;
-  RETURN_IF_ERROR(client.DoRpc(&CatalogServiceClient::SentryAdminCheck, req, &resp));
+  RETURN_IF_ERROR(
+      client.DoRpc(&CatalogServiceClientWrapper::SentryAdminCheck, req, &resp));
   return Status(resp.status);
 }

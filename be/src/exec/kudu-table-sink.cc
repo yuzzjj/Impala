@@ -21,10 +21,11 @@
 #include <thrift/protocol/TDebugProtocol.h>
 
 #include "exec/kudu-util.h"
-#include "exprs/expr.h"
-#include "exprs/expr-context.h"
+#include "exprs/scalar-expr.h"
+#include "exprs/scalar-expr-evaluator.h"
 #include "gen-cpp/ImpalaInternalService_constants.h"
 #include "gutil/gscoped_ptr.h"
+#include "runtime/exec-env.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/row-batch.h"
 #include "util/runtime-profile-counters.h"
@@ -70,38 +71,22 @@ const static string& ROOT_PARTITION_KEY =
 // Send 7MB buffers to Kudu, matching a hard-coded size in Kudu (KUDU-1693).
 const static int INDIVIDUAL_BUFFER_SIZE = 7 * 1024 * 1024;
 
-KuduTableSink::KuduTableSink(const RowDescriptor& row_desc,
-    const vector<TExpr>& select_list_texprs,
-    const TDataSink& tsink)
-    : DataSink(row_desc),
-      table_id_(tsink.table_sink.target_table_id),
-      select_list_texprs_(select_list_texprs),
-      sink_action_(tsink.table_sink.action),
-      kudu_table_sink_(tsink.table_sink.kudu_table_sink),
-      total_rows_(NULL),
-      num_row_errors_(NULL),
-      rows_processed_rate_(NULL) {
+KuduTableSink::KuduTableSink(const RowDescriptor* row_desc, const TDataSink& tsink)
+  : DataSink(row_desc),
+    table_id_(tsink.table_sink.target_table_id),
+    sink_action_(tsink.table_sink.action),
+    kudu_table_sink_(tsink.table_sink.kudu_table_sink) {
+  DCHECK(tsink.__isset.table_sink);
   DCHECK(KuduIsAvailable());
-}
-
-Status KuduTableSink::PrepareExprs(RuntimeState* state) {
-  // From the thrift expressions create the real exprs.
-  RETURN_IF_ERROR(Expr::CreateExprTrees(state->obj_pool(), select_list_texprs_,
-                                        &output_expr_ctxs_));
-  // Prepare the exprs to run.
-  RETURN_IF_ERROR(
-      Expr::Prepare(output_expr_ctxs_, state, row_desc_, expr_mem_tracker_.get()));
-  return Status::OK();
 }
 
 Status KuduTableSink::Prepare(RuntimeState* state, MemTracker* parent_mem_tracker) {
   RETURN_IF_ERROR(DataSink::Prepare(state, parent_mem_tracker));
   SCOPED_TIMER(profile()->total_time_counter());
-  RETURN_IF_ERROR(PrepareExprs(state));
 
   // Get the kudu table descriptor.
   TableDescriptor* table_desc = state->desc_tbl().GetTableDescriptor(table_id_);
-  DCHECK(table_desc != NULL);
+  DCHECK(table_desc != nullptr);
 
   // In debug mode try a dynamic cast. If it fails it means that the
   // TableDescriptor is not an instance of KuduTableDescriptor.
@@ -132,7 +117,7 @@ Status KuduTableSink::Prepare(RuntimeState* state, MemTracker* parent_mem_tracke
 }
 
 Status KuduTableSink::Open(RuntimeState* state) {
-  RETURN_IF_ERROR(Expr::Open(output_expr_ctxs_, state));
+  RETURN_IF_ERROR(DataSink::Open(state));
 
   int64_t required_mem = FLAGS_kudu_sink_mem_required;
   if (!mem_tracker_->TryConsume(required_mem)) {
@@ -140,11 +125,12 @@ Status KuduTableSink::Open(RuntimeState* state) {
         "Could not allocate memory for KuduTableSink", required_mem);
   }
 
-  Status s = CreateKuduClient(table_desc_->kudu_master_addresses(), &client_);
+  Status s =
+      state->exec_env()->GetKuduClient(table_desc_->kudu_master_addresses(), &client_);
   if (!s.ok()) {
     // Close() releases memory if client_ is not NULL, but since the memory was consumed
     // and the client failed to be created, it must be released.
-    DCHECK(client_.get() == NULL);
+    DCHECK(client_ == nullptr);
     mem_tracker_->Release(required_mem);
     return s;
   }
@@ -207,7 +193,7 @@ kudu::client::KuduWriteOperation* KuduTableSink::NewWriteOp() {
 
 Status KuduTableSink::Send(RuntimeState* state, RowBatch* batch) {
   SCOPED_TIMER(profile()->total_time_counter());
-  ExprContext::FreeLocalAllocations(output_expr_ctxs_);
+  ScalarExprEvaluator::FreeLocalAllocations(output_expr_evals_);
   RETURN_IF_ERROR(state->CheckQueryState());
   const KuduSchema& table_schema = table_->schema();
 
@@ -225,16 +211,16 @@ Status KuduTableSink::Send(RuntimeState* state, RowBatch* batch) {
     unique_ptr<kudu::client::KuduWriteOperation> write(NewWriteOp());
     bool add_row = true;
 
-    for (int j = 0; j < output_expr_ctxs_.size(); ++j) {
-      // output_expr_ctxs_ only contains the columns that the op
+    for (int j = 0; j < output_expr_evals_.size(); ++j) {
+      // output_expr_evals_ only contains the columns that the op
       // applies to, i.e. columns explicitly mentioned in the query, and
       // referenced_columns is then used to map to actual column positions.
       int col = kudu_table_sink_.referenced_columns.empty() ?
           j : kudu_table_sink_.referenced_columns[j];
 
-      void* value = output_expr_ctxs_[j]->GetValue(current_row);
-      if (value == NULL) {
-        if (table_schema.Column(j).is_nullable()) {
+      void* value = output_expr_evals_[j]->GetValue(current_row);
+      if (value == nullptr) {
+        if (table_schema.Column(col).is_nullable()) {
           KUDU_RETURN_IF_ERROR(write->mutable_row()->SetNull(col),
               "Could not add Kudu WriteOp.");
           continue;
@@ -250,54 +236,8 @@ Status KuduTableSink::Send(RuntimeState* state, RowBatch* batch) {
         }
       }
 
-      PrimitiveType type = output_expr_ctxs_[j]->root()->type().type;
-      switch (type) {
-        case TYPE_VARCHAR:
-        case TYPE_STRING: {
-          StringValue* sv = reinterpret_cast<StringValue*>(value);
-          kudu::Slice slice(reinterpret_cast<uint8_t*>(sv->ptr), sv->len);
-          KUDU_RETURN_IF_ERROR(write->mutable_row()->SetString(col, slice),
-              "Could not add Kudu WriteOp.");
-          break;
-        }
-        case TYPE_FLOAT:
-          KUDU_RETURN_IF_ERROR(
-              write->mutable_row()->SetFloat(col, *reinterpret_cast<float*>(value)),
-              "Could not add Kudu WriteOp.");
-          break;
-        case TYPE_DOUBLE:
-          KUDU_RETURN_IF_ERROR(
-              write->mutable_row()->SetDouble(col, *reinterpret_cast<double*>(value)),
-              "Could not add Kudu WriteOp.");
-          break;
-        case TYPE_BOOLEAN:
-          KUDU_RETURN_IF_ERROR(
-              write->mutable_row()->SetBool(col, *reinterpret_cast<bool*>(value)),
-              "Could not add Kudu WriteOp.");
-          break;
-        case TYPE_TINYINT:
-          KUDU_RETURN_IF_ERROR(
-              write->mutable_row()->SetInt8(col, *reinterpret_cast<int8_t*>(value)),
-              "Could not add Kudu WriteOp.");
-          break;
-        case TYPE_SMALLINT:
-          KUDU_RETURN_IF_ERROR(
-              write->mutable_row()->SetInt16(col, *reinterpret_cast<int16_t*>(value)),
-              "Could not add Kudu WriteOp.");
-          break;
-        case TYPE_INT:
-          KUDU_RETURN_IF_ERROR(
-              write->mutable_row()->SetInt32(col, *reinterpret_cast<int32_t*>(value)),
-              "Could not add Kudu WriteOp.");
-          break;
-        case TYPE_BIGINT:
-          KUDU_RETURN_IF_ERROR(
-              write->mutable_row()->SetInt64(col, *reinterpret_cast<int64_t*>(value)),
-              "Could not add Kudu WriteOp.");
-          break;
-        default:
-          return Status(TErrorCode::IMPALA_KUDU_TYPE_MISSING, TypeToString(type));
-      }
+      PrimitiveType type = output_expr_evals_[j]->root().type().type;
+      WriteKuduValue(col, type, value, true, write->mutable_row());
     }
     if (add_row) write_ops.push_back(move(write));
   }
@@ -381,12 +321,11 @@ Status KuduTableSink::FlushFinal(RuntimeState* state) {
 
 void KuduTableSink::Close(RuntimeState* state) {
   if (closed_) return;
-  if (client_.get() != NULL) {
+  if (client_ != nullptr) {
     mem_tracker_->Release(FLAGS_kudu_sink_mem_required);
-    client_.reset();
+    client_ = nullptr;
   }
   SCOPED_TIMER(profile()->total_time_counter());
-  Expr::Close(output_expr_ctxs_, state);
   DataSink::Close(state);
   closed_ = true;
 }

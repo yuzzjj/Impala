@@ -266,6 +266,19 @@ enum TImpalaQueryOptions {
   // TODO: Remove the TWO_LEVEL_THEN_THREE_LEVEL mode completely or at least make
   // it non-default in a compatibility breaking release.
   PARQUET_ARRAY_RESOLUTION,
+
+  // Indicates whether to read statistics from Parquet files and use them during query
+  // processing. This includes skipping data based on the statistics and computing query
+  // results like "select min()".
+  PARQUET_READ_STATISTICS,
+
+  // Join distribution mode that is used when the join inputs have an unknown
+  // cardinality, e.g., because of missing table statistics.
+  DEFAULT_JOIN_DISTRIBUTION_MODE,
+
+  // If the number of rows processed per node is below the threshold and disable_codegen
+  // is unset, codegen will be automatically be disabled by the planner.
+  DISABLE_CODEGEN_ROWS_THRESHOLD,
 }
 
 // The summary of a DML statement.

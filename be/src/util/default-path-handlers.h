@@ -20,16 +20,22 @@
 
 #include <stdio.h>
 
+#include "util/webserver.h"
+#include "rapidjson/document.h"
+
 namespace impala {
 
 class MemTracker;
-class Webserver;
 class MetricGroup;
 
 /// Adds a set of default path handlers to the webserver to display
 /// logs and configuration flags
 void AddDefaultUrlCallbacks(Webserver* webserver, MemTracker* process_mem_tracker = NULL,
     MetricGroup* metric_group = NULL);
+
+/// Registered to handle "/"
+/// Populates document with various system-wide information.
+void RootHandler(const Webserver::ArgumentMap& args, rapidjson::Document* document);
 }
 
 #endif // IMPALA_UTIL_DEFAULT_PATH_HANDLERS_H

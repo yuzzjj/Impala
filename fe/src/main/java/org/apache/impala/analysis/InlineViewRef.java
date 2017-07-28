@@ -75,8 +75,9 @@ public class InlineViewRef extends TableRef {
   /**
    * C'tor for creating inline views parsed directly from the a query string.
    */
-  public InlineViewRef(String alias, QueryStmt queryStmt) {
-    super(null, alias);
+  public InlineViewRef(String alias, QueryStmt queryStmt,
+      TableSampleClause sampleParams) {
+    super(null, alias, sampleParams);
     Preconditions.checkNotNull(queryStmt);
     queryStmt_ = queryStmt;
     view_ = null;
@@ -85,7 +86,7 @@ public class InlineViewRef extends TableRef {
   }
 
   public InlineViewRef(String alias, QueryStmt queryStmt, List<String> colLabels) {
-    this(alias, queryStmt);
+    this(alias, queryStmt, (TableSampleClause) null);
     explicitColLabels_ = Lists.newArrayList(colLabels);
   }
 
@@ -108,6 +109,7 @@ public class InlineViewRef extends TableRef {
     aliases_ = new String[] {
         view_.getTableName().toString().toLowerCase(), view_.getName().toLowerCase()
     };
+    sampleParams_ = origTblRef.getSampleParams();
   }
 
   /**
@@ -148,13 +150,14 @@ public class InlineViewRef extends TableRef {
         // If the user does not have privileges on the view's definition
         // then we report a masked authorization error so as not to reveal
         // privileged information (e.g., the existence of a table).
-        inlineViewAnalyzer_.setAuthErrMsg(
+        inlineViewAnalyzer_.setMaskPrivChecks(
             String.format("User '%s' does not have privileges to " +
             "EXPLAIN this statement.", analyzer.getUser().getName()));
       } else {
         // If this is not an EXPLAIN statement, auth checks for the view
-        // definition should be disabled.
-        inlineViewAnalyzer_.setEnablePrivChecks(false);
+        // definition are still performed in order to determine if the user has access
+        // to the runtime profile but don't trigger authorization errors.
+        inlineViewAnalyzer_.setMaskPrivChecks(null);
       }
     }
 
@@ -213,6 +216,7 @@ public class InlineViewRef extends TableRef {
           baseTblSmap_.debugString());
     }
 
+    analyzeTableSample(analyzer);
     analyzeHints(analyzer);
     // Now do the remaining join analysis
     analyzeJoin(analyzer);

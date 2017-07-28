@@ -550,14 +550,36 @@
     "key": "impala-server.scan-ranges.total"
   },
   {
-    "description": "The local start time of the Impala Server.",
+    "description": "The total number of hedged reads attempted over the life of the process",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Start Time",
+    "label": "Hedged Read Operations",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.hedged-read-ops"
+  },
+  {
+    "description": "The total number of times hedged reads were faster than regular read operations",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Hedged Read Operations Won",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.hedged-read-ops-win"
+  },
+  {
+    "description": "The local start time of the process",
+    "contexts": [
+      "IMPALAD",
+      "CATALOGSERVER",
+      "STATESTORE"
+    ],
+    "label": "Process Start Time",
     "units": "NONE",
     "kind": "PROPERTY",
-    "key": "impala-server.start-time"
+    "key": "process-start-time"
   },
   {
     "description": "The full version string of the Impala Server.",
@@ -1092,6 +1114,18 @@
     "key": "tcmalloc.total-bytes-reserved"
   },
   {
+    "description": "Bytes allocated from Address Sanitizer's malloc (Address Sanitizer debug builds only)",
+    "contexts": [
+      "STATESTORE",
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Address Sanitizer Malloc Bytes Allocated",
+    "units": "BYTES",
+    "kind": "GAUGE",
+    "key": "asan-total-bytes-allocated"
+  },
+  {
     "description": "Maximum allowed bytes allocated by the buffer pool.",
     "contexts": [
       "IMPALAD"
@@ -1112,7 +1146,7 @@
     "key": "buffer-pool.system-allocated"
   },
   {
-    "description": "Total memory currently reserved for buffers.",
+    "description": "Total bytes of buffers reserved by Impala subsystems",
     "contexts": [
       "IMPALAD"
     ],
@@ -1120,6 +1154,46 @@
     "units": "BYTES",
     "kind": "GAUGE",
     "key": "buffer-pool.reserved"
+  },
+  {
+    "description": "Total number of free buffers cached in the buffer pool.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Buffer Pool Free Buffers.",
+    "units": "NONE",
+    "kind": "GAUGE",
+    "key": "buffer-pool.free-buffers"
+  },
+  {
+    "description": "Total bytes of free buffer memory cached in the buffer pool.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Buffer Pool Free Buffer Bytes.",
+    "units": "BYTES",
+    "kind": "GAUGE",
+    "key": "buffer-pool.free-buffer-bytes"
+  },
+  {
+    "description": "Total number of clean pages cached in the buffer pool.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Buffer Pool Clean Pages.",
+    "units": "NONE",
+    "kind": "GAUGE",
+    "key": "buffer-pool.clean-pages"
+  },
+  {
+    "description": "Total bytes of clean page memory cached in the buffer pool.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Buffer Pool Clean Page Bytes.",
+    "units": "BYTES",
+    "kind": "GAUGE",
+    "key": "buffer-pool.clean-page-bytes"
   },
   {
     "description": "Total memory currently used by TCMalloc and buffer pool.",

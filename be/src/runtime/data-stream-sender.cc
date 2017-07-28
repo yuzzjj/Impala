@@ -21,8 +21,8 @@
 #include <thrift/protocol/TDebugProtocol.h>
 
 #include "common/logging.h"
-#include "exprs/expr.h"
-#include "exprs/expr-context.h"
+#include "exprs/scalar-expr.h"
+#include "exprs/scalar-expr-evaluator.h"
 #include "gutil/strings/substitute.h"
 #include "runtime/descriptors.h"
 #include "runtime/tuple-row.h"
@@ -66,9 +66,9 @@ class DataStreamSender::Channel : public CacheLineAligned {
   // combination. buffer_size is specified in bytes and a soft limit on
   // how much tuple data is getting accumulated before being sent; it only applies
   // when data is added via AddRow() and not sent directly via SendBatch().
-  Channel(DataStreamSender* parent, const RowDescriptor& row_desc,
-          const TNetworkAddress& destination, const TUniqueId& fragment_instance_id,
-          PlanNodeId dest_node_id, int buffer_size)
+  Channel(DataStreamSender* parent, const RowDescriptor* row_desc,
+      const TNetworkAddress& destination, const TUniqueId& fragment_instance_id,
+      PlanNodeId dest_node_id, int buffer_size)
     : parent_(parent),
       buffer_size_(buffer_size),
       row_desc_(row_desc),
@@ -78,26 +78,25 @@ class DataStreamSender::Channel : public CacheLineAligned {
       num_data_bytes_sent_(0),
       rpc_thread_("DataStreamSender", "SenderThread", 1, 1,
           bind<void>(mem_fn(&Channel::TransmitData), this, _1, _2)),
-      rpc_in_flight_(false) {
-  }
+      rpc_in_flight_(false) {}
 
   // Initialize channel.
   // Returns OK if successful, error indication otherwise.
-  Status Init(RuntimeState* state);
+  Status Init(RuntimeState* state) WARN_UNUSED_RESULT;
 
   // Copies a single row into this channel's output buffer and flushes buffer
   // if it reaches capacity.
   // Returns error status if any of the preceding rpcs failed, OK otherwise.
-  Status AddRow(TupleRow* row);
+  Status AddRow(TupleRow* row) WARN_UNUSED_RESULT;
 
   // Asynchronously sends a row batch.
   // Returns the status of the most recently finished TransmitData
   // rpc (or OK if there wasn't one that hasn't been reported yet).
-  Status SendBatch(TRowBatch* batch);
+  Status SendBatch(TRowBatch* batch) WARN_UNUSED_RESULT;
 
   // Return status of last TransmitData rpc (initiated by the most recent call
   // to either SendBatch() or SendCurrentBatch()).
-  Status GetSendStatus();
+  Status GetSendStatus() WARN_UNUSED_RESULT;
 
   // Waits for the rpc thread pool to finish the current rpc.
   void WaitForRpc();
@@ -106,7 +105,7 @@ class DataStreamSender::Channel : public CacheLineAligned {
   void Teardown(RuntimeState* state);
 
   // Flushes any buffered row batches and sends the EOS RPC to close the channel.
-  Status FlushAndSendEos(RuntimeState* state);
+  Status FlushAndSendEos(RuntimeState* state) WARN_UNUSED_RESULT;
 
   int64_t num_data_bytes_sent() const { return num_data_bytes_sent_; }
   TRowBatch* thrift_batch() { return &thrift_batch_; }
@@ -115,7 +114,7 @@ class DataStreamSender::Channel : public CacheLineAligned {
   DataStreamSender* parent_;
   int buffer_size_;
 
-  const RowDescriptor& row_desc_;
+  const RowDescriptor* row_desc_;
   TNetworkAddress address_;
   TUniqueId fragment_instance_id_;
   PlanNodeId dest_node_id_;
@@ -159,7 +158,7 @@ class DataStreamSender::Channel : public CacheLineAligned {
 Status DataStreamSender::Channel::Init(RuntimeState* state) {
   runtime_state_ = state;
   // TODO: figure out how to size batch_
-  int capacity = max(1, buffer_size_ / max(row_desc_.GetRowSize(), 1));
+  int capacity = max(1, buffer_size_ / max(row_desc_->GetRowSize(), 1));
   batch_.reset(new RowBatch(row_desc_, capacity, parent_->mem_tracker()));
   return Status::OK();
 }
@@ -250,7 +249,7 @@ Status DataStreamSender::Channel::AddRow(TupleRow* row) {
     RETURN_IF_ERROR(SendCurrentBatch());
   }
   TupleRow* dest = batch_->GetRow(batch_->AddRow());
-  const vector<TupleDescriptor*>& descs = row_desc_.tuple_descriptors();
+  const vector<TupleDescriptor*>& descs = row_desc_->tuple_descriptors();
   for (int i = 0; i < descs.size(); ++i) {
     if (UNLIKELY(row->GetTuple(i) == NULL)) {
       dest->SetTuple(i, NULL);
@@ -325,12 +324,12 @@ void DataStreamSender::Channel::Teardown(RuntimeState* state) {
   batch_.reset();
 }
 
-DataStreamSender::DataStreamSender(ObjectPool* pool, int sender_id,
-    const RowDescriptor& row_desc, const TDataStreamSink& sink,
-    const vector<TPlanFragmentDestination>& destinations,
+DataStreamSender::DataStreamSender(int sender_id, const RowDescriptor* row_desc,
+    const TDataStreamSink& sink, const vector<TPlanFragmentDestination>& destinations,
     int per_channel_buffer_size)
   : DataSink(row_desc),
     sender_id_(sender_id),
+    partition_type_(sink.output_partition.type),
     current_channel_idx_(0),
     flushed_(false),
     closed_(false),
@@ -339,33 +338,26 @@ DataStreamSender::DataStreamSender(ObjectPool* pool, int sender_id,
     thrift_transmit_timer_(NULL),
     bytes_sent_counter_(NULL),
     total_sent_rows_counter_(NULL),
-    dest_node_id_(sink.dest_node_id) {
+    dest_node_id_(sink.dest_node_id),
+    next_unknown_partition_(0) {
   DCHECK_GT(destinations.size(), 0);
   DCHECK(sink.output_partition.type == TPartitionType::UNPARTITIONED
       || sink.output_partition.type == TPartitionType::HASH_PARTITIONED
-      || sink.output_partition.type == TPartitionType::RANDOM);
-  broadcast_ = sink.output_partition.type == TPartitionType::UNPARTITIONED;
-  random_ = sink.output_partition.type == TPartitionType::RANDOM;
+      || sink.output_partition.type == TPartitionType::RANDOM
+      || sink.output_partition.type == TPartitionType::KUDU);
   // TODO: use something like google3's linked_ptr here (scoped_ptr isn't copyable)
   for (int i = 0; i < destinations.size(); ++i) {
     channels_.push_back(
         new Channel(this, row_desc, destinations[i].server,
-                    destinations[i].fragment_instance_id,
-                    sink.dest_node_id, per_channel_buffer_size));
+            destinations[i].fragment_instance_id, sink.dest_node_id,
+            per_channel_buffer_size));
   }
 
-  if (broadcast_ || random_) {
+  if (partition_type_ == TPartitionType::UNPARTITIONED
+      || partition_type_ == TPartitionType::RANDOM) {
     // Randomize the order we open/transmit to channels to avoid thundering herd problems.
     srand(reinterpret_cast<uint64_t>(this));
     random_shuffle(channels_.begin(), channels_.end());
-  }
-
-  if (sink.output_partition.type == TPartitionType::HASH_PARTITIONED) {
-    // TODO: move this to Init()? would need to save 'sink' somewhere
-    Status status =
-        Expr::CreateExprTrees(pool, sink.output_partition.partition_exprs,
-                              &partition_expr_ctxs_);
-    DCHECK(status.ok());
   }
 }
 
@@ -381,14 +373,23 @@ DataStreamSender::~DataStreamSender() {
   }
 }
 
+Status DataStreamSender::Init(const vector<TExpr>& thrift_output_exprs,
+    const TDataSink& tsink, RuntimeState* state) {
+  DCHECK(tsink.__isset.stream_sink);
+  if (partition_type_ == TPartitionType::HASH_PARTITIONED ||
+      partition_type_ == TPartitionType::KUDU) {
+    RETURN_IF_ERROR(ScalarExpr::Create(tsink.stream_sink.output_partition.partition_exprs,
+        *row_desc_, state, &partition_exprs_));
+  }
+  return Status::OK();
+}
+
 Status DataStreamSender::Prepare(RuntimeState* state, MemTracker* parent_mem_tracker) {
   RETURN_IF_ERROR(DataSink::Prepare(state, parent_mem_tracker));
   state_ = state;
   SCOPED_TIMER(profile_->total_time_counter());
-
-  RETURN_IF_ERROR(
-      Expr::Prepare(partition_expr_ctxs_, state, row_desc_, mem_tracker_.get()));
-
+  RETURN_IF_ERROR(ScalarExprEvaluator::Create(partition_exprs_, state,
+      state->obj_pool(), expr_mem_pool(), &partition_expr_evals_));
   bytes_sent_counter_ = ADD_COUNTER(profile(), "BytesSent", TUnit::BYTES);
   uncompressed_bytes_counter_ =
       ADD_COUNTER(profile(), "UncompressedRowBatchSize", TUnit::BYTES);
@@ -412,7 +413,7 @@ Status DataStreamSender::Prepare(RuntimeState* state, MemTracker* parent_mem_tra
 }
 
 Status DataStreamSender::Open(RuntimeState* state) {
-  return Expr::Open(partition_expr_ctxs_, state);
+  return ScalarExprEvaluator::Open(partition_expr_evals_, state);
 }
 
 Status DataStreamSender::Send(RuntimeState* state, RowBatch* batch) {
@@ -420,7 +421,7 @@ Status DataStreamSender::Send(RuntimeState* state, RowBatch* batch) {
   DCHECK(!flushed_);
 
   if (batch->num_rows() == 0) return Status::OK();
-  if (broadcast_ || channels_.size() == 1) {
+  if (partition_type_ == TPartitionType::UNPARTITIONED || channels_.size() == 1) {
     // current_thrift_batch_ is *not* the one that was written by the last call
     // to Serialize()
     RETURN_IF_ERROR(SerializeBatch(batch, current_thrift_batch_, channels_.size()));
@@ -431,7 +432,7 @@ Status DataStreamSender::Send(RuntimeState* state, RowBatch* batch) {
     }
     current_thrift_batch_ =
         (current_thrift_batch_ == &thrift_batch1_ ? &thrift_batch2_ : &thrift_batch1_);
-  } else if (random_) {
+  } else if (partition_type_ == TPartitionType::RANDOM) {
     // Round-robin batches among channels. Wait for the current channel to finish its
     // rpc before overwriting its batch.
     Channel* current_channel = channels_[current_channel_idx_];
@@ -439,27 +440,45 @@ Status DataStreamSender::Send(RuntimeState* state, RowBatch* batch) {
     RETURN_IF_ERROR(SerializeBatch(batch, current_channel->thrift_batch()));
     RETURN_IF_ERROR(current_channel->SendBatch(current_channel->thrift_batch()));
     current_channel_idx_ = (current_channel_idx_ + 1) % channels_.size();
+  } else if (partition_type_ == TPartitionType::KUDU) {
+    DCHECK_EQ(partition_expr_evals_.size(), 1);
+    int num_channels = channels_.size();
+    for (int i = 0; i < batch->num_rows(); ++i) {
+      TupleRow* row = batch->GetRow(i);
+      int32_t partition =
+          *reinterpret_cast<int32_t*>(partition_expr_evals_[0]->GetValue(row));
+      if (partition < 0) {
+        // This row doesn't coorespond to a partition, e.g. it's outside the given ranges.
+        partition = next_unknown_partition_;
+        ++next_unknown_partition_;
+      }
+      RETURN_IF_ERROR(channels_[partition % num_channels]->AddRow(row));
+    }
   } else {
+    DCHECK(partition_type_ == TPartitionType::HASH_PARTITIONED);
     // hash-partition batch's rows across channels
+    // TODO: encapsulate this in an Expr as we've done for Kudu above and remove this case
+    // once we have codegen here.
     int num_channels = channels_.size();
     for (int i = 0; i < batch->num_rows(); ++i) {
       TupleRow* row = batch->GetRow(i);
       uint32_t hash_val = HashUtil::FNV_SEED;
-      for (int i = 0; i < partition_expr_ctxs_.size(); ++i) {
-        ExprContext* ctx = partition_expr_ctxs_[i];
-        void* partition_val = ctx->GetValue(row);
+      for (int i = 0; i < partition_exprs_.size(); ++i) {
+        ScalarExprEvaluator* eval = partition_expr_evals_[i];
+        void* partition_val = eval->GetValue(row);
         // We can't use the crc hash function here because it does not result
         // in uncorrelated hashes with different seeds.  Instead we must use
         // fnv hash.
         // TODO: fix crc hash/GetHashValue()
-        hash_val =
-            RawValue::GetHashValueFnv(partition_val, ctx->root()->type(), hash_val);
+        DCHECK(&partition_expr_evals_[i]->root() == partition_exprs_[i]);
+        hash_val = RawValue::GetHashValueFnv(
+            partition_val, partition_exprs_[i]->type(), hash_val);
       }
-      ExprContext::FreeLocalAllocations(partition_expr_ctxs_);
       RETURN_IF_ERROR(channels_[hash_val % num_channels]->AddRow(row));
     }
   }
   COUNTER_ADD(total_sent_rows_counter_, batch->num_rows());
+  ScalarExprEvaluator::FreeLocalAllocations(partition_expr_evals_);
   RETURN_IF_ERROR(state->CheckQueryState());
   return Status::OK();
 }
@@ -482,7 +501,8 @@ void DataStreamSender::Close(RuntimeState* state) {
   for (int i = 0; i < channels_.size(); ++i) {
     channels_[i]->Teardown(state);
   }
-  Expr::Close(partition_expr_ctxs_, state);
+  ScalarExprEvaluator::Close(partition_expr_evals_, state);
+  ScalarExpr::Close(partition_exprs_);
   DataSink::Close(state);
   closed_ = true;
 }

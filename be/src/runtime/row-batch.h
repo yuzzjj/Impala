@@ -85,15 +85,15 @@ class RowBatch {
   /// Create RowBatch for a maximum of 'capacity' rows of tuples specified
   /// by 'row_desc'.
   /// tracker cannot be NULL.
-  RowBatch(const RowDescriptor& row_desc, int capacity, MemTracker* tracker);
+  RowBatch(const RowDescriptor* row_desc, int capacity, MemTracker* tracker);
 
   /// Populate a row batch from input_batch by copying input_batch's
   /// tuple_data into the row batch's mempool and converting all offsets
   /// in the data back into pointers.
   /// TODO: figure out how to transfer the data from input_batch to this RowBatch
   /// (so that we don't need to make yet another copy)
-  RowBatch(const RowDescriptor& row_desc, const TRowBatch& input_batch,
-      MemTracker* tracker);
+  RowBatch(
+      const RowDescriptor* row_desc, const TRowBatch& input_batch, MemTracker* tracker);
 
   /// Releases all resources accumulated at this row batch.  This includes
   ///  - tuple_ptrs
@@ -214,7 +214,7 @@ class RowBatch {
   void Reset();
 
   /// Add io buffer to this row batch.
-  void AddIoBuffer(DiskIoMgr::BufferDescriptor* buffer);
+  void AddIoBuffer(std::unique_ptr<DiskIoMgr::BufferDescriptor> buffer);
 
   /// Adds a block to this row batch. The block must be pinned. The blocks must be
   /// deleted when freeing resources. The block's memory remains accounted against
@@ -230,8 +230,8 @@ class RowBatch {
   /// for further explanation).
   /// TODO: IMPALA-4179: after IMPALA-3200, simplify the ownership transfer model and
   /// make it consistent between buffers and I/O buffers.
-  void AddBuffer(
-      BufferPool::ClientHandle* client, BufferPool::BufferHandle buffer, FlushMode flush);
+  void AddBuffer(BufferPool::ClientHandle* client, BufferPool::BufferHandle&& buffer,
+      FlushMode flush);
 
   /// Used by an operator to indicate that it cannot produce more rows until the
   /// resources that it has attached to the row batch are freed or acquired by an
@@ -321,7 +321,7 @@ class RowBatch {
     return tuple_ptrs_size_ / (num_tuples_per_row_ * sizeof(Tuple*));
   }
 
-  const RowDescriptor& row_desc() const { return row_desc_; }
+  const RowDescriptor* row_desc() const { return row_desc_; }
 
   /// Max memory that this row batch can accumulate before it is considered at capacity.
   /// This is a soft capacity: row batches may exceed the capacity, preferably only by a
@@ -338,8 +338,13 @@ class RowBatch {
   /// Returns Status::MEM_LIMIT_EXCEEDED and sets 'buffer' to NULL if a memory limit would
   /// have been exceeded. 'state' is used to log the error.
   /// On success, sets 'buffer_size' to the size in bytes and 'buffer' to the buffer.
-  Status ResizeAndAllocateTupleBuffer(RuntimeState* state, int64_t* buffer_size,
-       uint8_t** buffer);
+  Status ResizeAndAllocateTupleBuffer(
+      RuntimeState* state, int64_t* buffer_size, uint8_t** buffer);
+
+  /// Same as above except allocates buffer for 'capacity' rows with fixed-length portions
+  /// of 'row_size' bytes each from 'pool', instead of using RowBatch's member variables.
+  static Status ResizeAndAllocateTupleBuffer(RuntimeState* state, MemPool* pool,
+      int row_size, int* capacity, int64_t* buffer_size, uint8_t** buffer);
 
   /// Helper function to log the batch's rows if VLOG_ROW is enabled. 'context' is a
   /// string to prepend to the log message.
@@ -419,15 +424,16 @@ class RowBatch {
   // Less frequently used members that are not accessed on performance-critical paths
   // should go below here.
 
-  /// Full row descriptor for rows in this batch.
-  RowDescriptor row_desc_;
+  /// Full row descriptor for rows in this batch. Owned by the exec node that produced
+  /// this batch.
+  const RowDescriptor* row_desc_;
 
   MemTracker* mem_tracker_;  // not owned
 
   /// IO buffers current owned by this row batch. Ownership of IO buffers transfer
   /// between row batches. Any IO buffer will be owned by at most one row batch
   /// (i.e. they are not ref counted) so most row batches don't own any.
-  std::vector<DiskIoMgr::BufferDescriptor*> io_buffers_;
+  std::vector<std::unique_ptr<DiskIoMgr::BufferDescriptor>> io_buffers_;
 
   /// Blocks attached to this row batch. The underlying memory and block manager client
   /// are owned by the BufferedBlockMgr.

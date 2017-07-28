@@ -40,17 +40,28 @@ import org.apache.kudu.ColumnSchema;
  *  - desired block size
  */
 public class KuduColumn extends Column {
+  // The name of the column as it appears in Kudu, i.e. not converted to lower case.
+  private final String kuduName_;
   private final boolean isKey_;
   private final boolean isNullable_;
   private final Encoding encoding_;
   private final CompressionAlgorithm compression_;
-  private final LiteralExpr defaultValue_;
   private final int blockSize_;
+
+  // Default value for this column. The expr is a literal of the target column type
+  // post-analysis. For TIMESTAMPs those are BIGINT values storing the unix time in
+  // microseconds. Code that references this may need to handle TIMESTAMP specially.
+  // For that reason, this isn't exposed publicly, e.g. getDefaultValueSql() is used
+  // to hide this complexity externally.
+  private final LiteralExpr defaultValue_;
 
   private KuduColumn(String name, Type type, boolean isKey, boolean isNullable,
       Encoding encoding, CompressionAlgorithm compression, LiteralExpr defaultValue,
       int blockSize, String comment, int position) {
-    super(name, type, comment, position);
+    super(name.toLowerCase(), type, comment, position);
+    Preconditions.checkArgument(defaultValue == null || type == defaultValue.getType()
+        || (type.isTimestamp() && defaultValue.getType().isIntegerType()));
+    kuduName_ = name;
     isKey_ = isKey;
     isNullable_ = isNullable;
     encoding_ = encoding;
@@ -65,8 +76,9 @@ public class KuduColumn extends Column {
     Object defaultValue = colSchema.getDefaultValue();
     LiteralExpr defaultValueExpr = null;
     if (defaultValue != null) {
+      Type defaultValueType = type.isTimestamp() ? Type.BIGINT : type;
       try {
-        defaultValueExpr = LiteralExpr.create(defaultValue.toString(), type);
+        defaultValueExpr = LiteralExpr.create(defaultValue.toString(), defaultValueType);
       } catch (AnalysisException e) {
         throw new ImpalaRuntimeException(String.format("Error parsing default value: " +
             "'%s'", defaultValue), e);
@@ -92,29 +104,54 @@ public class KuduColumn extends Column {
     }
     LiteralExpr defaultValue = null;
     if (column.isSetDefault_value()) {
+      Type defaultValueType = columnType.isTimestamp() ? Type.BIGINT : columnType;
       defaultValue =
-          LiteralExpr.fromThrift(column.getDefault_value().getNodes().get(0), columnType);
+          LiteralExpr.fromThrift(column.getDefault_value().getNodes().get(0),
+              defaultValueType);
     }
     int blockSize = 0;
     if (column.isSetBlock_size()) blockSize = column.getBlock_size();
-    return new KuduColumn(column.getColumnName(), columnType, column.isIs_key(),
+    return new KuduColumn(column.getKudu_column_name(), columnType, column.isIs_key(),
         column.isIs_nullable(), encoding, compression, defaultValue, blockSize, null,
         position);
   }
 
+  public String getKuduName() { return kuduName_; }
   public boolean isKey() { return isKey_; }
   public boolean isNullable() { return isNullable_; }
   public Encoding getEncoding() { return encoding_; }
   public CompressionAlgorithm getCompression() { return compression_; }
-  public LiteralExpr getDefaultValue() { return defaultValue_; }
-  public boolean hasDefaultValue() { return defaultValue_ != null; }
   public int getBlockSize() { return blockSize_; }
+  public boolean hasDefaultValue() { return defaultValue_ != null; }
+
+  /**
+   * Returns a SQL string representation of the default value. Similar to calling
+   * LiteralExpr.toSql(), but this handles TIMESTAMPs specially because
+   * TIMESTAMP default values are stored as BIGINTs representing unix time in
+   * microseconds. For TIMESTAMP columns, the returned string is the function to
+   * convert unix times in microseconds to TIMESTAMPs with the value as its parameter.
+   */
+  public String getDefaultValueSql() {
+    if (!hasDefaultValue()) return null;
+    if (!type_.isTimestamp()) return defaultValue_.toSql();
+    return "unix_micros_to_utc_timestamp(" + defaultValue_.getStringValue() + ")";
+  }
+
+  /**
+   * Returns a string representation of the default value. This calls getStringValue()
+   * but is exposed so defaultValue_ can be encapsulated as it has special handling for
+   * TIMESTAMP column types.
+   */
+  public String getDefaultValueString() {
+    if (!hasDefaultValue()) return null;
+    return defaultValue_.getStringValue();
+  }
 
   @Override
   public TColumn toThrift() {
     TColumn colDesc = new TColumn(name_, type_.toThrift());
     KuduUtil.setColumnOptions(colDesc, isKey_, isNullable_, encoding_, compression_,
-        defaultValue_, blockSize_);
+        defaultValue_, blockSize_, kuduName_);
     if (comment_ != null) colDesc.setComment(comment_);
     colDesc.setCol_stats(getStats().toThrift());
     colDesc.setPosition(position_);

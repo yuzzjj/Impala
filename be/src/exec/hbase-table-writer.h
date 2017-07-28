@@ -45,7 +45,7 @@ class RowBatch;
 class HBaseTableWriter {
  public:
   HBaseTableWriter(HBaseTableDescriptor* table_desc,
-                   const std::vector<ExprContext*>& output_expr_ctxs,
+                   const std::vector<ScalarExprEvaluator*>& output_expr_evals,
                    RuntimeProfile* profile);
   Status AppendRows(RowBatch* batch);
 
@@ -89,11 +89,12 @@ class HBaseTableWriter {
   /// up using close before the table can be discarded.
   boost::scoped_ptr<HBaseTable> table_;
 
-  /// The expressions that are run to create tuples to be written to hbase.
-  const std::vector<ExprContext*> output_expr_ctxs_;
-
-  /// output_exprs_byte_sizes_[i] is the byte size of output_expr_ctxs_[i]->root()'s type.
+  /// Contains the byte size of output_expr_evals_[i]->root()'s type.
   std::vector<int> output_exprs_byte_sizes_;
+
+  /// Reference to the evaluators of expressions which generate the output value.
+  /// The evaluators are owned by the sink which owns this table writer.
+  const std::vector<ScalarExprEvaluator*>& output_expr_evals_;
 
   /// jni ArrayList<Put>
   jobject put_list_;
@@ -104,8 +105,8 @@ class HBaseTableWriter {
   /// new Put(byte[])
   static jmethodID put_ctor_;
 
-  /// Put#add(byte[], byte[], byte[])
-  static jmethodID put_add_id_;
+  /// Put#addColumn(byte[], byte[], byte[])
+  static jmethodID put_addcolumn_id_;
 
   /// java.util.ArrayList
   static jclass list_cl_;

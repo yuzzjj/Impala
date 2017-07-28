@@ -72,21 +72,20 @@ fi
 # moving to a different build of the toolchain, e.g. when a version is bumped or a
 # compile option is changed. The build id can be found in the output of the toolchain
 # build jobs, it is constructed from the build number and toolchain git hash prefix.
-export IMPALA_TOOLCHAIN_BUILD_ID=374-72f1e9bb85
-
+export IMPALA_TOOLCHAIN_BUILD_ID=426-d9b44a854b
 # Versions of toolchain dependencies.
 # -----------------------------------
 export IMPALA_AVRO_VERSION=1.7.4-p4
 export IMPALA_BINUTILS_VERSION=2.26.1
-export IMPALA_BOOST_VERSION=1.57.0-p1
-export IMPALA_BREAKPAD_VERSION=88e5b2c8806bac3f2c80d2fe80094be5bd371601-p2
+export IMPALA_BOOST_VERSION=1.57.0-p3
+export IMPALA_BREAKPAD_VERSION=ffe3e478657dc7126fca6329dfcedc49f4c726d9-p2
 export IMPALA_BZIP2_VERSION=1.0.6-p2
 export IMPALA_CMAKE_VERSION=3.2.3-p1
-export IMPALA_CRCUTIL_VERSION=440ba7babeff77ffad992df3a10c767f184e946e
+export IMPALA_CRCUTIL_VERSION=440ba7babeff77ffad992df3a10c767f184e946e-p1
 export IMPALA_CYRUS_SASL_VERSION=2.1.23
 export IMPALA_FLATBUFFERS_VERSION=1.6.0
 export IMPALA_GCC_VERSION=4.9.2
-export IMPALA_GFLAGS_VERSION=2.2.0
+export IMPALA_GFLAGS_VERSION=2.2.0-p1
 export IMPALA_GLOG_VERSION=0.3.4-p2
 export IMPALA_GPERFTOOLS_VERSION=2.5
 export IMPALA_GTEST_VERSION=1.6.0
@@ -108,7 +107,7 @@ export IMPALA_SQUEASEL_VERSION=3.3
 # TPC utilities used for test/benchmark data generation.
 export IMPALA_TPC_DS_VERSION=2.1.0
 export IMPALA_TPC_H_VERSION=2.17.0
-export IMPALA_THRIFT_VERSION=0.9.0-p8
+export IMPALA_THRIFT_VERSION=0.9.0-p9
 export IMPALA_THRIFT_JAVA_VERSION=0.9.0
 export IMPALA_ZLIB_VERSION=1.2.8
 
@@ -121,19 +120,19 @@ if [[ $OSTYPE == "darwin"* ]]; then
 fi
 
 # Kudu version in the toolchain; provides libkudu_client.so and minicluster binaries.
-export IMPALA_KUDU_VERSION=16dd6e4
+export IMPALA_KUDU_VERSION=27854fd
 
 # Kudu version used to identify Java client jar from maven
-export KUDU_JAVA_VERSION=1.4.0-cdh5.12.0-SNAPSHOT
+export KUDU_JAVA_VERSION=1.5.0-cdh5.13.0-SNAPSHOT
 
 # Versions of Hadoop ecosystem dependencies.
 # ------------------------------------------
 export CDH_MAJOR_VERSION=5
-export IMPALA_HADOOP_VERSION=2.6.0-cdh5.12.0-SNAPSHOT
-export IMPALA_HBASE_VERSION=1.2.0-cdh5.12.0-SNAPSHOT
-export IMPALA_HIVE_VERSION=1.1.0-cdh5.12.0-SNAPSHOT
-export IMPALA_SENTRY_VERSION=1.5.1-cdh5.12.0-SNAPSHOT
-export IMPALA_PARQUET_VERSION=1.5.0-cdh5.12.0-SNAPSHOT
+export IMPALA_HADOOP_VERSION=2.6.0-cdh5.13.0-SNAPSHOT
+export IMPALA_HBASE_VERSION=1.2.0-cdh5.13.0-SNAPSHOT
+export IMPALA_HIVE_VERSION=1.1.0-cdh5.13.0-SNAPSHOT
+export IMPALA_SENTRY_VERSION=1.5.1-cdh5.13.0-SNAPSHOT
+export IMPALA_PARQUET_VERSION=1.5.0-cdh5.13.0-SNAPSHOT
 export IMPALA_LLAMA_MINIKDC_VERSION=1.0.0
 
 # Source the branch and local config override files here to override any
@@ -241,6 +240,10 @@ export FILESYSTEM_PREFIX="${FILESYSTEM_PREFIX-}"
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY-DummySecretAccessKey}"
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID-DummyAccessKeyId}"
 export S3_BUCKET="${S3_BUCKET-}"
+export azure_tenant_id="${azure_tenant_id-DummyAdlsTenantId}"
+export azure_client_id="${azure_client_id-DummyAdlsClientId}"
+export azure_client_secret="${azure_client_secret-DummyAdlsClientSecret}"
+export azure_data_lake_store_name="${azure_data_lake_store_name-}"
 export HDFS_REPLICATION="${HDFS_REPLICATION-3}"
 export ISILON_NAMENODE="${ISILON_NAMENODE-}"
 export DEFAULT_FS="${DEFAULT_FS-hdfs://localhost:20500}"
@@ -268,6 +271,22 @@ if [ "${TARGET_FILESYSTEM}" = "s3" ]; then
     return 1
   fi
   DEFAULT_FS="s3a://${S3_BUCKET}"
+  export DEFAULT_FS
+elif [ "${TARGET_FILESYSTEM}" = "adls" ]; then
+  # Basic error checking
+  if [[ "${azure_client_id}" = "DummyAdlsClientId" ||\
+        "${azure_tenant_id}" = "DummyAdlsTenantId" ||\
+        "${azure_client_secret}" = "DummyAdlsClientSecret" ]]; then
+    echo "All 3 of the following need to be assigned valid values and belong
+      to the owner of the ADLS store in order to access the filesystem:
+      azure_client_id, azure_tenant_id, azure_client_secret."
+    return 1
+  fi
+  if [[ "${azure_data_lake_store_name}" = "" ]]; then
+    echo "azure_data_lake_store_name cannot be an empty string for ADLS"
+    return 1
+  fi
+  DEFAULT_FS="adl://${azure_data_lake_store_name}.azuredatalakestore.net"
   export DEFAULT_FS
 elif [ "${TARGET_FILESYSTEM}" = "isilon" ]; then
   if [ "${ISILON_NAMENODE}" = "" ]; then
@@ -302,7 +321,8 @@ elif [ "${TARGET_FILESYSTEM}" != "hdfs" ]; then
 fi
 
 # Directories where local cluster logs will go when running tests or loading data
-export IMPALA_LOGS_DIR="${IMPALA_HOME}/logs"
+DEFAULT_LOGS_DIR="${IMPALA_HOME}/logs"  # override by setting IMPALA_LOGS_DIR env var
+export IMPALA_LOGS_DIR="${IMPALA_LOGS_DIR:-$DEFAULT_LOGS_DIR}"
 export IMPALA_CLUSTER_LOGS_DIR="${IMPALA_LOGS_DIR}/cluster"
 export IMPALA_DATA_LOADING_LOGS_DIR="${IMPALA_LOGS_DIR}/data_loading"
 export IMPALA_DATA_LOADING_SQL_DIR="${IMPALA_DATA_LOADING_LOGS_DIR}/sql"
@@ -352,8 +372,8 @@ export HADOOP_HOME="$CDH_COMPONENTS_HOME/hadoop-${IMPALA_HADOOP_VERSION}/"
 export HADOOP_CONF_DIR="$IMPALA_FE_DIR/src/test/resources"
 # The include and lib paths are needed to pick up hdfs.h and libhdfs.*
 # Allow overriding in case we want to point to a package/install with a different layout.
-export HADOOP_INCLUDE_DIR=${HADOOP_INCLUDE_DIR:-"${HADOOP_HOME}/include"}
-export HADOOP_LIB_DIR=${HADOOP_LIB_DIR:-"${HADOOP_HOME}/lib"}
+export HADOOP_INCLUDE_DIR=${HADOOP_INCLUDE_DIR_OVERRIDE:-"${HADOOP_HOME}/include"}
+export HADOOP_LIB_DIR=${HADOOP_LIB_DIR_OVERRIDE:-"${HADOOP_HOME}/lib"}
 
 # Please note that the * is inside quotes, thus it won't get expanded by bash but
 # by java, see "Understanding class path wildcards" at http://goo.gl/f0cfft
@@ -369,11 +389,13 @@ export MINIKDC_HOME="$CDH_COMPONENTS_HOME/llama-minikdc-${IMPALA_LLAMA_MINIKDC_V
 export SENTRY_HOME="$CDH_COMPONENTS_HOME/sentry-${IMPALA_SENTRY_VERSION}"
 export SENTRY_CONF_DIR="$IMPALA_HOME/fe/src/test/resources"
 
+# Extract the first component of the hive version.
+export IMPALA_HIVE_MAJOR_VERSION=$(echo "$IMPALA_HIVE_VERSION" | cut -d . -f 1)
 export HIVE_HOME="$CDH_COMPONENTS_HOME/hive-${IMPALA_HIVE_VERSION}/"
 export PATH="$HIVE_HOME/bin:$PATH"
 # Allow overriding of Hive source location in case we want to build Impala without
 # a complete Hive build.
-export HIVE_SRC_DIR=${HIVE_SRC_DIR:-"${HIVE_HOME}/src"}
+export HIVE_SRC_DIR=${HIVE_SRC_DIR_OVERRIDE:-"${HIVE_HOME}/src"}
 export HIVE_CONF_DIR="$IMPALA_FE_DIR/src/test/resources"
 
 # Hive looks for jar files in a single directory from HIVE_AUX_JARS_PATH plus
@@ -434,7 +456,7 @@ export LIBHDFS_OPTS="${LIBHDFS_OPTS:-} -Djava.library.path=${HADOOP_LIB_DIR}/nat
 LIBHDFS_OPTS="${LIBHDFS_OPTS}:${IMPALA_HOME}/be/build/debug/service"
 # IMPALA-5080: Our use of PermGen space sometimes exceeds the default maximum while
 # running tests that load UDF jars.
-LIBHDFS_OPTS="${LIBHDFS_OPTS} -XX:MaxPermSize=128mb"
+LIBHDFS_OPTS="${LIBHDFS_OPTS} -XX:MaxPermSize=128m"
 
 export ARTISTIC_STYLE_OPTIONS="$IMPALA_BE_DIR/.astylerc"
 
